@@ -1,0 +1,6 @@
+I have a workflow to analyze the trajectory of the system.
+My approaches are first we find the endpoints of the fragements in 
+MD analysis package them have call residue so we can simply use resid 1 ,2 ,3 to obtain them. 
+Then we calculatet the endpoints of these residues. These endpoints are poteintailly targets to plot the distance , 
+finding the correlation of the distances between endpoints and volume, 
+labeling  the crucial frames the structure shrinkage or expandsion and the guests entering the nano cube center.
