@@ -71,221 +71,30 @@ except ImportError:
 
 
 # ============================================================================
-# Class: AlignedTrajectory
-# Purpose: Store and manage aligned MDAnalysis Universe
-# ============================================================================
-
-class AlignedTrajectory:
-    """Store and manage an aligned MDAnalysis Universe.
-    
-    By default, aligns the trajectory to the first frame (trajectory[0]) of the main structure.
-    Can also align first and last frames for comparison.
-    """
-    
-    def __init__(self, 
-                 universe: mda.Universe,
-                 align_sel: Optional[str] = None,
-                 ref_frame: int = 0,
-                 align_first_and_last: bool = True,
-                 in_memory: bool = True):
-        """
-        Initialize AlignedTrajectory with a universe and perform alignment.
-        
-        By default, aligns the trajectory to the first frame (trajectory[0]) and 
-        creates separate aligned universes for first and last frames.
-        
-        Args:
-            universe: MDAnalysis Universe to align
-            align_sel: Selection string for alignment (default: "not water and not name I and not name Na+")
-            ref_frame: Reference frame index for alignment (default: 0, first frame)
-            align_first_and_last: If True, also create separate universes for first 
-                                 and last frames aligned to each other (default: True)
-            in_memory: Whether to align in memory (default: True)
-        """
-        self.original_universe = universe
-        self.align_sel = align_sel if align_sel is not None else "not water and not name I and not name Na+"
-        self.ref_frame = ref_frame
-        self.align_first_and_last = align_first_and_last
-        self.in_memory = in_memory
-        self.aligned_universe: Optional[mda.Universe] = None
-        self.first_frame_universe: Optional[mda.Universe] = None
-        self.last_frame_universe: Optional[mda.Universe] = None
-        self._alignment_performed = False
-        
-        # Perform alignment
-        self.align()
-    
-    def align(self):
-        """Perform trajectory alignment."""
-        if self._alignment_performed and self.aligned_universe is not None:
-            return  # Already aligned
-        
-        try:
-            # Create a copy of the universe for alignment
-            # Use the same topology and trajectory files
-            if hasattr(self.original_universe, 'filename') and hasattr(self.original_universe.trajectory, 'filename'):
-                # If we have file paths, create new universe from files
-                self.aligned_universe = mda.Universe(
-                    self.original_universe.filename,
-                    self.original_universe.trajectory.filename
-                )
-            else:
-                # Otherwise, work with the universe in-place (will modify original)
-                # For safety, we'll create a copy by writing and reloading if possible
-                warnings.warn("Cannot create independent copy. Alignment will modify original universe.")
-                self.aligned_universe = self.original_universe
-            
-            # Perform alignment: align all frames to reference frame (default: frame 0)
-            align.AlignTraj(
-                self.aligned_universe, 
-                self.aligned_universe,
-                select=self.align_sel, 
-                ref_frame=self.ref_frame,
-                in_memory=self.in_memory
-            ).run()
-            
-            # If align_first_and_last is True, also create separate universes for first and last frames
-            if self.align_first_and_last:
-                # First frame universe (aligned to itself)
-                if hasattr(self.original_universe, 'filename') and hasattr(self.original_universe.trajectory, 'filename'):
-                    self.first_frame_universe = mda.Universe(
-                        self.original_universe.filename,
-                        self.original_universe.trajectory.filename
-                    )
-                    self.first_frame_universe.trajectory[0]
-                    align.AlignTraj(
-                        self.first_frame_universe,
-                        self.first_frame_universe,
-                        select=self.align_sel,
-                        ref_frame=0,
-                        in_memory=self.in_memory
-                    ).run()
-                
-                # Last frame universe (aligned to first frame)
-                if hasattr(self.original_universe, 'filename') and hasattr(self.original_universe.trajectory, 'filename'):
-                    self.last_frame_universe = mda.Universe(
-                        self.original_universe.filename,
-                        self.original_universe.trajectory.filename
-                    )
-                    # Align last frame universe to first frame universe
-                    self.last_frame_universe.trajectory[-1]
-                    if self.first_frame_universe is not None:
-                        align.AlignTraj(
-                            self.last_frame_universe,
-                            self.first_frame_universe,
-                            select=self.align_sel,
-                            ref_frame=0,
-                            in_memory=self.in_memory
-                        ).run()
-            
-            self._alignment_performed = True
-        except Exception as e:
-            warnings.warn(f"Alignment failed: {e}. Using original universe.")
-            self.aligned_universe = self.original_universe
-            self._alignment_performed = False
-    
-    def get_aligned_universe(self) -> mda.Universe:
-        """Get the aligned universe."""
-        if self.aligned_universe is None:
-            self.align()
-        return self.aligned_universe if self.aligned_universe is not None else self.original_universe
-    
-    def get_first_frame_universe(self) -> Optional[mda.Universe]:
-        """Get the universe with first frame aligned (only if align_first_and_last=True)."""
-        return self.first_frame_universe
-    
-    def get_last_frame_universe(self) -> Optional[mda.Universe]:
-        """Get the universe with last frame aligned to first (only if align_first_and_last=True)."""
-        return self.last_frame_universe
-    
-    def realign(self, align_sel: Optional[str] = None, ref_frame: Optional[int] = None):
-        """Realign the trajectory with new parameters."""
-        if align_sel is not None:
-            self.align_sel = align_sel
-        if ref_frame is not None:
-            self.ref_frame = ref_frame
-        
-        self._alignment_performed = False
-        self.aligned_universe = None
-        self.first_frame_universe = None
-        self.last_frame_universe = None
-        self.align()
-    
-    def __getattr__(self, name):
-        """Delegate attribute access to aligned_universe for convenience."""
-        if self.aligned_universe is None:
-            self.align()
-        if self.aligned_universe is not None:
-            return getattr(self.aligned_universe, name)
-        return getattr(self.original_universe, name)
-
-
-# ============================================================================
 # Class: TrajectoryMetrics
 # Purpose: Basic trajectory metric computations (RMSD, RMSF, Rg, contacts, PCA, strain)
 # ============================================================================
 
 class TrajectoryMetrics:
-    """Compute basic trajectory metrics like RMSD, RMSF, radius of gyration, etc.
+    """Compute basic trajectory metrics like RMSD, RMSF, radius of gyration, etc."""
     
-    Note: For accurate results, trajectories should be pre-aligned using AlignedTrajectory
-    before computing metrics. The compute_rmsf() and pca_on_fluctuations() methods
-    assume the trajectory is already aligned by default.
-    """
-    
-    def __init__(self):
-        """Initialize TrajectoryMetrics with storage for computed results."""
-        self.rmsd_cache: dict = {}
-        self.rmsf_cache: dict = {}
-        self.rg_cache: dict = {}
-        self.contact_cache: dict = {}
-        self.pca_cache: dict = {}
-        self.strain_cache: dict = {}
-        self._universe: Optional[mda.Universe] = None
-        self._alignment_sel: Optional[str] = None
-    
-    def set_universe(self, u: mda.Universe, align_sel: Optional[str] = None):
-        """Set the universe and alignment selection for caching."""
-        self._universe = u
-        self._alignment_sel = align_sel
-    
-    def compute_rmsd(self, u: mda.Universe, sel_str: str, ref_frame: int = 0) -> np.ndarray:
+    @staticmethod
+    def compute_rmsd(u: mda.Universe, sel_str: str, ref_frame: int = 0) -> np.ndarray:
         """Compute RMSD for each frame relative to reference frame."""
-        cache_key = (sel_str, ref_frame)
-        if cache_key in self.rmsd_cache:
-            return self.rmsd_cache[cache_key]
-        
         sel = u.select_atoms(sel_str)
         ref = sel.positions.copy()
         rmsds = []
         for ts in u.trajectory:
             R, rmsd_val = align.rotation_matrix(sel.positions, ref)
             rmsds.append(rmsd_val)
-        result = np.array(rmsds)
-        self.rmsd_cache[cache_key] = result
-        return result
+        return np.array(rmsds)
     
-    def compute_rmsf(self, u: mda.Universe, sel_str: str, aligned: bool = True) -> np.ndarray:
-        """Compute RMSF (per-atom root mean square fluctuation).
-        
-        Args:
-            u: MDAnalysis Universe (should be pre-aligned via AlignedTrajectory)
-            sel_str: Selection string for atoms to compute RMSF
-            aligned: If True, assumes trajectory is already aligned (default: True)
-                    If False, will align internally (not recommended)
-        """
-        cache_key = sel_str
-        if cache_key in self.rmsf_cache:
-            return self.rmsf_cache[cache_key]
-        
+    @staticmethod
+    def compute_rmsf(u: mda.Universe, sel_str: str) -> np.ndarray:
+        """Compute RMSF (per-atom root mean square fluctuation)."""
         sel = u.select_atoms(sel_str)
-        
-        # Only align if explicitly requested (trajectory should be pre-aligned)
-        if not aligned:
-            warnings.warn("Computing RMSF on unaligned trajectory. Consider using AlignedTrajectory first.")
-            with mda.lib.util.tempdir.in_tempdir():
-                align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
-        
+        with mda.lib.util.tempdir.in_tempdir():
+            align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
         coords = []
         for ts in u.trajectory:
             coords.append(sel.positions.copy())
@@ -293,15 +102,11 @@ class TrajectoryMetrics:
         mean = coords.mean(axis=0)
         diffsq = (coords - mean) ** 2
         rmsf = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
-        self.rmsf_cache[cache_key] = rmsf
         return rmsf
     
-    def radius_of_gyration(self, u: mda.Universe, sel_str: str) -> np.ndarray:
+    @staticmethod
+    def radius_of_gyration(u: mda.Universe, sel_str: str) -> np.ndarray:
         """Compute radius of gyration for each frame."""
-        cache_key = sel_str
-        if cache_key in self.rg_cache:
-            return self.rg_cache[cache_key]
-        
         sel = u.select_atoms(sel_str)
         rgs = []
         for ts in u.trajectory:
@@ -309,16 +114,11 @@ class TrajectoryMetrics:
             com = sel.center_of_mass()
             rg2 = ((coords - com) ** 2).sum(axis=1).mean()
             rgs.append(np.sqrt(rg2))
-        result = np.array(rgs)
-        self.rg_cache[cache_key] = result
-        return result
+        return np.array(rgs)
     
-    def contact_distances(self, u: mda.Universe, selA: str, selB: str) -> np.ndarray:
+    @staticmethod
+    def contact_distances(u: mda.Universe, selA: str, selB: str) -> np.ndarray:
         """Compute minimal contact distance between two selections for each frame."""
-        cache_key = (selA, selB)
-        if cache_key in self.contact_cache:
-            return self.contact_cache[cache_key]
-        
         A = u.select_atoms(selA)
         B = u.select_atoms(selB)
         if len(A) == 0 or len(B) == 0:
@@ -330,31 +130,13 @@ class TrajectoryMetrics:
             diff = da - db
             dd = np.sqrt((diff * diff).sum(axis=2))
             dists.append(dd.min())
-        result = np.array(dists)
-        self.contact_cache[cache_key] = result
-        return result
+        return np.array(dists)
     
-    def pca_on_fluctuations(self, u: mda.Universe, sel_str: str, n_components: int = 5, aligned: bool = True) -> Tuple[np.ndarray, PCA]:
-        """Return PC projections (T x n_comp) and the fitted PCA model.
-        
-        Args:
-            u: MDAnalysis Universe (should be pre-aligned via AlignedTrajectory)
-            sel_str: Selection string for atoms to use in PCA
-            n_components: Number of principal components to compute
-            aligned: If True, assumes trajectory is already aligned (default: True)
-                    If False, will align internally (not recommended)
-        """
-        cache_key = (sel_str, n_components)
-        if cache_key in self.pca_cache:
-            return self.pca_cache[cache_key]
-        
+    @staticmethod
+    def pca_on_fluctuations(u: mda.Universe, sel_str: str, n_components: int = 5) -> Tuple[np.ndarray, PCA]:
+        """Return PC projections (T x n_comp) and the fitted PCA model."""
         sel = u.select_atoms(sel_str)
-        
-        # Only align if explicitly requested (trajectory should be pre-aligned)
-        if not aligned:
-            warnings.warn("Computing PCA on unaligned trajectory. Consider using AlignedTrajectory first.")
-            align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
-        
+        align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
         coords = []
         for ts in u.trajectory:
             coords.append(sel.positions.copy().reshape(-1))
@@ -362,16 +144,11 @@ class TrajectoryMetrics:
         Xc = X - X.mean(axis=0)
         pca = PCA(n_components=n_components, svd_solver="auto")
         pcs = pca.fit_transform(Xc)
-        result = (pcs, pca)
-        self.pca_cache[cache_key] = result
-        return result
+        return pcs, pca
     
-    def local_affine_strain_proxy(self, u: mda.Universe, sel_str: str, window: int = 10, lag: int = 1) -> np.ndarray:
+    @staticmethod
+    def local_affine_strain_proxy(u: mda.Universe, sel_str: str, window: int = 10, lag: int = 1) -> np.ndarray:
         """Compute a lightweight proxy of local strain."""
-        cache_key = (sel_str, window, lag)
-        if cache_key in self.strain_cache:
-            return self.strain_cache[cache_key]
-        
         sel = u.select_atoms(sel_str)
         coords = []
         for ts in u.trajectory:
@@ -390,17 +167,7 @@ class TrajectoryMetrics:
             C = F.T @ F
             E = 0.5 * (C - np.eye(3))
             strain[t] = np.linalg.norm(E, ord='fro')
-        self.strain_cache[cache_key] = strain
         return strain
-    
-    def clear_cache(self):
-        """Clear all cached results."""
-        self.rmsd_cache.clear()
-        self.rmsf_cache.clear()
-        self.rg_cache.clear()
-        self.contact_cache.clear()
-        self.pca_cache.clear()
-        self.strain_cache.clear()
 
 
 # ============================================================================
@@ -411,22 +178,16 @@ class TrajectoryMetrics:
 class ClusteringAnalysis:
     """Perform clustering analysis and change-point detection on trajectory data."""
     
-    def __init__(self):
-        """Initialize ClusteringAnalysis with storage for computed results."""
-        self.clustering_results: dict = {}
-        self.change_points_cache: dict = {}
-        self.labels: Optional[np.ndarray] = None
-        self.medoids: Optional[np.ndarray] = None
-    
-    def zscore(self, x: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def zscore(x: np.ndarray) -> np.ndarray:
         """Compute z-score normalization."""
-        # Simple computation, no caching needed (zscore is fast)
         m, s = np.nanmean(x), np.nanstd(x)
         if s == 0 or np.isnan(s):
             return np.zeros_like(x)
         return (x - m) / s
     
-    def choose_k_by_silhouette(self, X, kmin=2, kmax=10) -> int:
+    @staticmethod
+    def choose_k_by_silhouette(X, kmin=2, kmax=10) -> int:
         """Choose optimal k for KMeans using silhouette score."""
         best_k, best_score = kmin, -1
         for k in range(kmin, min(kmax, len(X) - 1) + 1):
@@ -439,16 +200,9 @@ class ClusteringAnalysis:
                 best_k, best_score = k, score
         return best_k
     
-    def cluster_frames(self, embeddings: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    @staticmethod
+    def cluster_frames(embeddings: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Cluster frame embeddings (e.g., PCs). Returns (labels, medoid_indices)."""
-        cache_key = id(embeddings)
-        if cache_key in self.clustering_results:
-            cached_labels, cached_medoids, cached_id = self.clustering_results[cache_key]
-            if cached_id == id(embeddings) and np.array_equal(cached_labels.shape, (len(embeddings),)):
-                self.labels = cached_labels
-                self.medoids = cached_medoids
-                return cached_labels, cached_medoids
-        
         X = embeddings
         if HAS_HDBSCAN:
             clusterer = hdbscan.HDBSCAN(min_cluster_size=max(10, len(X)//100+1), min_samples=None)
@@ -461,10 +215,9 @@ class ClusteringAnalysis:
                 centroid = X[idx].mean(axis=0)
                 d = np.linalg.norm(X[idx] - centroid, axis=1)
                 medoids.append(idx[np.argmin(d)])
-            result_labels = labels
-            result_medoids = np.array(medoids, dtype=int)
+            return labels, np.array(medoids, dtype=int)
         else:
-            k = self.choose_k_by_silhouette(X)
+            k = ClusteringAnalysis.choose_k_by_silhouette(X)
             km = KMeans(n_clusters=k, n_init=20, random_state=0).fit(X)
             labels = km.labels_
             medoids = []
@@ -473,50 +226,20 @@ class ClusteringAnalysis:
                 centroid = X[idx].mean(axis=0)
                 d = np.linalg.norm(X[idx] - centroid, axis=1)
                 medoids.append(idx[np.argmin(d)])
-            result_labels = labels
-            result_medoids = np.array(medoids, dtype=int)
-        
-        self.labels = result_labels
-        self.medoids = result_medoids
-        self.clustering_results[cache_key] = (result_labels, result_medoids, id(embeddings))
-        return result_labels, result_medoids
+            return labels, np.array(medoids, dtype=int)
     
-    def change_points(self, signal: np.ndarray, model: str = "rbf", n_bkps: int = 5) -> List[int]:
+    @staticmethod
+    def change_points(signal: np.ndarray, model: str = "rbf", n_bkps: int = 5) -> List[int]:
         """Return change-point indices for a 1D signal."""
-        cache_key = (id(signal), model, n_bkps)
-        if cache_key in self.change_points_cache:
-            cached_result, cached_id = self.change_points_cache[cache_key]
-            if cached_id == id(signal) and len(cached_result) > 0:
-                return cached_result
-        
         if HAS_RUPTURES:
             algo = rpt.Binseg(model=model).fit(signal.reshape(-1, 1))
             bkps = algo.predict(n_bkps=n_bkps)
-            result = sorted(set([b for b in bkps if b < len(signal)]))
-        else:
-            # Fallback: pick top-N peaks of absolute derivative
-            deriv = np.abs(np.gradient(signal))
-            N = max(2, n_bkps)
-            idx = np.argsort(deriv)[-N:]
-            result = sorted(set(idx.tolist()))
-        
-        self.change_points_cache[cache_key] = (result, id(signal))
-        return result
-    
-    def clear_cache(self):
-        """Clear all cached results."""
-        self.clustering_results.clear()
-        self.change_points_cache.clear()
-        self.labels = None
-        self.medoids = None
-    
-    def get_labels(self) -> Optional[np.ndarray]:
-        """Get the most recently computed cluster labels."""
-        return self.labels
-    
-    def get_medoids(self) -> Optional[np.ndarray]:
-        """Get the most recently computed medoids."""
-        return self.medoids
+            return sorted(set([b for b in bkps if b < len(signal)]))
+        # Fallback: pick top-N peaks of absolute derivative
+        deriv = np.abs(np.gradient(signal))
+        N = max(2, n_bkps)
+        idx = np.argsort(deriv)[-N:]
+        return sorted(set(idx.tolist()))
 
 
 # ============================================================================
@@ -527,16 +250,8 @@ class ClusteringAnalysis:
 class FrameSelection:
     """Score and select meaningful frames from trajectory."""
     
-    def __init__(self):
-        """Initialize FrameSelection with storage for computed results."""
-        self.scores: Optional[np.ndarray] = None
-        self.score_df: Optional[pd.DataFrame] = None
-        self.selected_frames: Optional[List[int]] = None
-        self.medoids: Optional[np.ndarray] = None
-        self.cpd_idx: Optional[List[int]] = None
-        self.pcs: Optional[np.ndarray] = None
-    
-    def score_frames(self, rmsd: np.ndarray,
+    @staticmethod
+    def score_frames(rmsd: np.ndarray,
                      rg: np.ndarray,
                      pcs: np.ndarray,
                      cpd_idx: List[int],
@@ -545,9 +260,6 @@ class FrameSelection:
         """Combine multiple criteria into a single score."""
         T = len(rmsd)
         clustering = ClusteringAnalysis()
-        
-        # Store inputs for later use
-        self.pcs = pcs
         
         # 1) PC extremes
         pcZ = clustering.zscore(pcs[:, :min(3, pcs.shape[1])])
@@ -582,11 +294,10 @@ class FrameSelection:
             'cpd_bonus': bonus,
             'score': score
         })
-        self.scores = score
-        self.score_df = df
         return score, df
     
-    def load_data_from_csv(self, scores_csv: Optional[str] = None,
+    @staticmethod
+    def load_data_from_csv(scores_csv: Optional[str] = None,
                            metrics_csv: Optional[str] = None,
                            endpoint_metrics_csv: Optional[str] = None) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """Load data from previously saved CSV files."""
@@ -631,21 +342,10 @@ class FrameSelection:
             except Exception as e:
                 warnings.warn(f"Failed to load endpoint metrics CSV {endpoint_metrics_csv}: {e}")
         
-        # Store loaded data in instance
-        if medoids is not None:
-            self.medoids = medoids
-        if cpd_idx is not None:
-            self.cpd_idx = cpd_idx
-        if scores is not None:
-            self.scores = scores
-        if pcs is not None:
-            self.pcs = pcs
-        if score_df is not None:
-            self.score_df = score_df
-        
         return medoids, cpd_idx, scores, pcs, score_df, endpoint_metrics_df
     
-    def select_meaningful_frames(self, medoids: Optional[np.ndarray] = None,
+    @staticmethod
+    def select_meaningful_frames(medoids: Optional[np.ndarray] = None,
                                  cpd_idx: Optional[List[int]] = None,
                                  scores: Optional[np.ndarray] = None,
                                  pcs: Optional[np.ndarray] = None,
@@ -658,22 +358,10 @@ class FrameSelection:
                                  metrics_csv: Optional[str] = None,
                                  endpoint_metrics_csv: Optional[str] = None) -> Tuple[List[int], Optional[pd.DataFrame]]:
         """Select meaningful frames from trajectory."""
-        # Use instance state if available
-        if medoids is None and self.medoids is not None:
-            medoids = self.medoids
-        if cpd_idx is None and self.cpd_idx is not None:
-            cpd_idx = self.cpd_idx
-        if scores is None and self.scores is not None:
-            scores = self.scores
-        if pcs is None and self.pcs is not None:
-            pcs = self.pcs
-        if score_df is None and self.score_df is not None:
-            score_df = self.score_df
-        
         # Load data from CSV files if provided
         if (scores_csv or metrics_csv or endpoint_metrics_csv) and (medoids is None or cpd_idx is None or scores is None or pcs is None):
             print("Loading data from CSV files...")
-            loaded_medoids, loaded_cpd_idx, loaded_scores, loaded_pcs, loaded_score_df, loaded_endpoint_metrics_df = self.load_data_from_csv(
+            loaded_medoids, loaded_cpd_idx, loaded_scores, loaded_pcs, loaded_score_df, loaded_endpoint_metrics_df = FrameSelection.load_data_from_csv(
                 scores_csv=scores_csv,
                 metrics_csv=metrics_csv,
                 endpoint_metrics_csv=endpoint_metrics_csv
@@ -800,18 +488,6 @@ class FrameSelection:
             else:
                 score_df.loc[chosen_sorted, 'selected'] = 1
         
-        # Store results in instance
-        self.selected_frames = chosen_sorted
-        self.score_df = score_df
-        if medoids is not None:
-            self.medoids = medoids
-        if cpd_idx is not None:
-            self.cpd_idx = cpd_idx
-        if scores is not None:
-            self.scores = scores
-        if pcs is not None:
-            self.pcs = pcs
-        
         return chosen_sorted, score_df
 
 
@@ -823,26 +499,17 @@ class FrameSelection:
 class FileIO:
     """Handle file input/output operations."""
     
-    def __init__(self):
-        """Initialize FileIO with storage for file paths and configurations."""
-        self.output_prefix: Optional[str] = None
-        self.saved_frames: List[int] = []
-        self.output_directory: Optional[str] = None
-    
-    def save_frames_as_pdb(self, u: mda.Universe, frame_indices: List[int], out_prefix: str, sel: Optional[str] = None):
+    @staticmethod
+    def save_frames_as_pdb(u: mda.Universe, frame_indices: List[int], out_prefix: str, sel: Optional[str] = None):
         """Save selected frames as PDB files."""
-        self.output_prefix = out_prefix
-        output_dir = f"{out_prefix}_frames"
-        self.output_directory = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(f"{out_prefix}_frames", exist_ok=True)
         if sel is None:
             ag = u.atoms
         else:
             ag = u.select_atoms(sel)
         for idx in frame_indices:
             u.trajectory[idx]
-            ag.write(f"{output_dir}/frame_{idx:06d}.pdb")
-        self.saved_frames.extend(frame_indices)
+            ag.write(f"{out_prefix}_frames/frame_{idx:06d}.pdb")
 
 
 # ============================================================================
@@ -853,13 +520,8 @@ class FileIO:
 class GSAnalyzer:
     """Analyze GSA nanocube structures and compute geometric metrics."""
     
-    def __init__(self):
-        """Initialize GSAnalyzer with storage for computed results."""
-        self.nanocube_metrics_df: Optional[pd.DataFrame] = None
-        self.face_selections: Optional[List[str]] = None
-        self.planar_rms_cache: dict = {}
-    
-    def residue_planar_rms(self, atoms):
+    @staticmethod
+    def residue_planar_rms(atoms):
         """Compute planar RMS for a residue/atom group."""
         P = atoms.positions
         if len(P) < 3:
@@ -871,7 +533,8 @@ class GSAnalyzer:
         planar_rms = float(np.sqrt((dist**2).mean()))
         return planar_rms, face_normal_vector
     
-    def gsa_nanocube_metrics(self, u: mda.Universe,
+    @staticmethod
+    def gsa_nanocube_metrics(u: mda.Universe,
                              face_sel_list: List[str],
                              corner_sel_list: Optional[List[str]] = None,
                              guest_sel: Optional[str] = None,
@@ -935,13 +598,12 @@ class GSAnalyzer:
                 **face_angle_dict,
             })
         df = pd.DataFrame(rows)
-        self.nanocube_metrics_df = df
-        self.face_selections = face_sel_list
         if out_prefix:
             df.to_csv(f"{out_prefix}_gsa_nanocube.csv", index=False)
         return df
     
-    def amber_preset_selections(self, u: mda.Universe,
+    @staticmethod
+    def amber_preset_selections(u: mda.Universe,
                                 gsa_resnames: List[str] = ["GSA"],
                                 water_resnames: List[str] = ["WAT", "HOH", "TIP3", "TIP3P"],
                                 na_resnames: List[str] = ["Na+", "SOD", "NA"],
@@ -961,7 +623,8 @@ class GSAnalyzer:
         }
         return sels
     
-    def gsa_auto_faces_by_kmeans(self, u: mda.Universe,
+    @staticmethod
+    def gsa_auto_faces_by_kmeans(u: mda.Universe,
                                  gsa_sel: str = "resname GSA",
                                  n_faces: int = 6,
                                  group_by: str = 'residue') -> List[str]:
@@ -978,7 +641,7 @@ class GSAnalyzer:
                     faces.append("resid -1")
                 else:
                     faces.append("resid " + " ".join(resid_list))
-            result_faces = faces
+            return faces
         else:
             coms = ag.positions
             labels = KMeans(n_clusters=n_faces, n_init=20, random_state=0).fit_predict(coms)
@@ -989,12 +652,10 @@ class GSAnalyzer:
                     faces.append("index -1")
                 else:
                     faces.append("index " + " ".join(map(str, idx.tolist())))
-            result_faces = faces
-        
-        self.face_selections = result_faces
-        return result_faces
+            return faces
     
-    def faces_from_atomname_blocks(self, u: 'mda.Universe',
+    @staticmethod
+    def faces_from_atomname_blocks(u: 'mda.Universe',
                                    gsa_reslabel: str = 'MOL',
                                    n_faces: int = 6,
                                    residues_per_face: int | None = None,
@@ -1047,7 +708,6 @@ class GSAnalyzer:
                 faces.append('resid -1')
             else:
                 faces.append('resid ' + " ".join(group_resids))
-        self.face_selections = faces
         return faces
 
 
@@ -1058,20 +718,6 @@ class GSAnalyzer:
 
 class EndpointAnalyzer:
     """Analyze molecular endpoints and compute endpoint-based metrics."""
-    
-    def __init__(self):
-        """Initialize EndpointAnalyzer with storage for results."""
-        self.endpoints_distance_dict: Optional[dict] = None
-        self.endpoint_metrics_df: Optional[pd.DataFrame] = None
-        self.residue_sel_list: Optional[List[str]] = None
-        self._endpoints_finder: Optional['EndpointsFinder'] = None
-    
-    def clear_cache(self):
-        """Clear all cached results."""
-        self.endpoints_distance_dict = None
-        self.endpoint_metrics_df = None
-        self.residue_sel_list = None
-        self._endpoints_finder = None
     
     @staticmethod
     def find_residue_endpoints(u: mda.Universe,
@@ -1097,33 +743,33 @@ class EndpointAnalyzer:
             raise ValueError("RDKit conversion failed")
         
         endpoint_indices = endpoints_finder.find_endpoints(mol)
-        #Change into  mda.Universe global index
+        
         mda_endpoint_indices = []
         for rdkit_idx in endpoint_indices:
-            mda_endpoint_indices.append(int(sel[rdkit_idx].id))
-            
-        center = sel.center_of_mass()
+            atom = mol.GetAtomWithIdx(rdkit_idx)
+            if atom.HasProp('_MDAnalysis_index'):
+                mda_idx = atom.GetIntProp('_MDAnalysis_index')
+                sel_idx = np.where(sel.indices == mda_idx)[0]
+                if len(sel_idx) > 0:
+                    mda_endpoint_indices.append(int(sel_idx[0]))
+        
+        center = sel.center_of_geometry()
         return center, mda_endpoint_indices if mda_endpoint_indices else []
     
-    def compute_endpoint_distances(self, u: mda.Universe,
+    @staticmethod
+    def compute_endpoint_distances(u: mda.Universe,
                                    residue_sel_list: List[str],
                                    endpoints_finder: Optional['EndpointsFinder'] = None) -> dict:
         """Compute distances between endpoints of different residues over trajectory."""
-        # Store configuration
-        self.residue_sel_list = residue_sel_list
-        if endpoints_finder is not None:
-            self._endpoints_finder = endpoints_finder
-        
         if not HAS_ENDPOINTS_FINDER:
             warnings.warn("EndpointsFinder not available. Returning empty structure.")
             n_res = len(residue_sel_list)
             T = len(u.trajectory)
-            self.endpoints_distance_dict = {
+            return {
                 'all_pairs': {},
                 'n_residues': n_res,
                 'n_frames': T
             }
-            return self.endpoints_distance_dict
         
         if endpoints_finder is None:
             endpoints_finder = EndpointsFinder()
@@ -1165,10 +811,11 @@ class EndpointAnalyzer:
             frame_ep_positions = []
             for idx, sel_str in enumerate(residue_sel_list):
                 try:
+                    sel = u.select_atoms(sel_str)
                     ep_indices = stored_ep_indices[idx]
                     
-                    if len(ep_indices) > 0:
-                        ep_positions = u.positions[ep_indices]
+                    if len(ep_indices) > 0 and len(sel) > 0:
+                        ep_positions = sel.positions[ep_indices]
                         frame_ep_positions.append(ep_positions)
                     else:
                         frame_ep_positions.append(None)
@@ -1189,27 +836,22 @@ class EndpointAnalyzer:
                         all_pairs[(i, j)][frame, :n_ep_i_actual, :n_ep_j_actual] = dists
                         all_pairs[(j, i)][frame, :n_ep_j_actual, :n_ep_i_actual] = dists.T
         
-        self.endpoints_distance_dict = {
+        return {
             'all_pairs': all_pairs,
             'n_residues': n_res,
             'n_frames': T
         }
-        return self.endpoints_distance_dict
     
-    def compute_endpoint_metrics(self, u: mda.Universe,
+    @staticmethod
+    def compute_endpoint_metrics(u: mda.Universe,
                                 residue_sel_list: List[str],
                                 endpoints_finder: Optional['EndpointsFinder'] = None) -> pd.DataFrame:
         """Compute comprehensive endpoint-based metrics for residues over trajectory."""
-        # Store configuration
-        self.residue_sel_list = residue_sel_list
-        if endpoints_finder is not None:
-            self._endpoints_finder = endpoints_finder
-        
         if not HAS_ENDPOINTS_FINDER:
             warnings.warn("EndpointsFinder not available. Returning empty DataFrame.")
             return pd.DataFrame({'frame': range(len(u.trajectory))})
         
-        endpoint_dists_dict = self.compute_endpoint_distances(u, residue_sel_list, endpoints_finder)
+        endpoint_dists_dict = EndpointAnalyzer.compute_endpoint_distances(u, residue_sel_list, endpoints_finder)
         all_pairs = endpoint_dists_dict['all_pairs']
         T = endpoint_dists_dict['n_frames']
         n_res = endpoint_dists_dict['n_residues']
@@ -1249,8 +891,7 @@ class EndpointAnalyzer:
             
             rows.append(row)
         
-        self.endpoint_metrics_df = pd.DataFrame(rows)
-        return self.endpoint_metrics_df
+        return pd.DataFrame(rows)
     
     @staticmethod
     def compute_endpoint_volume_correlation(endpoint_dists_array: Union[np.ndarray, dict],
@@ -1509,14 +1150,8 @@ class EndpointAnalyzer:
 class Plotter:
     """Handle plotting operations for trajectory analysis."""
     
-    def __init__(self):
-        """Initialize Plotter with storage for plot configurations and outputs."""
-        self.output_prefix: Optional[str] = None
-        self.plots_generated: List[str] = []
-        self.figure_size: Tuple[int, int] = (12, 8)
-        self.dpi: int = 300
-    
-    def plot_endpoint_distances(self, endpoint_dists_array: Union[np.ndarray, dict],
+    @staticmethod
+    def plot_endpoint_distances(endpoint_dists_array: Union[np.ndarray, dict],
                                 residue_sel_list: List[str],
                                 out_prefix: str) -> None:
         """Plot distances between endpoint pairs over frames."""
@@ -1538,7 +1173,7 @@ class Plotter:
                 return
             
             frames = np.arange(T)
-            fig, ax = plt.subplots(figsize=self.figure_size)
+            fig, ax = plt.subplots(figsize=(12, 8))
             
             for i in range(n_res):
                 for j in range(i + 1, n_res):
@@ -1563,14 +1198,12 @@ class Plotter:
             ax.grid(True, alpha=0.3)
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, ncol=1)
             plt.tight_layout()
-            plot_path = f"{out_prefix}_endpoint_distances.png"
-            plt.savefig(plot_path, dpi=self.dpi, bbox_inches='tight')
+            plt.savefig(f"{out_prefix}_endpoint_distances.png", dpi=300, bbox_inches='tight')
             plt.close()
-            self.output_prefix = out_prefix
-            self.plots_generated.append(plot_path)
-            print(f"Endpoint distance plot saved to {plot_path}")
+            print(f"Endpoint distance plot saved to {out_prefix}_endpoint_distances.png")
     
-    def plot_endpoint_volume_correlation(self, endpoint_dists_array: Union[np.ndarray, dict],
+    @staticmethod
+    def plot_endpoint_volume_correlation(endpoint_dists_array: Union[np.ndarray, dict],
                                          volume: np.ndarray,
                                          residue_sel_list: List[str],
                                          correlation_df: pd.DataFrame,
@@ -1656,9 +1289,6 @@ class Plotter:
             ax.legend(lines, labels, loc='upper left', fontsize=9)
         
         plt.tight_layout()
-        plot_path = f"{out_prefix}_endpoint_volume_correlation.png"
-        plt.savefig(plot_path, dpi=self.dpi, bbox_inches='tight')
+        plt.savefig(f"{out_prefix}_endpoint_volume_correlation.png", dpi=300, bbox_inches='tight')
         plt.close()
-        self.output_prefix = out_prefix
-        self.plots_generated.append(plot_path)
-        print(f"Endpoint-volume correlation plot saved to {plot_path}")
+        print(f"Endpoint-volume correlation plot saved to {out_prefix}_endpoint_volume_correlation.png")

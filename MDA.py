@@ -5,9 +5,11 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np
 from typing import List
-from endpoints_finder import find_endpoints 
+from trajectory_deformation_workflow import EndpointAnalyzer as ea
 from endpoints_finder import EndpointsFinder as ef
 from rdkit.Chem import Draw
+from MDAnalysis.analysis import gnm
+import matplotlib.pyplot as plt
 
 prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
 crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
@@ -19,13 +21,39 @@ first_sel=first_u.select_atoms('not water and not name I and not name Na+')
 last_sel=last_u.select_atoms('not water and not name I and not name Na+')
 unaligned_rmsd = rms.rmsd(first_sel.positions, last_sel.positions, superposition=False)
 print(f"Unaligned RMSD: {unaligned_rmsd:.2f}")
+rep=ea.find_residue_endpoints(first_sel, 'resid 1',)
+rep_sel=first_u.select_atoms('resid 1')
+lrep_sel=last_u.select_atoms('resid 1')
+unal_rmsd_resid1=rms.rmsd(rep_sel[rep[1]].positions, lrep_sel[rep[1]].positions, superposition=False)
+print(f"Unaligned RMSD of residue 1: {unal_rmsd_resid1:.2f}")
 
 aligner = align.AlignTraj(first_u, last_u, select='not water and not name I and not name Na+', in_memory=True).run()
 aligned_rmsd = rms.rmsd(first_sel.positions, last_sel.positions, superposition=False)
 print(f"Aligned RMSD: {aligned_rmsd:.2f}")
+rep_sel=first_u.select_atoms('resid 1')
+lrep_sel=last_u.select_atoms('resid 1')
+al_rmsd_resid1=rms.rmsd(rep_sel[rep[1]].positions, lrep_sel[rep[1]].positions, superposition=False)
+print(f"Aligned RMSD of residue 1: {al_rmsd_resid1:.2f}")
 
+mtest=Draw.MolToImage(ef().to_2d_coords(rep_sel.convert_to('RDKIT'))[0], size=(600, 400), highlightAtoms=rep[1], highlightColor=(1, 0, 0))  # Red highlight
+mtest.show()
 
-u = u.select_atoms('not water and not name I and not name Na+')
+first_sel.residues[0].atoms[rep[1]].ids
+
+u = mda.Universe(prmtop, crd,format="TRJ")
+
+nma1 = gnm.closeContactGNMAnalysis(u,select='not water and not name I and not name Na+',cutoff=7.0)
+nma1.run(backend='serial')
+
+plt.hist(nma1.results['eigenvalues'])
+plt.xlabel('Eigenvalue')
+plt.ylabel('Frequency')
+
+ax = plt.plot(nma1.results['times'], nma1.results['eigenvalues'])
+plt.xlabel('Time (ps)')
+plt.ylabel('Eigenvalue')
+plt.show()
+
 
 sel=u.select_atoms('resid 1')
 mol=sel.convert_to('RDKIT')
@@ -33,7 +61,7 @@ mol.GetAtomWithIdx(2).GetIntProp('_MDAnalysis_index')
 ep=ef(step_back_from_terminals=True).find_endpoints(mol)
 
 
-mtest=Draw.MolToImage(ef().to_2d_coords(mol)[0], size=(600, 400), highlightAtoms=ep, highlightColor=(1, 0, 0))  # Red highlight
+mtest=Draw.MolToImage(ef().to_2d_coords(mol)[0], size=(600, 400), highlightAtoms=rep, highlightColor=(1, 0, 0))  # Red highlight
 mtest.show()
 
 testsmi=Chem.MolFromSmiles('C1=CC=C(C2=CC=C(C3=C(C4=CC=CC=C4)C(C4=CC=C(C5=C[N+](C)=CC=C5)C=C4)=C(C4=CC=CC=C4)C(C4=CC=C(C5=C[N+](C)=CC=C5)C=C4)=C3C3=CC=CC=C3)C=C2)C=C1')

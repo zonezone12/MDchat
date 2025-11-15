@@ -15,7 +15,8 @@ class EndpointsFinder:
         alpha: float = 0.2,  # low weight: mostly visual, slight topo preference
         ring_min_gap_deg: Optional[float] = 35.0,
         ring_max_per_ring: int = 3,
-        step_back_from_terminals: bool = True
+        step_back_from_terminals: bool = True,
+        extend_to_ring_atoms: bool = True
     ):
         """
         Initialize the EndpointsFinder with configuration parameters.
@@ -27,6 +28,7 @@ class EndpointsFinder:
             ring_min_gap_deg: Minimum angular gap between endpoints in rings (None to disable)
             ring_max_per_ring: Maximum number of endpoints per ring
             step_back_from_terminals: If True, step back from H atoms or atoms with only one neighbor
+            extend_to_ring_atoms: If True, extend endpoints on rings to include all ring atoms
         """
         self.angle_tol_deg = angle_tol_deg
         self.use_graph_farness = use_graph_farness
@@ -34,6 +36,7 @@ class EndpointsFinder:
         self.ring_min_gap_deg = ring_min_gap_deg
         self.ring_max_per_ring = ring_max_per_ring
         self.step_back_from_terminals = step_back_from_terminals
+        self.extend_to_ring_atoms = extend_to_ring_atoms
     
     def to_2d_coords(self, mol: Chem.Mol) -> Tuple[Chem.Mol, np.ndarray]:
         """Convert molecule to 2D coordinates."""
@@ -178,6 +181,10 @@ class EndpointsFinder:
         if self.step_back_from_terminals:
             endpoints = set(self._step_back_from_terminals(m2d, list(endpoints)))
         
+        # extend to ring atoms (optional)
+        if self.extend_to_ring_atoms:
+            endpoints = set(self._extend_to_ring_atoms(m2d, list(endpoints)))
+        
         return sorted(endpoints)
     
     def _step_back_from_terminals(self, mol: Chem.Mol, endpoints: List[int]) -> List[int]:
@@ -223,39 +230,39 @@ class EndpointsFinder:
                 result.append(idx)
         
         return sorted(result)
-
-
-# Backward compatibility: provide a function interface that creates a default instance
-def find_endpoints(
-    mol: Chem.Mol,
-    angle_tol_deg: float = 15.0,
-    use_graph_farness: bool = True,
-    alpha: float = 0.2,
-    ring_min_gap_deg: Optional[float] = 35.0,
-    ring_max_per_ring: int = 3,
-    step_back_from_terminals: bool = False
-) -> List[int]:
-    """
-    Find endpoint atom indices for a given molecule (function interface for backward compatibility).
     
-    Args:
-        mol: RDKit molecule object
-        angle_tol_deg: Angle tolerance in degrees for finding opposite endpoints
-        use_graph_farness: Whether to use topological graph farness weighting
-        alpha: Weight for graph farness (0.0 = visual only, 1.0 = topology only)
-        ring_min_gap_deg: Minimum angular gap between endpoints in rings (None to disable)
-        ring_max_per_ring: Maximum number of endpoints per ring
-        step_back_from_terminals: If True, step back from H atoms or atoms with only one neighbor
+    def _extend_to_ring_atoms(self, mol: Chem.Mol, endpoints: List[int]) -> List[int]:
+        """
+        Extend endpoints that are on rings to include all atoms in those rings.
+        If an endpoint is on multiple rings (fused rings), all atoms from all rings are included.
         
-    Returns:
-        List of atom indices representing endpoints
-    """
-    finder = EndpointsFinder(
-        angle_tol_deg=angle_tol_deg,
-        use_graph_farness=use_graph_farness,
-        alpha=alpha,
-        ring_min_gap_deg=ring_min_gap_deg,
-        ring_max_per_ring=ring_max_per_ring,
-        step_back_from_terminals=step_back_from_terminals
-    )
-    return finder.find_endpoints(mol)
+        Args:
+            mol: RDKit molecule object
+            endpoints: List of endpoint atom indices
+            
+        Returns:
+            List of extended endpoint indices (includes all ring atoms for endpoints on rings)
+        """
+        ringinfo = mol.GetRingInfo()
+        rings = ringinfo.AtomRings()
+        
+        # Build a mapping from atom index to rings it belongs to
+        atom2rings = {i: [] for i in range(mol.GetNumAtoms())}
+        for rid, ring in enumerate(rings):
+            for atom_idx in ring:
+                atom2rings[atom_idx].append(rid)
+        
+        # Collect all atoms to include
+        extended_endpoints = set(endpoints)
+        
+        for endpoint_idx in endpoints:
+            # Check if this endpoint is on any ring
+            ring_ids = atom2rings.get(endpoint_idx, [])
+            if ring_ids:
+                # Add all atoms from all rings this endpoint belongs to
+                for ring_id in ring_ids:
+                    ring_atoms = set(rings[ring_id])
+                    extended_endpoints.update(ring_atoms)
+        
+        return sorted(extended_endpoints)
+

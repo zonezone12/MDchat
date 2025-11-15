@@ -22,6 +22,7 @@ except ImportError as e:
 
 # Import classes from the workflow module
 from trajectory_deformation_workflow import (
+    AlignedTrajectory,
     TrajectoryMetrics,
     ClusteringAnalysis,
     FrameSelection,
@@ -75,15 +76,25 @@ def main():
         u = mda.Universe(args.top, *args.traj, format="TRJ")
     if u is None:
         raise ValueError("Trajectory loading failed")
-    # remove water, ions, and other non-main structure atoms
-    u = u.select_atoms('not water and not name I- and not name Na+')
-    # 1) Align trajectory to remove global motion
+    
+    # 1) Align trajectory to remove global motion using AlignedTrajectory class
+    # Note: We align the full universe first, then filter atoms later for analysis
+    print("Aligning trajectory...")
     try:
-        align.AlignTraj(u, u, select=args.align_sel, in_memory=True).run()
+        aligned_traj = AlignedTrajectory(
+            universe=u,
+            align_sel=args.align_sel,
+            ref_frame=0,
+            align_first_and_last=True,
+            in_memory=True
+        )
+        u = aligned_traj.get_aligned_universe()
+        print("Trajectory alignment completed.")
     except Exception as e:
-        warnings.warn(f"Alignment failed or selection invalid: {e}")
-
-    # 2) Global metrics
+        warnings.warn(f"Alignment failed or selection invalid: {e}. Using original universe.")
+        aligned_traj = None
+    
+    # 2) Global metrics (using aligned universe)
     metrics = TrajectoryMetrics()
     print("Computing RMSD...")
     rmsd_vals = metrics.compute_rmsd(u, args.rmsd_sel)
@@ -97,17 +108,17 @@ def main():
         print("Computing contact distances...")
         contact_vals = metrics.contact_distances(u, args.contact_selA, args.contact_selB)
 
-    # 3) RMSF (per-atom)
+    # 3) RMSF (per-atom) - using pre-aligned trajectory
     print("Computing RMSF...")
     try:
-        rmsf_vals = metrics.compute_rmsf(u, args.rmsf_sel)
+        rmsf_vals = metrics.compute_rmsf(u, args.rmsf_sel, aligned=True)
     except Exception as e:
         warnings.warn(f"RMSF failed: {e}")
         rmsf_vals = None
 
-    # 4) PCA on positional fluctuations
+    # 4) PCA on positional fluctuations - using pre-aligned trajectory
     print("Computing PCA...")
-    pcs, pca_model = metrics.pca_on_fluctuations(u, args.pca_sel, n_components=args.n_pc)
+    pcs, pca_model = metrics.pca_on_fluctuations(u, args.pca_sel, n_components=args.n_pc, aligned=True)
 
     # 5) Strain proxy
     print("Computing local affine strain proxy...")
