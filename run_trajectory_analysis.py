@@ -32,6 +32,7 @@ from trajectory_deformation_workflow import (
     Plotter,
     HAS_ENDPOINTS_FINDER,
     EndpointsFinder  # type: ignore
+    VolumeAnalyzer
 )
 
 from volume_analyser import VolumeAnalyzer

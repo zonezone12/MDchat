@@ -5,7 +5,17 @@ from scipy import ndimage
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from rdkit.Chem import AllChem, Draw
-from plotly_molecule import make_molecule_components
+
+# Import plotly_molecule with fallback for different import contexts
+try:
+    from MD_analysis.plotly_molecule import make_molecule_components
+except ImportError:
+    try:
+        from .plotly_molecule import make_molecule_components
+    except ImportError:
+        # Fallback to direct import (works when run from within the directory)
+        from plotly_molecule import make_molecule_components
+
 import plotly.graph_objects as go
 import io
 import imageio.v2 as imageio

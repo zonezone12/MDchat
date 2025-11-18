@@ -1,6 +1,5 @@
 import MDAnalysis as mda
 from MDAnalysis.analysis import align, rms
-import nglview as nv
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np
@@ -74,7 +73,7 @@ print(vdw_volume,polar_volume,volume)
 
 
 mtest=Draw.MolToImage(ef().to_2d_coords(rep_sel.convert_to('RDKIT'))[0], size=(600, 400), highlightAtoms=rep[1], highlightColor=(1, 0, 0))  # Red highlight
-mtest.show()
+mtest
 
 first_sel.residues[0].atoms[rep[1]].ids
 
@@ -176,69 +175,4 @@ image = Draw.MolToImage(m2d, size=(600, 400), highlightAtoms=get_endpointsId_fro
 test=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=get_endpointsId_from_2d_coords(txy), highlightColor=(1, 0, 0))  # Red highlight
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=center_endpoints_oppsite_ends(txy,get_endpointsId_from_2d_coords(txy)), highlightColor=(1, 0, 0))  # Red highlight
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=find_endpoints(tm), highlightColor=(1, 0, 0))  # Red highlight
-
-
-w = nv.show_mdanalysis(sel)
-t = nv.MDAnalysisTrajectory(u)
-u
-from trajectory_deformation_workflow import (
-    faces_from_atomname_blocks,
-    gsa_nanocube_metrics,
-)
-
-faces = faces_from_atomname_blocks(
-    u,
-    gsa_reslabel="MOL",   # the resname of the GSA, can be changed to the actual resname
-    n_faces=6
-)
-
-df = gsa_nanocube_metrics(
-    u,
-    face_sel_list=faces,
-    guest_sel=None,
-    out_prefix="gsa_amber_demo"
-)
-
-
-center,atoms,endpoints=endpoints_finder(u, sel_str='resid 1')
-al=nv.show_mdanalysis(sel)
-al.add_representation("licorice", selection='not 1', color='grey',radiusScale=3.0)
-al.add_representation("licorice", selection='@{}'.format(",".join(str(i) for i in endpoints[:4])), color='purple',radiusScale=3.0)
-
-def residue_planar_rms(atoms):
-    P = atoms.positions
-    if len(P) < 3:
-        return np.nan
-    P0 = P - P.mean(axis=0)
-    U, S, Vt = np.linalg.svd(P0, full_matrices=False)
-    # normal is Vt[-1]; distance of points to plane through mean with this normal
-    face_normal_vector = Vt[-1]
-    dist = np.abs(P0 @ face_normal_vector)
-    planar_rms = float(np.sqrt((dist**2).mean()))
-    return planar_rms,face_normal_vector
-
-planar_rms,face_normal_vector=residue_planar_rms(u.select_atoms('resid 1'))
-print(planar_rms,face_normal_vector)
-
-#ref = mda.Universe(r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop', r'C:\Users\zonezone\Desktop\YCU_research\mdcrd_v',format="TRJ")
-#u.trajectory[-1]
-#ref.trajectory[0]
-#
-#ca = u.select_atoms('not water')
-#ref_ca = ref.select_atoms('not water')
-#
-#unaligned_rmsd = rms.rmsd(ca.positions, ref_ca.positions, superposition=False)
-#print(f"Unaligned RMSD: {unaligned_rmsd:.2f}")
-#aligner = align.AlignTraj(u, ref, select='not water', in_memory=True).run()
-#
-#If you don’t have enough memory to do that, write the trajectory out to a file and reload it into MDAnalysis (uncomment the cell below).
-# aligner = align.AlignTraj(u, ref, select='not water',
-#                           filename='aligned_to_first_frame.dcd').run()
-# u = mda.Universe(PSF, 'aligned_to_first_frame.dcd')
-
-
-#Creating an average structure
-average = align.AverageStructure(u, u, select='not water',
-                                 ref_frame=0).run()
-ref = average.results.universe
 

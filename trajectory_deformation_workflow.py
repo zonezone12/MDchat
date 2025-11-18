@@ -21,7 +21,10 @@ import warnings
 from typing import Optional, Tuple, List, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from endpoints_finder import EndpointsFinder
+    try:
+        from .endpoints_finder import EndpointsFinder
+    except ImportError:
+        from MD_analysis.endpoints_finder import EndpointsFinder
 
 import numpy as np
 import pandas as pd
@@ -60,23 +63,35 @@ try:
 except Exception:
     HAS_RUPTURES = False
 
-# Import EndpointsFinder for residue endpoint analysis
+
 try:
-    from endpoints_finder import EndpointsFinder
+    # Try absolute import first (works when imported from outside the package)
+    from MD_analysis.endpoints_finder import EndpointsFinder
     HAS_ENDPOINTS_FINDER = True
 except ImportError:
-    HAS_ENDPOINTS_FINDER = False
-    EndpointsFinder = None  # type: ignore
-    warnings.warn("endpoints_finder module not found. Endpoint-based metrics will be disabled.")
+    try:
+        # Fallback to relative import (works when run from within the directory)
+        from .endpoints_finder import EndpointsFinder
+        HAS_ENDPOINTS_FINDER = True
+    except ImportError:
+        HAS_ENDPOINTS_FINDER = False
+        EndpointsFinder = None  # type: ignore
+        warnings.warn("endpoints_finder module not found. Endpoint-based metrics will be disabled.")
 
 # Import VolumeAnalyzer for volume computation
 try:
-    from volume_analyser import VolumeAnalyzer
+    # Try absolute import first (works when imported from outside the package)
+    from MD_analysis.volume_analyser import VolumeAnalyzer
     HAS_VOLUME_ANALYZER = True
 except ImportError:
-    HAS_VOLUME_ANALYZER = False
-    VolumeAnalyzer = None  # type: ignore
-    warnings.warn("volume_analyser module not found. Volume computation will fallback to edge-based method.")
+    try:
+        # Fallback to relative import (works when run from within the directory)
+        from .volume_analyser import VolumeAnalyzer
+        HAS_VOLUME_ANALYZER = True
+    except ImportError:
+        HAS_VOLUME_ANALYZER = False
+        VolumeAnalyzer = None  # type: ignore
+        warnings.warn("volume_analyser module not found. Volume computation will fallback to edge-based method.")
 
 
 # ============================================================================
@@ -1123,6 +1138,7 @@ class EndpointAnalyzer:
         sel = u.select_atoms(sel_str)
         if len(sel) == 0:
             return np.array([np.nan, np.nan, np.nan]), []
+        
         
         mol = sel.convert_to('RDKIT')
         if mol is None:

@@ -19,33 +19,56 @@ The pipeline is designed for systems like Amber/GROMACS trajectories with explic
 - **Modularity**: Classes for metrics, clustering, selection, GSA analysis, endpoints, and plotting.
 
 ### Dependencies
-Install via `pip` (core + optional):
+We recommend using [mamba](https://mamba.readthedocs.io/) (a faster `conda` alternative) for installing dependencies, as this ensures all packages—including those with compiled C/C++ extensions (like RDKit and MDAnalysis)—are handled robustly.
+
+Install via `mamba` (recommended):
 
 ```bash
-# Core
-pip install MDAnalysis numpy pandas scikit-learn matplotlib
+# Create and activate a new environment (recommended)
+mamba create -n gsa-analysis python=3.10
+conda activate gsa-analysis
 
-# Optional (for advanced clustering/change points)
-pip install hdbscan ruptures
+# Core requirements
+mamba install mdanalysis numpy pandas scikit-learn matplotlib
 
-# For endpoint analysis (required for full functionality)
-pip install rdkit
+# Optional: for advanced clustering and change points
+mamba install hdbscan ruptures
 
-# Custom module (included)
-# Save as endpoints_finder.py in the repo
+# Endpoint analysis (required for full functionality)
+mamba install rdkit
+
+# Volume analysis and visualization
+mamba install plotly scipy imageio
+
+# All dependencies at once
+mamba install mdanalysis numpy pandas scikit-learn matplotlib hdbscan ruptures rdkit plotly scipy imageio
+```
+
+If you prefer, you can still use `pip` as shown below (but mamba/conda is recommended for best compatibility):
+
+```bash
+pip install MDAnalysis numpy pandas scikit-learn matplotlib hdbscan ruptures rdkit plotly scipy imageio
+```
+
+No internet access is needed post-install; all analysis is offline.
 ```
 
 No internet access needed post-install; all analysis is offline.
 
 ### Project Structure
 ```
-gsa-md-pipeline/
-├── trajectory_analysis.py     # Main pipeline classes (your provided code)
-├── endpoints_finder.py        # Endpoint detection module (your provided code)
-├── README.md                  # This file
-├── workflow.py                # Example workflow script
-├── example_workflow.ipynb     # Jupyter notebook (optional, generated below)
-└── tests/                     # Unit tests for endpoints (optional)
+MD_analysis/
+├── trajectory_deformation_workflow.py  # Main pipeline classes (TrajectoryMetrics, ClusteringAnalysis, etc.)
+├── run_trajectory_analysis.py         # Main CLI entry point
+├── endpoints_finder.py                # Endpoint detection module
+├── volume_analyser.py                 # Volume analysis (target volume, cavity detection)
+├── plotly_molecule.py                 # Interactive 3D molecule visualization
+├── __init__.py                        # Package initialization
+├── README.md                          # This file
+├── script_in_hpc.py                   # HPC batch processing script
+├── ngl_traj_plot.ipynb                # Jupyter notebook for visualization
+├── MDA.py                             # Example/test script
+└── tests/                             # Unit tests (optional)
 ```
 
 ## Quick Start
@@ -57,59 +80,102 @@ gsa-md-pipeline/
 
 2. **Run Workflow**:
    ```bash
-   python workflow.py --topology gsa.prmtop --trajectory gsa.nc --out_prefix gsa_analysis
+   python run_trajectory_analysis.py --top gsa.prmtop --traj gsa.nc --out_prefix gsa_analysis
+   ```
+   
+   For endpoint-based analysis with cube volume correlation:
+   ```bash
+   python run_trajectory_analysis.py --top gsa.prmtop --traj mdcrd_v --out_prefix gsa_analysis \
+     --endpoint_residues "resid 1" "resid 2" "resid 3" ... \
+     --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6"
    ```
 
 3. **Outputs**:
-   - `gsa_analysis_gsa_metrics.csv`: Nanocube geometry (volume, planarity, guest dist).
-   - `gsa_analysis_endpoints.csv`: Endpoint distances (min/mean/max per pair).
-   - `gsa_analysis_correlations.csv`: Endpoint-volume correlations.
-   - `gsa_analysis_selected_frames.csv`: Scores and labels for crucial frames.
-   - `gsa_analysis_frames/frame_XXXXXX.pdb`: Selected PDBs.
-   - Plots: `gsa_analysis_endpoint_distances.png`, `gsa_analysis_volume_correlation.png`.
+   - `gsa_analysis_metrics.csv`: Global trajectory metrics (RMSD, Rg, PCs, strain).
+   - `gsa_analysis_scores.csv`: Frame scores with clustering labels and selection flags.
+   - `gsa_analysis_endpoint_metrics.csv`: Endpoint-based metrics per residue (if endpoints enabled).
+   - `gsa_analysis_endpoint_volume_correlation.csv`: Correlation between endpoint distances and cube volume.
+   - `gsa_analysis_key_endpoint_pairs.csv`: Key endpoint pairs driving expansion/shrinkage.
+   - `gsa_analysis_frames/frame_XXXXXX.pdb`: Selected representative frames as PDBs.
+   - `gsa_analysis_SUMMARY.txt`: Text summary of analysis results.
+   - Plots: `gsa_analysis_endpoint_distances.png`, `gsa_analysis_endpoint_volume_correlation.png`.
 
 ## Usage
 
 ### Core Classes
-- **`TrajectoryMetrics`**: RMSD, RMSF, Rg, PCA, strain.
+- **`AlignedTrajectory`**: Trajectory alignment and superposition management.
+- **`TrajectoryMetrics`**: RMSD, RMSF, Rg, PCA, strain, contact distances.
 - **`ClusteringAnalysis`**: Frame clustering (HDBSCAN/KMeans), change-point detection.
 - **`FrameSelection`**: Scores/selects frames using endpoints + metrics.
 - **`GSAnalyzer`**: Nanocube-specific (faces, volume, planarity, guest dist).
 - **`EndpointAnalyzer`**: Finds endpoints, computes distances/correlations.
+- **`VolumeAnalyzer`**: Target volume and cavity volume analysis using voxel grids.
 - **`Plotter`**: Time-series and correlation plots.
 - **`FileIO`**: Saves PDBs.
 
 ### Configuration
-- Customize in `workflow.py`: Residue selections, finder params (e.g., ring gap for aromatics), thresholds (e.g., correlation >0.7 for "crucial" pairs).
+- Customize in `run_trajectory_analysis.py` or via CLI arguments: Residue selections, finder params (e.g., ring gap for aromatics), thresholds (e.g., correlation >0.7 for "crucial" pairs).
 - For explicit H: Enable `step_back_from_terminals=True` in `EndpointsFinder`.
+- Volume analysis: Adjust `spacing` (grid resolution) and `probe_radius` in `VolumeAnalyzer` for different cavity sizes.
 
 ### Example: Basic Analysis
 ```python
 import MDAnalysis as mda
-from trajectory_analysis import GSAnalyzer, EndpointAnalyzer, Plotter
+from trajectory_deformation_workflow import GSAnalyzer, EndpointAnalyzer, Plotter
 from endpoints_finder import EndpointsFinder
 
 u = mda.Universe("topology.pdb", "trajectory.dcd")
 gsa_sel = "resname GSA"
 
 # Auto-detect faces (6 for cube)
-face_sels = GSAnalyzer.gsa_auto_faces_by_kmeans(u, gsa_sel=gsa_sel, n_faces=6)
+gsa_analyzer = GSAnalyzer()
+face_sels = gsa_analyzer.gsa_auto_faces_by_kmeans(u, gsa_sel=gsa_sel, n_faces=6)
 
 # GSA metrics
-gsa_df = GSAnalyzer.gsa_nanocube_metrics(u, face_sels, out_prefix="test")
+gsa_df = gsa_analyzer.gsa_nanocube_metrics(u, face_sels, out_prefix="test")
 
 # Residue endpoints (e.g., resids 1-24)
 res_sel_list = [f"resid {i} and {gsa_sel}" for i in range(1, 25)]
 finder = EndpointsFinder(step_back_from_terminals=True)  # Handles explicit H
-endpoint_df = EndpointAnalyzer.compute_endpoint_metrics(u, res_sel_list, finder)
+endpoint_analyzer = EndpointAnalyzer()
+endpoint_df = endpoint_analyzer.compute_endpoint_metrics(u, res_sel_list, finder)
 
 # Correlations
 volume = gsa_df['volume'].values
-dists_dict = EndpointAnalyzer.compute_endpoint_distances(u, res_sel_list, finder)
-corr_df = EndpointAnalyzer.compute_endpoint_volume_correlation(dists_dict, volume, res_sel_list)
+dists_dict = endpoint_analyzer.compute_endpoint_distances(u, res_sel_list, finder)
+corr_df = endpoint_analyzer.compute_endpoint_volume_correlation(dists_dict, volume, res_sel_list)
 
 # Plot
-Plotter.plot_endpoint_volume_correlation(dists_dict, volume, res_sel_list, corr_df, "test")
+plotter = Plotter()
+plotter.plot_endpoint_volume_correlation(dists_dict, volume, res_sel_list, corr_df, "test")
+```
+
+### Example: Volume Analysis
+```python
+from volume_analyser import VolumeAnalyzer
+import MDAnalysis as mda
+
+u = mda.Universe("topology.pdb", "trajectory.dcd")
+
+# Initialize volume analyzer
+va = VolumeAnalyzer(
+    u, 
+    selection="not water and not name I and not name Na+",
+    spacing=1.0,  # Grid spacing in Å
+    probe_radius=1.4  # Water-sized probe
+)
+
+# Compute volume for a specific frame
+target_vol, cavity_vol, inside_mask, cavities = va.compute_frame(0, return_masks=True)
+print(f"Target volume: {target_vol:.2f} Å³")
+print(f"Cavity volume: {cavity_vol:.2f} Å³")
+
+# Interactive 3D visualization
+fig = va.plot_interactive_3d()
+fig.show()
+
+# Generate GIF showing volume computation pipeline
+va.make_volume_pipeline_gif(frame_index=0, gif_path="volume_pipeline.gif", atom_stride=5, fps=10)
 ```
 
 ## Crucial Frame Labeling
@@ -118,10 +184,11 @@ Plotter.plot_endpoint_volume_correlation(dists_dict, volume, res_sel_list, corr_
 - Integrated in `FrameSelection`: Boost scores for endpoint extremes + volume events.
 
 ## Limitations
-- Assumes ~24 GSA residues (adjustable).
+- Assumes ~24 GSA residues (adjustable via selections).
 - RDKit for endpoints: Best for small fragments; fallback to geometric if fails.
-- Volume approx. as `edge_mean³`—use convex hull for distorted cubes (future enhancement).
-- Tested on Amber; adapt selections for other formats.
+- Volume computation: `GSAnalyzer` uses `edge_mean³` approximation; `VolumeAnalyzer` provides more accurate voxel-based method.
+- Tested on Amber/GROMACS formats; adapt selections for other formats.
+- Volume analysis can be memory-intensive for large systems (adjust `spacing` parameter).
 
 ## Contributing
 - Add tests: `pytest tests/test_endpoints.py`.
@@ -134,177 +201,86 @@ MIT—feel free to adapt for publications (cite MDAnalysis/RDKit).
 
 # Workflow: GSA Nanocube Endpoint-Driven Analysis
 
-This workflow script (`workflow.py`) orchestrates the pipeline. Run with:
+The main workflow script (`run_trajectory_analysis.py`) orchestrates the pipeline. Run with:
 ```bash
-python workflow.py --topology gsa.prmtop --trajectory gsa.nc --gsa_resids "1-24" --guest_sel "resname GUEST" --out_prefix gsa_analysis --max_frames 20
+python run_trajectory_analysis.py \
+  --top gsa.prmtop \
+  --traj gsa.nc \
+  --out_prefix gsa_analysis \
+  --max_frames 20 \
+  --endpoint_residues "resid 1" "resid 2" ... "resid 24" \
+  --cube_faces "resid 1-4" "resid 5-8" "resid 9-12" "resid 13-16" "resid 17-20" "resid 21-24" \
+  --plot_top_correlations 5
 ```
 
-It labels crucial frames (e.g., "expansion", "guest_entry") in the output CSV.
+Key CLI arguments:
+- `--top`: Topology file (PDB/PSF/PRMTOP)
+- `--traj`: Trajectory file(s) (XTC/DCD/TRR/NC)
+- `--out_prefix`: Output prefix for all files
+- `--endpoint_residues`: List of residue selections for endpoint analysis
+- `--cube_faces`: List of face selections for cube volume computation
+- `--max_frames`: Maximum number of frames to save
+- `--align_sel`: Selection for trajectory alignment (default: `resid 1`)
+- `--cpd_n`: Number of change-points to detect (default: 6)
+- `--plot_top_correlations`: Number of top endpoint pairs to plot (default: 5)
+
+The script automatically labels crucial frames and generates comprehensive outputs.
+
+## Output Files
+
+The pipeline generates several output files:
+
+- `{prefix}_metrics.csv`: Global trajectory metrics (RMSD, Rg, PCs, strain, contacts)
+- `{prefix}_scores.csv`: Frame scores with clustering labels and selection flags
+- `{prefix}_endpoint_metrics.csv`: Endpoint-based metrics per residue (if `--endpoint_residues` provided)
+- `{prefix}_endpoint_volume_correlation.csv`: Correlation between endpoint distances and cube volume
+- `{prefix}_endpoint_variation.csv`: Variation analysis of endpoint pair distances
+- `{prefix}_key_endpoint_pairs.csv`: Key endpoint pairs driving expansion/shrinkage
+- `{prefix}_endpoint_distances.png`: Plot of endpoint distances over time
+- `{prefix}_endpoint_volume_correlation.png`: Plot of top endpoint-volume correlations
+- `{prefix}_SUMMARY.txt`: Text summary of analysis results
+- `{prefix}_frames/`: Directory containing selected frames as PDB files
+
+## Programmatic Usage
+
+For programmatic access, import classes directly:
 
 ```python
-#!/usr/bin/env python3
-"""
-GSA Nanocube MD Analysis Workflow
-================================
-Step-by-step pipeline: Load trajectory → GSA metrics → Endpoints → Correlations → Frame selection → Outputs.
-Usage: python workflow.py [args]
-"""
-
-import argparse
-import os
-import warnings
-from typing import List
-import numpy as np
-import pandas as pd
-import MDAnalysis as mda
-
-# Import pipeline (assume in same dir or PYTHONPATH)
-from trajectory_analysis import (
-    TrajectoryMetrics, ClusteringAnalysis, FrameSelection, GSAnalyzer,
-    EndpointAnalyzer, Plotter, FileIO
+from trajectory_deformation_workflow import (
+    AlignedTrajectory, TrajectoryMetrics, ClusteringAnalysis,
+    FrameSelection, GSAnalyzer, EndpointAnalyzer, Plotter, FileIO
 )
 from endpoints_finder import EndpointsFinder
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="GSA Nanocube Trajectory Analysis")
-    parser.add_argument("--topology", required=True, help="Topology file (e.g., prmtop/pdb)")
-    parser.add_argument("--trajectory", required=True, help="Trajectory file (e.g., nc/dcd)")
-    parser.add_argument("--gsa_resids", default="1-24", help="GSA residue IDs (e.g., '1-24' or '1 5 10')")
-    parser.add_argument("--guest_sel", default=None, help="Guest selection (e.g., 'resname GUEST')")
-    parser.add_argument("--out_prefix", default="analysis", help="Output prefix")
-    parser.add_argument("--max_frames", type=int, default=20, help="Max selected frames")
-    parser.add_argument("--corr_threshold", type=float, default=0.6, help="Min |correlation| for key pairs")
-    parser.add_argument("--volume_threshold", type=float, default=0.1, help="Fractional volume change for labeling")
-    return parser.parse_args()
-
-def main():
-    args = parse_args()
-    print(f"Loading {args.topology} + {args.trajectory}...")
-
-    # Step 1: Load Universe
-    u = mda.Universe(args.topology, args.trajectory)
-    gsa_sel = "resname GSA"
-
-    # Parse resids
-    if '-' in args.gsa_resids:
-        start, end = map(int, args.gsa_resids.split('-'))
-        resids = list(range(start, end + 1))
-    else:
-        resids = list(map(int, args.gsa_resids.split()))
-    res_sel_list: List[str] = [f"resid {rid} and {gsa_sel}" for rid in resids]
-    print(f"Analyzing {len(res_sel_list)} GSA residues")
-
-    # Step 2: GSA Nanocube Metrics
-    face_sels = GSAnalyzer.gsa_auto_faces_by_kmeans(u, gsa_sel=gsa_sel, n_faces=6)
-    gsa_df = GSAnalyzer.gsa_nanocube_metrics(
-        u, face_sel_list=face_sels, guest_sel=args.guest_sel, out_prefix=args.out_prefix
-    )
-    volume = gsa_df['volume'].values
-    mean_vol = np.nanmean(volume)
-    print(f"GS A metrics saved: Mean volume = {mean_vol:.1f} Å³")
-
-    # Step 3: Endpoint Analysis
-    finder = EndpointsFinder(
-        angle_tol_deg=10.0,
-        use_graph_farness=True,
-        alpha=0.3,
-        ring_min_gap_deg=45.0,  # For aromatic GSA
-        step_back_from_terminals=True  # Handles explicit H
-    )
-    endpoint_df = EndpointAnalyzer.compute_endpoint_metrics(u, res_sel_list, finder)
-    dists_dict = EndpointAnalyzer.compute_endpoint_distances(u, res_sel_list, finder)
-    endpoint_df.to_csv(f"{args.out_prefix}_endpoints.csv", index=False)
-    print("Endpoint metrics saved")
-
-    # Step 4: Correlations & Key Pairs
-    corr_df = EndpointAnalyzer.compute_endpoint_volume_correlation(dists_dict, volume, res_sel_list)
-    corr_df.to_csv(f"{args.out_prefix}_correlations.csv", index=False)
-    key_pairs = EndpointAnalyzer.identify_key_endpoint_pairs_for_expansion(
-        dists_dict, volume, res_sel_list,
-        variation_threshold=0.05, correlation_threshold=args.corr_threshold, top_n=10
-    )
-    key_pairs.to_csv(f"{args.out_prefix}_key_pairs.csv", index=False)
-    print(f"Correlations saved: {len(key_pairs[key_pairs['abs_correlation'] > args.corr_threshold])} crucial pairs")
-
-    # Step 5: Basic Metrics for Selection
-    rmsd = TrajectoryMetrics.compute_rmsd(u, gsa_sel)
-    rg = TrajectoryMetrics.radius_of_gyration(u, gsa_sel)
-    pcs, _ = TrajectoryMetrics.pca_on_fluctuations(u, gsa_sel, n_components=3)
-    strain = TrajectoryMetrics.local_affine_strain_proxy(u, gsa_sel)
-
-    # Clustering & Change Points
-    clustering = ClusteringAnalysis()
-    _, medoids = clustering.cluster_frames(pcs)
-    cpd_idx = clustering.change_points(volume, n_bkps=5)  # Use volume for events
-
-    # Step 6: Score & Select Frames
-    scores, score_df = FrameSelection.score_frames(rmsd, rg, pcs, cpd_idx, strain)
-    chosen_frames, selected_df = FrameSelection.select_meaningful_frames(
-        medoids=medoids,
-        cpd_idx=cpd_idx,
-        scores=scores,
-        pcs=pcs,
-        max_frames=args.max_frames,
-        endpoint_dists_array=dists_dict,
-        endpoint_metrics_df=endpoint_df
-    )
-    selected_df.to_csv(f"{args.out_prefix}_selected_frames.csv", index=False)
-
-    # Label Crucial Frames
-    T = len(volume)
-    labels = ['normal'] * T
-    delta_vol = np.abs(np.diff(volume, prepend=volume[0]))
-    expansion_mask = (delta_vol / mean_vol > args.volume_threshold) & (np.diff(volume) > 0)
-    shrinkage_mask = (delta_vol / mean_vol > args.volume_threshold) & (np.diff(volume) < 0)
-    guest_entry_mask = np.array([d < 5.0 for d in gsa_df['guest_min_center_dist']]) if args.guest_sel else np.zeros(T, bool)
-
-    labels = np.array(labels)
-    labels[1:][expansion_mask] = 'expansion'
-    labels[1:][shrinkage_mask] = 'shrinkage'
-    labels[guest_entry_mask] = 'guest_entry'  # Overwrite if overlap
-    selected_df['label'] = [labels[i] for i in selected_df.index if 'frame' in selected_df.columns else labels[chosen_frames]]
-
-    print(f"Selected {len(chosen_frames)} frames; Crucial: {np.sum(labels != 'normal')} labeled events")
-
-    # Step 7: Outputs
-    os.makedirs(f"{args.out_prefix}_frames", exist_ok=True)
-    FileIO.save_frames_as_pdb(u, chosen_frames, args.out_prefix, sel=gsa_sel)
-    gsa_df.to_csv(f"{args.out_prefix}_gsa_metrics.csv", index=False)
-
-    # Plots
-    Plotter.plot_endpoint_distances(dists_dict, res_sel_list, args.out_prefix)
-    Plotter.plot_endpoint_volume_correlation(
-        dists_dict, volume, res_sel_list, corr_df, args.out_prefix, top_n=5
-    )
-
-    print(f"Analysis complete! Outputs in {args.out_prefix}_*")
-
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=UserWarning)  # Suppress non-critical
-    main()
+from volume_analyser import VolumeAnalyzer
 ```
 
-### Jupyter Notebook Outline (example_workflow.ipynb)
-For interactive use, copy this into a notebook:
+## Advanced Features
 
-```python
-# Cell 1: Imports & Load
-import MDAnalysis as mda
-# ... (imports as above)
-u = mda.Universe("gsa.prmtop", "gsa.nc")
+### Volume Analysis
+The `VolumeAnalyzer` class provides sophisticated volume computation:
+- **Target Volume**: Solvent-excluded volume using VDW radii + probe radius
+- **Cavity Detection**: Identifies enclosed voids within the structure
+- **Interactive Visualization**: 3D Plotly plots with cavity highlighting
+- **GIF Generation**: Animated visualization of volume computation pipeline
 
-# Cell 2: GSA Metrics
-# (Code from Step 2)
+### Endpoint Analysis
+The `EndpointsFinder` class identifies molecular endpoints using:
+- Convex hull analysis on 2D projections
+- Graph-based topological farness
+- Ring-aware endpoint selection for aromatic systems
+- Terminal atom handling for explicit hydrogen systems
 
-# Cell 3: Endpoints & Distances
-# (Code from Step 3; visualize finder on one residue)
+### Frame Selection Strategy
+Frames are selected based on:
+1. **Cluster Medoids**: Representative states from HDBSCAN/KMeans clustering
+2. **Change-Points**: Transition frames detected via ruptures
+3. **Metric Extremes**: Frames with extreme RMSD, Rg, or PC values
+4. **Endpoint Dynamics**: Frames with significant endpoint distance changes
+5. **Non-redundancy**: Distance threshold in PC space prevents similar frames
 
-# Cell 4: Correlations
-# (Code from Step 4; plot top pairs)
+## Jupyter Notebooks
 
-# Cell 5: Frame Selection & Labeling
-# (Code from Step 6; inspect selected_df)
-
-# Cell 6: Outputs & Plots
-# (Code from Step 7)
-```
+See `ngl_traj_plot.ipynb` for interactive trajectory visualization examples. The notebook demonstrates:
+- Loading and visualizing trajectories
+- Endpoint visualization
+- Volume analysis integration
