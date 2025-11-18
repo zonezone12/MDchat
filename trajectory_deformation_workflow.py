@@ -19,13 +19,6 @@ import os
 import sys
 import warnings
 from typing import Optional, Tuple, List, Union, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    try:
-        from .endpoints_finder import EndpointsFinder
-    except ImportError:
-        from MD_analysis.endpoints_finder import EndpointsFinder
-
 import numpy as np
 import pandas as pd
 
@@ -49,7 +42,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 from sklearn.cluster import KMeans
-
+from rdkit.Chem import Draw
 # Optional packages
 try:
     import hdbscan  # type: ignore
@@ -1710,3 +1703,13 @@ class Plotter:
         self.output_prefix = out_prefix
         self.plots_generated.append(plot_path)
         print(f"Endpoint-volume correlation plot saved to {plot_path}")
+   
+    def plot_residue_endpoints(self, u: mda.Universe, residue_sel: str = 'resid 1', out_prefix: str = 'residue_endpoints') -> None:
+        """Plot the endpoints of a residue."""
+        sel = u.select_atoms(residue_sel)
+        mol = sel.convert_to('RDKIT')
+        if mol is None:
+            raise ValueError("RDKit conversion failed")
+        
+        mtest=Draw.MolToImage(EndpointsFinder().to_2d_coords(mol)[0], size=(600, 400), highlightAtoms=EndpointsFinder().find_endpoints(mol), highlightColor=(1, 0, 0))  # Red highlight
+        mtest.save(out_prefix+'.png',format='png')

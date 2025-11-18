@@ -22,12 +22,7 @@ prmtop_list=[i for i in os.listdir() if i.endswith('.prmtop')]
 for prmtop in prmtop_list:
     crd=prmtop.replace('_ca.prmtop','.bak')+'/109345/mdcrd_v'
     u=mda.Universe(prmtop, crd,format="TRJ")
-    sel=u.select_atoms('not water and not name I and not name Na+')
-    resid1=sel.residues[0]
-    mol=resid1.atoms.convert_to('RDKIT')
-    AllChem.Compute2DCoords(mol)
-    efep=ef().find_endpoints(mol)
-    mtest=Draw.MolToImage(mol, size=(600, 400), highlightAtoms=efep, highlightColor=(1, 0, 0))  # Red highlight
-    mtest.save(prmtop.replace('_ca.prmtop','.png'),format='png')
+    Plotter().plot_residue_endpoints(u, 'resid 1', prmtop.replace('_ca.prmtop','_endpoints.png'))
     VA=VolumeAnalyzer(u, selection='not water and not name I and not name Na+')
     VA.make_volume_pipeline_gif(frame_index=0,gif_path=prmtop.replace('_ca.prmtop','.gif'),atom_stride=5,fps=10)
+    
