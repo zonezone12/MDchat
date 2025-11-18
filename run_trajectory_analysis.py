@@ -34,6 +34,7 @@ from trajectory_deformation_workflow import (
     EndpointsFinder  # type: ignore
 )
 
+from volume_analyser import VolumeAnalyzer
 
 def main():
     p = argparse.ArgumentParser(description="Detect structural deformation and auto-select meaningful frames from trajectories.")

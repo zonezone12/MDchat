@@ -69,6 +69,15 @@ except ImportError:
     EndpointsFinder = None  # type: ignore
     warnings.warn("endpoints_finder module not found. Endpoint-based metrics will be disabled.")
 
+# Import VolumeAnalyzer for volume computation
+try:
+    from volume_analyser import VolumeAnalyzer
+    HAS_VOLUME_ANALYZER = True
+except ImportError:
+    HAS_VOLUME_ANALYZER = False
+    VolumeAnalyzer = None  # type: ignore
+    warnings.warn("volume_analyser module not found. Volume computation will fallback to edge-based method.")
+
 
 # ============================================================================
 # Class: AlignedTrajectory
@@ -881,12 +890,26 @@ class GSAnalyzer:
         corners = [u.select_atoms(s) for s in (corner_sel_list or [])]
         guest = u.select_atoms(guest_sel) if guest_sel else None
         
-        def center_of_face(ag):
-            return ag.center_of_geometry()
+        # Combine all face selections for volume computation using VolumeAnalyzer
+        combined_sel = " or ".join([f"({s})" for s in face_sel_list])
+        
+        # Initialize VolumeAnalyzer if available
+        volume_analyzer = None
+        if HAS_VOLUME_ANALYZER and VolumeAnalyzer is not None:
+            try:
+                volume_analyzer = VolumeAnalyzer(
+                    universe=u,
+                    selection=combined_sel,
+                    spacing=1.0,
+                    probe_radius=1.4
+                )
+            except Exception as e:
+                warnings.warn(f"Failed to initialize VolumeAnalyzer: {e}. Falling back to edge-based volume computation.")
+                volume_analyzer = None
         
         rows = []
         for ts in u.trajectory:
-            fcent = np.array([center_of_face(ag) for ag in faces])
+            fcent = np.array([ag.center_of_geometry() for ag in faces])
             edges = []
             if len(fcent) >= 4:
                 for i in range(len(fcent)):
@@ -904,7 +927,7 @@ class GSAnalyzer:
             planar_rms_list = []
             face_norms_list = []
             for ag in faces:
-                planar_rms, face_normal_vector = GSAnalyzer.residue_planar_rms(ag)
+                planar_rms, face_normal_vector = self.residue_planar_rms(ag)
                 planar_rms_list.append(planar_rms)
                 face_norms_list.append(face_normal_vector)
             
@@ -921,7 +944,16 @@ class GSAnalyzer:
             if guest is not None and len(guest):
                 guest_min = float(np.linalg.norm(guest.positions - cube_center, axis=1).min())
             
-            volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
+            # Compute volume using VolumeAnalyzer if available, otherwise fallback to edge-based method
+            if volume_analyzer is not None:
+                try:
+                    target_volume, cavity_volume = volume_analyzer.compute_frame(ts.frame, return_masks=False)
+                    volume = target_volume+cavity_volume
+                except Exception as e:
+                    warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
+                    volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
+            else:
+                volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
             
             rows.append({
                 'frame': ts.frame,

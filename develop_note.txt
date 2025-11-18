@@ -4,3 +4,6 @@ MD analysis package them have call residue so we can simply use resid 1 ,2 ,3 to
 Then we calculatet the endpoints of these residues. These endpoints are poteintailly targets to plot the distance , 
 finding the correlation of the distances between endpoints and volume, 
 labeling  the crucial frames the structure shrinkage or expandsion and the guests entering the nano cube center.
+
+
+Compactness is typically defined as the ratio of a protein's accessible surface area (SASA) to the surface area of an ideal sphere of the same volume  sphere (4/3)pi*R^3 

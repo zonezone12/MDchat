@@ -13,9 +13,10 @@ import matplotlib.pyplot as plt
 
 prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
 crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
-last_u = mda.Universe(prmtop, crd,format="TRJ")
+first_u= mda.Universe(prmtop, crd,format="TRJ")
+
+last_u=mda.Universe(prmtop, crd,format="TRJ")
 last_u.trajectory[-1]
-first_u=mda.Universe(prmtop, crd,format="TRJ")
 first_u.trajectory[0]
 first_sel=first_u.select_atoms('not water and not name I and not name Na+')
 last_sel=last_u.select_atoms('not water and not name I and not name Na+')
@@ -34,6 +35,43 @@ rep_sel=first_u.select_atoms('resid 1')
 lrep_sel=last_u.select_atoms('resid 1')
 al_rmsd_resid1=rms.rmsd(rep_sel[rep[1]].positions, lrep_sel[rep[1]].positions, superposition=False)
 print(f"Aligned RMSD of residue 1: {al_rmsd_resid1:.2f}")
+
+from volume_analyser import VolumeAnalyzer
+VA=VolumeAnalyzer(first_u, selection='not water and not name I and not name Na+')
+fig=VA.plot_interactive_3d()
+fig.show()
+
+VA.make_mark_occupancy_gif(frame_index=0,gif_path="occupancy_build_frame0.gif",atom_stride=5,voxel_stride=2,)
+
+VA.make_volume_pipeline_gif(frame_index=0,gif_path="nanocube_volume_pipeline.gif",atom_stride=5,fps=)
+
+target_vol, cavity_vol, inside, cavities=VA.compute_frame(0,return_masks=True)
+cmv=AllChem.ComputeMolVolume(first_sel.convert_to('RDKIT'))
+from rdkit.Chem import rdMolDescriptors, rdchem
+from rdkit.Chem import rdDistGeom
+ps = rdDistGeom.ETKDGv3()
+ps.randomSeed = 0xa100f
+
+mol = Chem.AddHs(Chem.MolFromSmiles('CCC')) #exp 74 A^3
+rdDistGeom.EmbedMolecule(mol,ps)
+from MDAnalysis.converters.RDKit import RDKitReader
+u_from_rdkit = mda.Universe(mol, reader=RDKitReader)
+VA=VolumeAnalyzer(u_from_rdkit, spacing=0.1,probe_radius=0.5,selection='all')
+target_vol, cavity_vol, inside, cavities=VA.compute_frame(0,return_masks=True)
+
+
+mol = first_sel.convert_to('RDKIT')
+pt = rdchem.GetPeriodicTable()
+
+radii = [pt.GetRcovalent(atom.GetAtomicNum()) for atom in mol.GetAtoms()]
+dclv=rdMolDescriptors.DoubleCubicLatticeVolume(mol, radii,isProtein=False)
+vdw_volume = dclv.GetVDWVolume()
+polar_volume = dclv.GetPolarVolume()
+volume=dclv.GetVolume()
+print(vdw_volume,polar_volume,volume)
+
+
+
 
 mtest=Draw.MolToImage(ef().to_2d_coords(rep_sel.convert_to('RDKIT'))[0], size=(600, 400), highlightAtoms=rep[1], highlightColor=(1, 0, 0))  # Red highlight
 mtest.show()
