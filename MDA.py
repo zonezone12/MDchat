@@ -109,11 +109,10 @@ testsmi=Chem.AddHs(testsmi)
 
 
 def To_2d_coords(mol:Chem.Mol):
-    m = Chem.Mol(mol)
-    AllChem.Compute2DCoords(m)
-    conf = m.GetConformer()
-    xy = np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in range(m.GetNumAtoms())])
-    return m, xy
+    AllChem.Compute2DCoords(mol)
+    conf = mol.GetConformer()
+    xy = np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in range(mol.GetNumAtoms())])
+    return mol, xy
 
 from rdkit.Chem import Draw
 m2d, xy = To_2d_coords(mol)
@@ -130,7 +129,7 @@ def graph_farness(mol):
     return D.max(axis=1).astype(float)
 
     
-def center_endpoints_oppsite_ends(xy, endpointsId: List[int]):
+def center_endpoints_oppsite_ends(xy, endpointsId):
     center = xy.mean(axis=0)
     endpoints = xy[endpointsId]
     vectors = center - endpoints
@@ -175,4 +174,48 @@ image = Draw.MolToImage(m2d, size=(600, 400), highlightAtoms=get_endpointsId_fro
 test=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=get_endpointsId_from_2d_coords(txy), highlightColor=(1, 0, 0))  # Red highlight
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=center_endpoints_oppsite_ends(txy,get_endpointsId_from_2d_coords(txy)), highlightColor=(1, 0, 0))  # Red highlight
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=find_endpoints(tm), highlightColor=(1, 0, 0))  # Red highlight
+
+from endpoints_finder import EndpointsFinder
+ef=EndpointsFinder()
+
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=ef._get_endpoints_id_from_2d_coords(xy), highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('endpoints_id_from_2d_coords.png')
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=ef._center_endpoints_opposite_ends(xy, ef._get_endpoints_id_from_2d_coords(xy)), highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('center_endpoints_opposite_ends.png')
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=ef.find_endpoints(mol), highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('find_endpoints.png')
+
+
+endpoints=ef._get_endpoints_id_from_2d_coords(xy)
+f = ef._graph_farness(m2d)
+f = (f - f.min()) / (np.ptp(f) + 1e-12)
+# re-rank hull tips by farness and keep top 80–100% (gentle pruning)
+ranked = sorted(endpoints, key=lambda i: 0.2 * f[i] + (1 - 0.2) * 1.0, reverse=True)
+endpoints = set(ranked)  # no strong pruning by default
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=endpoints, highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('graph_farness.png')
+
+
+
+endpoints=ef._get_endpoints_id_from_2d_coords(xy)
+endpoints = set(ef._ring_spacing_filter(m2d, xy, list(endpoints)))
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=endpoints, highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('ring_spacing_filter.png')
+endpoints=ef._get_endpoints_id_from_2d_coords(xy)
+endpoints = set(ef._step_back_from_terminals(m2d, list(endpoints)))
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=endpoints, highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('step_back_from_terminals.png')
+
+endpoints = set(ef._extend_to_ring_atoms(m2d, list(endpoints)))
+mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=endpoints, highlightColor=(1, 0, 0))  # Red highlight
+mimage.save('extend_to_ring_atoms.png')
+
+ef=EndpointsFinder(step_back_from_terminals=True,extend_to_ring_atoms=False)
+testsmi=Chem.MolFromSmiles('C1=CC(=CC=C1C2=CC=C(C=C2)C(=O)O)C(=O)O')
+testsmi=Chem.AddHs(testsmi)
+m2d,xy=To_2d_coords(testsmi)
+testm = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=ef.find_endpoints(testsmi), highlightColor=(1, 0, 0))  # Red highlight
+testm.show()
+
+testm.save('4-(4-carboxyphenyl)benzoicacid_find_endpoints.png')
 

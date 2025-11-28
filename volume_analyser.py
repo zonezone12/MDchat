@@ -269,290 +269,8 @@ class VolumeAnalyzer:
         # Cavities = empty voxels that are NOT in outside_region
         cavities = empty & (~outside_region)
         return cavities
-
-    def make_volume_pipeline_gif(
-        self,
-        frame_index: int = 0,
-        gif_path: str = "volume_pipeline.gif",
-        atom_stride: int = 1,
-        voxel_stride: int = 1,
-        max_cavity_steps: int | None = None,
-        elev: float = 20.0,
-        azim: float = -60.0,
-        fps: float = 10.0,
-        show_inside_shell: bool = True,
-    ):
-        """
-        Unified GIF for a single frame:
-
-        Phase 1: _mark_occupancy
-            - Inside grid grows as atoms are stamped (raw inside mask)
-        Phase 2: smoothing + cavity detection
-            - Inside mask is optionally smoothed (binary closing)
-            - Outside region flood-fills empty space from boundary
-            - Cavities = empty & ~outside_region
-
-        Visualization:
-            - gray shell  = thin surface of inside (optional)
-            - red points  = cavity voxels (in cavity phase only)
-            - colored dots= MDAnalysis atoms
-            - RDKit 2D inset from self.ag.convert_to("RDKIT"), if available
-        """
-        if voxel_stride < 1:
-            raise ValueError("voxel_stride must be >= 1")
-
-        import io
-        import imageio.v2 as imageio
-        import numpy as np
-        from scipy import ndimage
-
-        # --- 1. Set frame and build grid (as in compute_frame) ---
-        self.universe.trajectory[frame_index]
-        coords = self.ag.positions.copy()
-        radii_eff = self._effective_radii()
-
-        if self.margin is not None:
-            margin = self.margin
-        else:
-            margin = np.max(radii_eff) + self.spacing
-
-        x_axis, y_axis, z_axis, shape, origin = self._build_grid(
-            coords, self.spacing, margin
-        )
-        self._last_grid_axes = (x_axis, y_axis, z_axis)
-
-        inside_raw = np.zeros(shape, dtype=bool)
-
-        n_atoms = coords.shape[0]
-
-        # --- MD structure in subsampled grid coordinates ---
-        x0, y0, z0 = x_axis[0], y_axis[0], z_axis[0]
-        step_size = self.spacing * voxel_stride
-
-        gx = (coords[:, 0] - x0) / step_size
-        gy = (coords[:, 1] - y0) / step_size
-        gz = (coords[:, 2] - z0) / step_size
-
-        elements = [self._get_element(atom) or "C" for atom in self.ag.atoms]
-        color_map = {
-            "H": "lightgray",
-            "C": "black",
-            "N": "blue",
-            "O": "red",
-            "F": "green",
-            "S": "orange",
-            "P": "purple",
-        }
-        atom_colors = [color_map.get(el.upper(), "gray") for el in elements]
-
-        nx_full, ny_full, nz_full = inside_raw.shape
-        nx_sub = (nx_full - 1) // voxel_stride + 1
-        ny_sub = (ny_full - 1) // voxel_stride + 1
-        nz_sub = (nz_full - 1) // voxel_stride + 1
-
-        images = []
-
-        # Struct for shell erosion
-        struct3 = ndimage.generate_binary_structure(3, 1)
-
-        voxel_volume = self.spacing ** 3
-
-        def render_state(
-            phase: str,
-            step_idx: int,
-            inside_mask: np.ndarray,
-            outside_region: np.ndarray | None,
-            cavity_mask: np.ndarray | None,
-        ):
-            """
-            Render a single frame.
-
-            - phase: "occupancy" or "cavity"
-            - inside_mask: 3D bool of inside voxels (raw or smoothed)
-            - outside_region: 3D bool of outside flood (None in occupancy phase)
-            - cavity_mask: 3D bool of cavities (None in occupancy phase)
-            """
-            # subsample
-            vis_inside = inside_mask[::voxel_stride, ::voxel_stride, ::voxel_stride]
-
-            if cavity_mask is not None:
-                vis_cav = cavity_mask[::voxel_stride, ::voxel_stride, ::voxel_stride]
-            else:
-                vis_cav = np.zeros_like(vis_inside, dtype=bool)
-
-            # shell of inside (for orientation)
-            if show_inside_shell:
-                inner = ndimage.binary_erosion(
-                    vis_inside, structure=struct3, border_value=0
-                )
-                shell = vis_inside & (~inner)
-            else:
-                shell = np.zeros_like(vis_inside, dtype=bool)
-
-            # cavity voxels indices (scatter)
-            cav_ix, cav_iy, cav_iz = np.where(vis_cav)
-
-            fig = plt.figure(figsize=(4, 4))
-            ax = fig.add_subplot(111, projection="3d")
-
-            # inside shell as faint voxels
-            if show_inside_shell and np.any(shell):
-                shell_colors = np.zeros(shell.shape + (4,), dtype=float)
-                shell_colors[..., 3] = 0.0
-                shell_colors[shell] = (0.8, 0.8, 0.8, 0.15)
-                ax.voxels(shell, facecolors=shell_colors, edgecolor=None)
-
-            # cavity as red scatter (cannot be occluded)
-            if cav_ix.size > 0:
-                ax.scatter(
-                    cav_ix,
-                    cav_iy,
-                    cav_iz,
-                    s=25,
-                    c="red",
-                    depthshade=False,
-                )
-
-            # MD structure
-            ax.scatter(gx, gy, gz, s=10, c=atom_colors, depthshade=False)
-
-            ax.set_xlim(0, nx_sub)
-            ax.set_ylim(0, ny_sub)
-            ax.set_zlim(0, nz_sub)
-            ax.set_box_aspect((nx_sub, ny_sub, nz_sub))
-
-            ax.view_init(elev=elev, azim=azim)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_zticks([])
-
-            inside_vol = inside_mask.sum() * voxel_volume
-            if cavity_mask is not None:
-                cav_vol = cavity_mask.sum() * voxel_volume
-                cav_vox = cavity_mask.sum()
-            else:
-                cav_vol = 0.0
-                cav_vox = 0
-
-            title_phase = "Occupancy build" if phase == "occupancy" else "Cavity detection"
-            ax.set_title(
-                f"{title_phase} – step {step_idx}\n"
-                f"V_inside ≈ {inside_vol:.0f} Å³, "
-                f"cavity voxels: {cav_vox}, "
-                f"Vcav ≈ {cav_vol:.0f} Å³",
-                fontsize=8,
-            )
-
-            plt.tight_layout()
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png", dpi=150)
-            plt.close(fig)
-            buf.seek(0)
-            img = imageio.imread(buf)
-            images.append(img)
-
-        # ------------------------
-        # PHASE 1: _mark_occupancy
-        # ------------------------
-
-        # initial empty grid
-        render_state(
-            phase="occupancy",
-            step_idx=0,
-            inside_mask=inside_raw,
-            outside_region=None,
-            cavity_mask=None,
-        )
-
-        for i in range(n_atoms):
-            # stamp a single atom
-            self._mark_occupancy(
-                inside_raw,
-                x_axis,
-                y_axis,
-                z_axis,
-                coords[i : i + 1],
-                radii_eff[i : i + 1],
-            )
-            n_done = i + 1
-            if (n_done % atom_stride == 0) or (n_done == n_atoms):
-                render_state(
-                    phase="occupancy",
-                    step_idx=n_done,
-                    inside_mask=inside_raw,
-                    outside_region=None,
-                    cavity_mask=None,
-                )
-
-        # ------------------------
-        # PHASE 2: smoothing + cavities
-        # ------------------------
-
-        # optional smoothing (same as compute_frame)
-        if self.smooth_surface and self.smooth_iterations > 0:
-            struct = ndimage.generate_binary_structure(rank=3, connectivity=1)
-            inside_smooth = ndimage.binary_closing(
-                inside_raw, structure=struct, iterations=self.smooth_iterations
-            )
-        else:
-            inside_smooth = inside_raw.copy()
-
-        empty = ~inside_smooth
-
-        # seeds on boundary
-        nx, ny, nz = empty.shape
-        outside_region = np.zeros_like(empty, dtype=bool)
-        outside_region[0, :, :] |= empty[0, :, :]
-        outside_region[nx - 1, :, :] |= empty[nx - 1, :, :]
-        outside_region[:, 0, :] |= empty[:, 0, :]
-        outside_region[:, ny - 1, :] |= empty[:, ny - 1, :]
-        outside_region[:, :, 0] |= empty[:, :, 0]
-        outside_region[:, :, nz - 1] |= empty[:, :, 0]
-
-        struct_out = ndimage.generate_binary_structure(rank=3, connectivity=1)
-
-        if max_cavity_steps is None:
-            max_cavity_steps = nx + ny + nz
-
-        # initial cavity mask
-        cav_full = empty & (~outside_region)
-        render_state(
-            phase="cavity",
-            step_idx=0,
-            inside_mask=inside_smooth,
-            outside_region=outside_region,
-            cavity_mask=cav_full,
-        )
-
-        for k in range(1, max_cavity_steps + 1):
-            dilated = ndimage.binary_dilation(outside_region, structure=struct_out)
-            outside_next = (dilated & empty) | outside_region
-
-            cav_full = empty & (~outside_next)
-
-            render_state(
-                phase="cavity",
-                step_idx=k,
-                inside_mask=inside_smooth,
-                outside_region=outside_next,
-                cavity_mask=cav_full,
-            )
-
-            if np.array_equal(outside_next, outside_region):
-                break
-
-            outside_region = outside_next
-
-        if not images:
-            raise RuntimeError("No frames collected for GIF.")
-
-        imageio.mimsave(gif_path, images, duration=1.0 / fps)
-        print(f"Saved volume pipeline GIF to: {gif_path}")
-
-
+    
     # ----------- per-frame computation -----------
-    # ----------- per-frame computation -----------
-
     def _effective_radii(self) -> np.ndarray:
         """
         Apply radii scaling & offset, then add probe radius.
@@ -920,5 +638,281 @@ class VolumeAnalyzer:
         )
         return fig
 
+    def make_volume_pipeline_gif(
+        self,
+        frame_index: int = 0,
+        gif_path: str = "volume_pipeline.gif",
+        atom_stride: int = 1,
+        voxel_stride: int = 1,
+        max_cavity_steps: int | None = None,
+        elev: float = 20.0,
+        azim: float = -60.0,
+        fps: float = 10.0,
+        show_inside_shell: bool = True,
+    ):
+        """
+        Unified GIF for a single frame:
 
+        Phase 1: _mark_occupancy
+            - Inside grid grows as atoms are stamped (raw inside mask)
+        Phase 2: smoothing + cavity detection
+            - Inside mask is optionally smoothed (binary closing)
+            - Outside region flood-fills empty space from boundary
+            - Cavities = empty & ~outside_region
 
+        Visualization:
+            - gray shell  = thin surface of inside (optional)
+            - red points  = cavity voxels (in cavity phase only)
+            - colored dots= MDAnalysis atoms
+            - RDKit 2D inset from self.ag.convert_to("RDKIT"), if available
+        """
+        if voxel_stride < 1:
+            raise ValueError("voxel_stride must be >= 1")
+
+        import io
+        import imageio.v2 as imageio
+        import numpy as np
+        from scipy import ndimage
+
+        # --- 1. Set frame and build grid (as in compute_frame) ---
+        self.universe.trajectory[frame_index]
+        coords = self.ag.positions.copy()
+        radii_eff = self._effective_radii()
+
+        if self.margin is not None:
+            margin = self.margin
+        else:
+            margin = np.max(radii_eff) + self.spacing
+
+        x_axis, y_axis, z_axis, shape, origin = self._build_grid(
+            coords, self.spacing, margin
+        )
+        self._last_grid_axes = (x_axis, y_axis, z_axis)
+
+        inside_raw = np.zeros(shape, dtype=bool)
+
+        n_atoms = coords.shape[0]
+
+        # --- MD structure in subsampled grid coordinates ---
+        x0, y0, z0 = x_axis[0], y_axis[0], z_axis[0]
+        step_size = self.spacing * voxel_stride
+
+        gx = (coords[:, 0] - x0) / step_size
+        gy = (coords[:, 1] - y0) / step_size
+        gz = (coords[:, 2] - z0) / step_size
+
+        elements = [self._get_element(atom) or "C" for atom in self.ag.atoms]
+        color_map = {
+            "H": "lightgray",
+            "C": "black",
+            "N": "blue",
+            "O": "red",
+            "F": "green",
+            "S": "orange",
+            "P": "purple",
+        }
+        atom_colors = [color_map.get(el.upper(), "gray") for el in elements]
+
+        nx_full, ny_full, nz_full = inside_raw.shape
+        nx_sub = (nx_full - 1) // voxel_stride + 1
+        ny_sub = (ny_full - 1) // voxel_stride + 1
+        nz_sub = (nz_full - 1) // voxel_stride + 1
+
+        images = []
+
+        # Struct for shell erosion
+        struct3 = ndimage.generate_binary_structure(3, 1)
+
+        voxel_volume = self.spacing ** 3
+
+        def render_state(
+            phase: str,
+            step_idx: int,
+            inside_mask: np.ndarray,
+            outside_region: np.ndarray | None,
+            cavity_mask: np.ndarray | None,
+        ):
+            """
+            Render a single frame.
+
+            - phase: "occupancy" or "cavity"
+            - inside_mask: 3D bool of inside voxels (raw or smoothed)
+            - outside_region: 3D bool of outside flood (None in occupancy phase)
+            - cavity_mask: 3D bool of cavities (None in occupancy phase)
+            """
+            # subsample
+            vis_inside = inside_mask[::voxel_stride, ::voxel_stride, ::voxel_stride]
+
+            if cavity_mask is not None:
+                vis_cav = cavity_mask[::voxel_stride, ::voxel_stride, ::voxel_stride]
+            else:
+                vis_cav = np.zeros_like(vis_inside, dtype=bool)
+
+            # shell of inside (for orientation)
+            if show_inside_shell:
+                inner = ndimage.binary_erosion(
+                    vis_inside, structure=struct3, border_value=0
+                )
+                shell = vis_inside & (~inner)
+            else:
+                shell = np.zeros_like(vis_inside, dtype=bool)
+
+            # cavity voxels indices (scatter)
+            cav_ix, cav_iy, cav_iz = np.where(vis_cav)
+
+            fig = plt.figure(figsize=(4, 4))
+            ax = fig.add_subplot(111, projection="3d")
+
+            # inside shell as faint voxels
+            if show_inside_shell and np.any(shell):
+                shell_colors = np.zeros(shell.shape + (4,), dtype=float)
+                shell_colors[..., 3] = 0.0
+                shell_colors[shell] = (0.8, 0.8, 0.8, 0.15)
+                ax.voxels(shell, facecolors=shell_colors, edgecolor=None)
+
+            # cavity as red scatter (cannot be occluded)
+            if cav_ix.size > 0:
+                ax.scatter(
+                    cav_ix,
+                    cav_iy,
+                    cav_iz,
+                    s=25,
+                    c="red",
+                    depthshade=False,
+                )
+
+            # MD structure
+            ax.scatter(gx, gy, gz, s=10, c=atom_colors, depthshade=False)
+
+            ax.set_xlim(0, nx_sub)
+            ax.set_ylim(0, ny_sub)
+            ax.set_zlim(0, nz_sub)
+            ax.set_box_aspect((nx_sub, ny_sub, nz_sub))
+
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_zticks([])
+
+            inside_vol = inside_mask.sum() * voxel_volume
+            if cavity_mask is not None:
+                cav_vol = cavity_mask.sum() * voxel_volume
+                cav_vox = cavity_mask.sum()
+            else:
+                cav_vol = 0.0
+                cav_vox = 0
+
+            title_phase = "Occupancy build" if phase == "occupancy" else "Cavity detection"
+            ax.set_title(
+                f"{title_phase} – step {step_idx}\n"
+                f"V_inside ≈ {inside_vol:.0f} Å³, "
+                f"cavity voxels: {cav_vox}, "
+                f"Vcav ≈ {cav_vol:.0f} Å³",
+                fontsize=8,
+            )
+
+            plt.tight_layout()
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=150)
+            plt.close(fig)
+            buf.seek(0)
+            img = imageio.imread(buf)
+            images.append(img)
+
+        # ------------------------
+        # PHASE 1: _mark_occupancy
+        # ------------------------
+
+        # initial empty grid
+        render_state(
+            phase="occupancy",
+            step_idx=0,
+            inside_mask=inside_raw,
+            outside_region=None,
+            cavity_mask=None,
+        )
+
+        for i in range(n_atoms):
+            # stamp a single atom
+            self._mark_occupancy(
+                inside_raw,
+                x_axis,
+                y_axis,
+                z_axis,
+                coords[i : i + 1],
+                radii_eff[i : i + 1],
+            )
+            n_done = i + 1
+            if (n_done % atom_stride == 0) or (n_done == n_atoms):
+                render_state(
+                    phase="occupancy",
+                    step_idx=n_done,
+                    inside_mask=inside_raw,
+                    outside_region=None,
+                    cavity_mask=None,
+                )
+
+        # ------------------------
+        # PHASE 2: smoothing + cavities
+        # ------------------------
+
+        # optional smoothing (same as compute_frame)
+        if self.smooth_surface and self.smooth_iterations > 0:
+            struct = ndimage.generate_binary_structure(rank=3, connectivity=1)
+            inside_smooth = ndimage.binary_closing(
+                inside_raw, structure=struct, iterations=self.smooth_iterations
+            )
+        else:
+            inside_smooth = inside_raw.copy()
+
+        empty = ~inside_smooth
+
+        # seeds on boundary
+        nx, ny, nz = empty.shape
+        outside_region = np.zeros_like(empty, dtype=bool)
+        outside_region[0, :, :] |= empty[0, :, :]
+        outside_region[nx - 1, :, :] |= empty[nx - 1, :, :]
+        outside_region[:, 0, :] |= empty[:, 0, :]
+        outside_region[:, ny - 1, :] |= empty[:, ny - 1, :]
+        outside_region[:, :, 0] |= empty[:, :, 0]
+        outside_region[:, :, nz - 1] |= empty[:, :, 0]
+
+        struct_out = ndimage.generate_binary_structure(rank=3, connectivity=1)
+
+        if max_cavity_steps is None:
+            max_cavity_steps = nx + ny + nz
+
+        # initial cavity mask
+        cav_full = empty & (~outside_region)
+        render_state(
+            phase="cavity",
+            step_idx=0,
+            inside_mask=inside_smooth,
+            outside_region=outside_region,
+            cavity_mask=cav_full,
+        )
+
+        for k in range(1, max_cavity_steps + 1):
+            dilated = ndimage.binary_dilation(outside_region, structure=struct_out)
+            outside_next = (dilated & empty) | outside_region
+
+            cav_full = empty & (~outside_next)
+
+            render_state(
+                phase="cavity",
+                step_idx=k,
+                inside_mask=inside_smooth,
+                outside_region=outside_next,
+                cavity_mask=cav_full,
+            )
+
+            if np.array_equal(outside_next, outside_region):
+                break
+
+            outside_region = outside_next
+
+        if not images:
+            raise RuntimeError("No frames collected for GIF.")
+
+        imageio.mimsave(gif_path, images, duration=1.0 / fps)
+        print(f"Saved volume pipeline GIF to: {gif_path}")

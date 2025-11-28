@@ -23,19 +23,19 @@ except ImportError as e:
 # Import classes from the workflow module
 from trajectory_deformation_workflow import (
     AlignedTrajectory,
+    FrameGatherer,
+    FrameProcessor,
     TrajectoryMetrics,
     ClusteringAnalysis,
     FrameSelection,
     FileIO,
-    GSAnalyzer,
     EndpointAnalyzer,
     Plotter,
     HAS_ENDPOINTS_FINDER,
-    EndpointsFinder  # type: ignore
-    VolumeAnalyzer
+    HAS_VOLUME_ANALYZER,
 )
 
-from volume_analyser import VolumeAnalyzer
+from gs_analyzer import GSAnalyzer
 
 def main():
     p = argparse.ArgumentParser(description="Detect structural deformation and auto-select meaningful frames from trajectories.")
@@ -66,8 +66,15 @@ def main():
     # Cube volume computation arguments (for correlation analysis)
     p.add_argument('--cube_faces', nargs='+', default=None,
                    help='List of face selection strings for cube volume computation (e.g., "resid 1-10" "resid 11-20").')
+    p.add_argument('--guest_sel', nargs='+', default=None,
+                   help='Selection for guest molecule (e.g., "I-").')
     p.add_argument('--plot_top_correlations', type=int, default=5,
                    help='Number of top endpoint pairs to plot for volume correlation (default: 5).')
+    p.add_argument('--memory_limit_gb', type=float, default=2.0,
+                   help='Memory limit in GB for auto-selecting memory-efficient mode (default: 2.0).')
+    p.add_argument('--force_memory_efficient', action='store_true',
+                   help='Force memory-efficient mode (on-the-fly computation) regardless of trajectory size.')
+    
     args = p.parse_args()
 
     # Load trajectory
@@ -96,54 +103,141 @@ def main():
         warnings.warn(f"Alignment failed or selection invalid: {e}. Using original universe.")
         aligned_traj = None
     
-    # 2) Global metrics (using aligned universe)
+    # 1.5) Gather/process frame data in a single iteration for efficiency
+    print("Preparing frame data processing (single iteration)...")
+    selection_strings = []
+    # Collect all unique selection strings that will be used
+    if args.rmsd_sel:
+        selection_strings.append(args.rmsd_sel)
+    if args.rmsf_sel and args.rmsf_sel != args.rmsd_sel:
+        selection_strings.append(args.rmsf_sel)
+    if args.pca_sel and args.pca_sel not in selection_strings:
+        selection_strings.append(args.pca_sel)
+    if args.contact_selA and args.contact_selA not in selection_strings:
+        selection_strings.append(args.contact_selA)
+    if args.contact_selB and args.contact_selB not in selection_strings:
+        selection_strings.append(args.contact_selB)
+    # Add endpoint residue selections if provided
+    if args.endpoint_residues:
+        for ep_sel in args.endpoint_residues:
+            if ep_sel not in selection_strings:
+                selection_strings.append(ep_sel)
+    # Add cube face selections if provided
+    if args.cube_faces:
+        for face_sel in args.cube_faces:
+            if face_sel not in selection_strings:
+                selection_strings.append(face_sel)
+    
+    # Estimate memory usage and choose approach
+    gatherer = None
+    processor = None
+    use_memory_efficient = False
+    
+    if selection_strings:
+        try:
+            estimated_memory = FrameGatherer.estimate_memory_usage(u, selection_strings)
+            if args.force_memory_efficient:
+                use_memory_efficient = True
+            else:
+                use_memory_efficient = FrameGatherer.should_use_memory_efficient(
+                    u, selection_strings, memory_limit_gb=args.memory_limit_gb
+                )
+            
+            print(f"Estimated memory for coordinate storage: {estimated_memory:.2f} GB")
+            
+            if use_memory_efficient:
+                print("Using memory-efficient mode (on-the-fly computation)...")
+                processor = FrameProcessor(u)
+                # Process all basic metrics at once
+                processor_results = processor.process_all_metrics(
+                    rmsd_sel=args.rmsd_sel,
+                    rmsf_sel=args.rmsf_sel,
+                    rg_sel=args.rmsd_sel,  # Use same selection as RMSD for Rg
+                    pca_sel=args.pca_sel,
+                    contact_selA=args.contact_selA,
+                    contact_selB=args.contact_selB,
+                    strain_sel=args.pca_sel,
+                    strain_window=args.strain_window,
+                    strain_lag=args.lag,
+                    pca_n_components=args.n_pc,
+                    rmsd_ref_frame=0
+                )
+                print(f"Processed {processor.get_n_frames()} frames in memory-efficient mode.")
+            else:
+                print("Using standard mode (coordinate storage)...")
+                gatherer = FrameGatherer(u, selection_strings)
+                print(f"Frame data gathered for {len(selection_strings)} selection(s) across {gatherer.get_n_frames()} frames.")
+        except Exception as e:
+            warnings.warn(f"Frame processing setup failed: {e}. Will iterate frames individually.")
+            gatherer = None
+            processor = None
+    
+    # 2) Global metrics (using aligned universe and pre-gathered/processed data)
     metrics = TrajectoryMetrics()
-    print("Computing RMSD...")
-    rmsd_vals = metrics.compute_rmsd(u, args.rmsd_sel)
+    
+    if processor is not None:
+        # Use pre-computed results from processor (memory-efficient mode)
+        print("Using pre-computed metrics from memory-efficient processing...")
+        rmsd_vals = processor_results['rmsd']
+        rg_vals = processor_results['rg']
+        rmsf_vals = processor_results['rmsf']
+        pcs = processor_results['pcs']
+        pca_model = processor_results['pca_model']
+        strain_vals = processor_results['strain']
+        contact_vals = processor_results['contacts']
+    else:
+        # Use gatherer or iterate individually (standard mode)
+        print("Computing RMSD...")
+        rmsd_vals = metrics.compute_rmsd(u, args.rmsd_sel, gatherer=gatherer)
 
-    print("Computing Rg...")
-    rg_vals = metrics.radius_of_gyration(u, args.rmsd_sel)
+        print("Computing Rg...")
+        rg_vals = metrics.radius_of_gyration(u, args.rmsd_sel, gatherer=gatherer)
 
-    # Optional contacts
-    contact_vals = None
-    if args.contact_selA and args.contact_selB:
-        print("Computing contact distances...")
-        contact_vals = metrics.contact_distances(u, args.contact_selA, args.contact_selB)
+        # Optional contacts
+        contact_vals = None
+        if args.contact_selA and args.contact_selB:
+            print("Computing contact distances...")
+            contact_vals = metrics.contact_distances(u, args.contact_selA, args.contact_selB, gatherer=gatherer)
 
-    # 3) RMSF (per-atom) - using pre-aligned trajectory
-    print("Computing RMSF...")
-    try:
-        rmsf_vals = metrics.compute_rmsf(u, args.rmsf_sel, aligned=True)
-    except Exception as e:
-        warnings.warn(f"RMSF failed: {e}")
-        rmsf_vals = None
+        # 3) RMSF (per-atom) - using pre-aligned trajectory
+        print("Computing RMSF...")
+        try:
+            rmsf_vals = metrics.compute_rmsf(u, args.rmsf_sel, aligned=True, gatherer=gatherer)
+        except Exception as e:
+            warnings.warn(f"RMSF failed: {e}")
+            rmsf_vals = None
 
-    # 4) PCA on positional fluctuations - using pre-aligned trajectory
-    print("Computing PCA...")
-    pcs, pca_model = metrics.pca_on_fluctuations(u, args.pca_sel, n_components=args.n_pc, aligned=True)
+        # 4) PCA on positional fluctuations - using pre-aligned trajectory
+        print("Computing PCA...")
+        pcs, pca_model = metrics.pca_on_fluctuations(u, args.pca_sel, n_components=args.n_pc, aligned=True, gatherer=gatherer)
 
-    # 5) Strain proxy
-    print("Computing local affine strain proxy...")
-    try:
-        strain_vals = metrics.local_affine_strain_proxy(u, args.pca_sel, window=args.strain_window, lag=args.lag)
-    except Exception as e:
-        warnings.warn(f"Strain proxy failed: {e}")
-        strain_vals = None
+        # 5) Strain proxy
+        print("Computing local affine strain proxy...")
+        try:
+            strain_vals = metrics.local_affine_strain_proxy(u, args.pca_sel, window=args.strain_window, lag=args.lag, gatherer=gatherer)
+        except Exception as e:
+            warnings.warn(f"Strain proxy failed: {e}")
+            strain_vals = None
 
     # 5b) Endpoint-based metrics (if residue selections provided)
+    # Note: EndpointAnalyzer still needs gatherer even in memory-efficient mode
+    # because it has special requirements (endpoint finding, etc.)
     endpoint_metrics_df = None
     endpoint_dists_array = None
     endpoint_analyzer = None
     if args.endpoint_residues and HAS_ENDPOINTS_FINDER:
         print(f"Computing endpoint-based metrics for {len(args.endpoint_residues)} residues...")
         try:
-            endpoints_finder = EndpointsFinder(
-                angle_tol_deg=args.endpoint_angle_tol,
-                alpha=args.endpoint_alpha
-            )
+            # Create a gatherer for endpoint selections if not already created
+            # (endpoint analyzer needs specific coordinate access)
+            endpoint_gatherer = gatherer
+            if processor is not None and gatherer is None:
+                # Create a minimal gatherer just for endpoint selections
+                endpoint_gatherer = FrameGatherer(u, args.endpoint_residues, force_memory_efficient=True)
+            
             endpoint_analyzer = EndpointAnalyzer()
-            endpoint_metrics_df = endpoint_analyzer.compute_endpoint_metrics(u, args.endpoint_residues, endpoints_finder)
-            endpoint_dists_array = endpoint_analyzer.compute_endpoint_distances(u, args.endpoint_residues, endpoints_finder)
+            endpoint_metrics_df = endpoint_analyzer.compute_endpoint_metrics(u, args.endpoint_residues, gatherer=endpoint_gatherer)
+            endpoint_dists_array = endpoint_analyzer.compute_endpoint_distances(u, args.endpoint_residues, gatherer=endpoint_gatherer)
             print(f"Endpoint metrics computed successfully. Found {len(endpoint_metrics_df.columns)} metrics.")
         except Exception as e:
             warnings.warn(f"Endpoint metrics computation failed: {e}")
@@ -238,8 +332,14 @@ def main():
         if args.cube_faces and len(args.cube_faces) > 0:
             print("Computing cube volume from face selections...")
             try:
+                # Create a gatherer for cube faces if not already created
+                cube_gatherer = gatherer
+                if processor is not None and gatherer is None:
+                    # Create a minimal gatherer just for cube face selections
+                    cube_gatherer = FrameGatherer(u, args.cube_faces, force_memory_efficient=True)
+                
                 gsa_analyzer = GSAnalyzer()
-                cube_metrics_df = gsa_analyzer.gsa_nanocube_metrics(u, args.cube_faces, out_prefix=None)
+                cube_metrics_df = gsa_analyzer.gsa_nanocube_metrics(u, face_sel_list=args.cube_faces, guest_sel=args.guest_sel, out_prefix=args.out_prefix, gatherer=cube_gatherer)
                 if 'volume' in cube_metrics_df.columns:
                     volume = cube_metrics_df['volume'].values
                     print(f"Cube volume computed from {len(args.cube_faces)} faces.")

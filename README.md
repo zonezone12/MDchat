@@ -224,6 +224,7 @@ Key CLI arguments:
 - `--cpd_n`: Number of change-points to detect (default: 6)
 - `--plot_top_correlations`: Number of top endpoint pairs to plot (default: 5)
 
+python run_trajectory_analysis.py --top C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop --traj C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v --out_prefix BMMpM_analy --max_frames 20 --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --guest_sel "I-" --plot_top_correlations 10
 The script automatically labels crucial frames and generates comprehensive outputs.
 
 ## Output Files

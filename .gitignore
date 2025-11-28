@@ -1,0 +1,13 @@
+test/
+*.bak
+*.gif
+*.png
+*.pdb
+*.csv
+*.txt
+*.log
+*.err
+*.out
+*.log.gz
+*.err.gz
+*.out.gz

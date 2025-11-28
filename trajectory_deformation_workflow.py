@@ -64,7 +64,7 @@ try:
 except ImportError:
     try:
         # Fallback to relative import (works when run from within the directory)
-        from .endpoints_finder import EndpointsFinder
+        from endpoints_finder import EndpointsFinder
         HAS_ENDPOINTS_FINDER = True
     except ImportError:
         HAS_ENDPOINTS_FINDER = False
@@ -79,12 +79,24 @@ try:
 except ImportError:
     try:
         # Fallback to relative import (works when run from within the directory)
-        from .volume_analyser import VolumeAnalyzer
+        from volume_analyser import VolumeAnalyzer
         HAS_VOLUME_ANALYZER = True
     except ImportError:
         HAS_VOLUME_ANALYZER = False
         VolumeAnalyzer = None  # type: ignore
         warnings.warn("volume_analyser module not found. Volume computation will fallback to edge-based method.")
+
+# Import GSAnalyzer from separate module
+try:
+    # Try absolute import first (works when imported from outside the package)
+    from MD_analysis.gs_analyzer import GSAnalyzer
+except ImportError:
+    try:
+        # Fallback to relative import (works when run from within the directory)
+        from gs_analyzer import GSAnalyzer
+    except ImportError:
+        warnings.warn("gs_analyzer module not found. GSAnalyzer will not be available.")
+        GSAnalyzer = None  # type: ignore
 
 
 # ============================================================================
@@ -238,6 +250,408 @@ class AlignedTrajectory:
 
 
 # ============================================================================
+# Class: FrameProcessor
+# Purpose: Process frames and compute metrics on-the-fly (memory-efficient)
+# ============================================================================
+
+class FrameProcessor:
+    """Process frames in a single iteration, computing metrics on-the-fly.
+    
+    This class is memory-efficient as it only stores final results, not all
+    coordinates. Use this for large trajectories where memory is a concern.
+    """
+    
+    def __init__(self, u: mda.Universe):
+        """
+        Initialize FrameProcessor.
+        
+        Args:
+            u: MDAnalysis Universe to process
+        """
+        self.universe = u
+        self.n_frames = len(u.trajectory)
+        self.results: dict = {}
+        self.frame_indices: np.ndarray = np.array([])
+        self.times: np.ndarray = np.array([])
+        self._processed = False
+    
+    def process_all_metrics(self,
+                          rmsd_sel: str,
+                          rmsf_sel: str,
+                          rg_sel: str,
+                          pca_sel: str,
+                          contact_selA: Optional[str] = None,
+                          contact_selB: Optional[str] = None,
+                          strain_sel: Optional[str] = None,
+                          strain_window: int = 10,
+                          strain_lag: int = 1,
+                          pca_n_components: int = 5,
+                          rmsd_ref_frame: int = 0) -> dict:
+        """
+        Compute all metrics in a single iteration through the trajectory.
+        
+        Args:
+            rmsd_sel: Selection for RMSD computation
+            rmsf_sel: Selection for RMSF computation
+            rg_sel: Selection for radius of gyration
+            pca_sel: Selection for PCA
+            contact_selA: First selection for contact distances (optional)
+            contact_selB: Second selection for contact distances (optional)
+            strain_sel: Selection for strain computation (optional, defaults to pca_sel)
+            strain_window: Window size for strain
+            strain_lag: Lag for strain
+            pca_n_components: Number of PCA components
+            rmsd_ref_frame: Reference frame for RMSD
+            
+        Returns:
+            Dictionary with computed metrics
+        """
+        if self._processed:
+            return self.results
+        
+        if strain_sel is None:
+            strain_sel = pca_sel
+        
+        # Get selections once
+        rmsd_atoms = self.universe.select_atoms(rmsd_sel)
+        rmsf_atoms = self.universe.select_atoms(rmsf_sel)
+        rg_atoms = self.universe.select_atoms(rg_sel)
+        pca_atoms = self.universe.select_atoms(pca_sel)
+        strain_atoms = self.universe.select_atoms(strain_sel)
+        
+        # Initialize result arrays (small memory footprint)
+        rmsd_vals = []
+        rmsf_coords = []  # Temporary storage for RMSF
+        rg_vals = []
+        pca_coords = []   # Temporary storage for PCA
+        strain_coords = []  # Temporary storage for strain
+        contact_vals = []
+        
+        # Get reference for RMSD
+        self.universe.trajectory[rmsd_ref_frame]
+        ref_pos = rmsd_atoms.positions.copy()
+        
+        # Get contact selections if needed
+        contact_A = None
+        contact_B = None
+        if contact_selA and contact_selB:
+            contact_A = self.universe.select_atoms(contact_selA)
+            contact_B = self.universe.select_atoms(contact_selB)
+            if len(contact_A) == 0 or len(contact_B) == 0:
+                warnings.warn("Empty selection for contacts.")
+                contact_A = None
+                contact_B = None
+        
+        # Initialize frame tracking
+        self.frame_indices = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+        
+        # SINGLE ITERATION - compute everything on-the-fly
+        for frame_idx, ts in enumerate(self.universe.trajectory):
+            self.frame_indices[frame_idx] = ts.frame
+            self.times[frame_idx] = ts.time
+            
+            # RMSD
+            R, rmsd_val = align.rotation_matrix(rmsd_atoms.positions, ref_pos)
+            rmsd_vals.append(rmsd_val)
+            
+            # RMSF (need to store coords temporarily)
+            rmsf_coords.append(rmsf_atoms.positions.copy())
+            
+            # Radius of gyration (compute immediately)
+            com = rg_atoms.center_of_mass()
+            rg2 = ((rg_atoms.positions - com) ** 2).sum(axis=1).mean()
+            rg_vals.append(np.sqrt(rg2))
+            
+            # PCA (need to store coords temporarily)
+            pca_coords.append(pca_atoms.positions.copy().reshape(-1))
+            
+            # Strain (need to store coords temporarily)
+            strain_coords.append(strain_atoms.positions.copy())
+            
+            # Contacts (if needed)
+            if contact_A is not None and contact_B is not None:
+                da = contact_A.positions[:, None, :]
+                db = contact_B.positions[None, :, :]
+                diff = da - db
+                dd = np.sqrt((diff * diff).sum(axis=2))
+                contact_vals.append(dd.min())
+        
+        # Post-process stored arrays (only what's needed)
+        # RMSF
+        rmsf_coords = np.array(rmsf_coords)  # (T, n, 3)
+        mean = rmsf_coords.mean(axis=0)
+        diffsq = (rmsf_coords - mean) ** 2
+        rmsf_vals = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
+        del rmsf_coords  # Free memory immediately
+        
+        # PCA
+        pca_coords = np.array(pca_coords)  # (T, 3N)
+        Xc = pca_coords - pca_coords.mean(axis=0)
+        pca = PCA(n_components=pca_n_components, svd_solver="auto")
+        pcs = pca.fit_transform(Xc)
+        del pca_coords  # Free memory immediately
+        
+        # Strain
+        strain_coords = np.array(strain_coords)  # (T, n, 3)
+        T, n, _ = strain_coords.shape
+        strain = np.full(T, np.nan)
+        for t in range(0, T - strain_lag):
+            if t < strain_window:
+                continue
+            A = strain_coords[t - strain_window:t, :, :].reshape(-1, 3)
+            B = strain_coords[t - strain_window + strain_lag:t + strain_lag, :, :].reshape(-1, 3)
+            A_aug = np.concatenate([A, np.ones((A.shape[0], 1))], axis=1)
+            Xsol, *_ = np.linalg.lstsq(A_aug, B, rcond=None)
+            F = Xsol[:3, :]
+            C = F.T @ F
+            E = 0.5 * (C - np.eye(3))
+            strain[t] = np.linalg.norm(E, ord='fro')
+        del strain_coords  # Free memory immediately
+        
+        # Store results (small memory footprint)
+        self.results = {
+            'rmsd': np.array(rmsd_vals),
+            'rmsf': rmsf_vals,
+            'rg': np.array(rg_vals),
+            'pcs': pcs,
+            'pca_model': pca,
+            'strain': strain,
+            'contacts': np.array(contact_vals) if contact_vals else None
+        }
+        
+        self._processed = True
+        return self.results
+    
+    def get_frame_indices(self) -> np.ndarray:
+        """Get frame indices for all processed frames."""
+        return self.frame_indices
+    
+    def get_times(self) -> np.ndarray:
+        """Get time values for all processed frames."""
+        return self.times
+    
+    def get_n_frames(self) -> int:
+        """Get number of frames."""
+        return self.n_frames
+
+
+# ============================================================================
+# Class: FrameGatherer
+# Purpose: Gather frame data in a single iteration through the trajectory
+# ============================================================================
+
+class FrameGatherer:
+    """Gather frame data from trajectory in a single iteration.
+    
+    This class iterates through all frames once and collects coordinates
+    for multiple selections, allowing other functions to use pre-gathered
+    data instead of iterating multiple times.
+    
+    Example:
+        >>> # Instead of each function iterating separately:
+        >>> # metrics.compute_rmsd(u, sel)  # iterates frames
+        >>> # metrics.compute_rmsf(u, sel)   # iterates frames again
+        >>> # metrics.radius_of_gyration(u, sel)  # iterates frames again
+        >>> 
+        >>> # Use FrameGatherer to iterate once:
+        >>> gatherer = FrameGatherer(u, [sel_str1, sel_str2])
+        >>> rmsd = metrics.compute_rmsd(u, sel_str1, gatherer=gatherer)
+        >>> rmsf = metrics.compute_rmsf(u, sel_str1, gatherer=gatherer)
+        >>> rg = metrics.radius_of_gyration(u, sel_str1, gatherer=gatherer)
+    """
+    
+    @staticmethod
+    def estimate_memory_usage(u: mda.Universe, selection_strings: List[str], 
+                             bytes_per_float: int = 8) -> float:
+        """
+        Estimate memory usage in GB for gathering coordinates.
+        
+        Args:
+            u: MDAnalysis Universe
+            selection_strings: List of selection strings
+            bytes_per_float: Bytes per float (default: 8 for float64)
+            
+        Returns:
+            Estimated memory usage in GB
+        """
+        n_frames = len(u.trajectory)
+        total_atoms = 0
+        
+        for sel_str in selection_strings:
+            try:
+                sel = u.select_atoms(sel_str)
+                total_atoms += len(sel)
+            except Exception:
+                # If selection fails, estimate based on universe size
+                total_atoms += len(u.atoms) // len(selection_strings)
+        
+        # Memory = n_frames × n_atoms × 3 coordinates × bytes_per_float
+        memory_bytes = n_frames * total_atoms * 3 * bytes_per_float
+        memory_gb = memory_bytes / (1024 ** 3)
+        
+        return memory_gb
+    
+    @staticmethod
+    def should_use_memory_efficient(u: mda.Universe, selection_strings: List[str],
+                                    memory_limit_gb: float = 2.0) -> bool:
+        """
+        Determine if memory-efficient (on-the-fly) processing should be used.
+        
+        Args:
+            u: MDAnalysis Universe
+            selection_strings: List of selection strings
+            memory_limit_gb: Memory limit in GB (default: 2.0)
+            
+        Returns:
+            True if memory-efficient mode should be used
+        """
+        estimated_memory = FrameGatherer.estimate_memory_usage(u, selection_strings)
+        return estimated_memory > memory_limit_gb
+    
+    def __init__(self, u: mda.Universe, selection_strings: List[str],
+                 force_memory_efficient: Optional[bool] = None,
+                 memory_limit_gb: float = 2.0):
+        """
+        Initialize FrameGatherer and gather data from trajectory.
+        
+        Args:
+            u: MDAnalysis Universe to gather data from
+            selection_strings: List of selection strings to gather coordinates for
+            force_memory_efficient: If True, use memory-efficient mode. If None, auto-detect.
+            memory_limit_gb: Memory limit in GB for auto-detection (default: 2.0)
+        """
+        self.universe = u
+        self.selection_strings = selection_strings
+        self.n_frames = len(u.trajectory)
+        self.memory_efficient = False
+        
+        # Auto-detect memory-efficient mode if not forced
+        if force_memory_efficient is None:
+            self.memory_efficient = FrameGatherer.should_use_memory_efficient(
+                u, selection_strings, memory_limit_gb
+            )
+        else:
+            self.memory_efficient = force_memory_efficient
+        
+        if self.memory_efficient:
+            # Memory-efficient mode: don't store coordinates
+            self.coordinates = {}  # Empty - will compute on-the-fly
+            self.frame_indices = np.array([])
+            self.times = np.array([])
+            self._gathered = False
+            # Just gather frame indices and times
+            self._gather_metadata()
+        else:
+            # Standard mode: store all coordinates
+            self.coordinates: dict = {}  # {sel_str: np.ndarray of shape (T, n_atoms, 3)}
+            self.frame_indices: np.ndarray = np.array([])
+            self.times: np.ndarray = np.array([])
+            self._gathered = False
+            # Gather data immediately
+            self.gather()
+    
+    def _gather_metadata(self):
+        """Gather only frame indices and times (memory-efficient)."""
+        self.frame_indices = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+        
+        for frame_idx, ts in enumerate(self.universe.trajectory):
+            self.frame_indices[frame_idx] = ts.frame
+            self.times[frame_idx] = ts.time
+        
+        self._gathered = True
+    
+    def gather(self):
+        """Iterate through all frames and gather coordinates for all selections."""
+        if self._gathered:
+            return
+        
+        # Initialize storage for each selection
+        for sel_str in self.selection_strings:
+            sel = self.universe.select_atoms(sel_str)
+            n_atoms = len(sel)
+            self.coordinates[sel_str] = np.zeros((self.n_frames, n_atoms, 3))
+        
+        # Initialize frame tracking arrays
+        self.frame_indices = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+        
+        # Iterate through all frames once
+        for frame_idx, ts in enumerate(self.universe.trajectory):
+            self.frame_indices[frame_idx] = ts.frame
+            self.times[frame_idx] = ts.time
+            
+            # Gather coordinates for each selection
+            for sel_str in self.selection_strings:
+                sel = self.universe.select_atoms(sel_str)
+                self.coordinates[sel_str][frame_idx] = sel.positions.copy()
+        
+        self._gathered = True
+    
+    def get_coordinates(self, sel_str: str) -> np.ndarray:
+        """
+        Get gathered coordinates for a selection string.
+        
+        In memory-efficient mode, this will gather coordinates on-demand.
+        
+        Args:
+            sel_str: Selection string
+            
+        Returns:
+            Array of shape (T, n_atoms, 3) with coordinates for all frames
+        """
+        if self.memory_efficient:
+            # Memory-efficient mode: gather on-demand
+            if sel_str not in self.coordinates:
+                # Gather this selection now
+                sel = self.universe.select_atoms(sel_str)
+                n_atoms = len(sel)
+                coords = np.zeros((self.n_frames, n_atoms, 3))
+                
+                # Reset trajectory to beginning before iterating
+                # (in case _gather_metadata() already iterated through it)
+                self.universe.trajectory[0]
+                
+                for frame_idx, ts in enumerate(self.universe.trajectory):
+                    coords[frame_idx] = sel.positions.copy()
+                
+                self.coordinates[sel_str] = coords
+            return self.coordinates[sel_str]
+        else:
+            # Standard mode: return pre-gathered coordinates
+            if not self._gathered:
+                self.gather()
+            if sel_str not in self.coordinates:
+                raise ValueError(f"Selection '{sel_str}' was not included in gathering. "
+                               f"Available selections: {list(self.coordinates.keys())}")
+            return self.coordinates[sel_str]
+    
+    def get_frame_indices(self) -> np.ndarray:
+        """Get frame indices for all gathered frames."""
+        if not self._gathered:
+            self.gather()
+        return self.frame_indices
+    
+    def get_times(self) -> np.ndarray:
+        """Get time values for all gathered frames."""
+        if not self._gathered:
+            self.gather()
+        return self.times
+    
+    def get_n_frames(self) -> int:
+        """Get number of frames."""
+        return self.n_frames
+    
+    def clear(self):
+        """Clear gathered data to free memory."""
+        self.coordinates.clear()
+        self.frame_indices = np.array([])
+        self.times = np.array([])
+        self._gathered = False
+
+
+# ============================================================================
 # Class: TrajectoryMetrics
 # Purpose: Basic trajectory metric computations (RMSD, RMSF, Rg, contacts, PCA, strain)
 # ============================================================================
@@ -266,23 +680,50 @@ class TrajectoryMetrics:
         self._universe = u
         self._alignment_sel = align_sel
     
-    def compute_rmsd(self, u: mda.Universe, sel_str: str, ref_frame: int = 0) -> np.ndarray:
-        """Compute RMSD for each frame relative to reference frame."""
+    def compute_rmsd(self, u: mda.Universe, sel_str: str, ref_frame: int = 0, 
+                     gatherer: Optional['FrameGatherer'] = None) -> np.ndarray:
+        """Compute RMSD for each frame relative to reference frame.
+        
+        Args:
+            u: MDAnalysis Universe
+            sel_str: Selection string
+            ref_frame: Reference frame index (default: 0)
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
+        """
         cache_key = (sel_str, ref_frame)
         if cache_key in self.rmsd_cache:
             return self.rmsd_cache[cache_key]
         
-        sel = u.select_atoms(sel_str)
-        ref = sel.positions.copy()
-        rmsds = []
-        for ts in u.trajectory:
-            R, rmsd_val = align.rotation_matrix(sel.positions, ref)
-            rmsds.append(rmsd_val)
-        result = np.array(rmsds)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            coords = gatherer.get_coordinates(sel_str)
+            frame_indices = gatherer.get_frame_indices()
+            # Find the index in gathered array that corresponds to ref_frame
+            ref_idx = np.where(frame_indices == ref_frame)[0]
+            if len(ref_idx) == 0:
+                raise ValueError(f"Reference frame {ref_frame} not found in gathered data")
+            ref_idx = ref_idx[0]
+            ref = coords[ref_idx].copy()
+            rmsds = []
+            for frame_coords in coords:
+                R, rmsd_val = align.rotation_matrix(frame_coords, ref)
+                rmsds.append(rmsd_val)
+            result = np.array(rmsds)
+        else:
+            # Original iteration-based approach
+            sel = u.select_atoms(sel_str)
+            ref = sel.positions.copy()
+            rmsds = []
+            for ts in u.trajectory:
+                R, rmsd_val = align.rotation_matrix(sel.positions, ref)
+                rmsds.append(rmsd_val)
+            result = np.array(rmsds)
+        
         self.rmsd_cache[cache_key] = result
         return result
     
-    def compute_rmsf(self, u: mda.Universe, sel_str: str, aligned: bool = True) -> np.ndarray:
+    def compute_rmsf(self, u: mda.Universe, sel_str: str, aligned: bool = True,
+                     gatherer: Optional['FrameGatherer'] = None) -> np.ndarray:
         """Compute RMSF (per-atom root mean square fluctuation).
         
         Args:
@@ -290,68 +731,118 @@ class TrajectoryMetrics:
             sel_str: Selection string for atoms to compute RMSF
             aligned: If True, assumes trajectory is already aligned (default: True)
                     If False, will align internally (not recommended)
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
         """
         cache_key = sel_str
         if cache_key in self.rmsf_cache:
             return self.rmsf_cache[cache_key]
         
-        sel = u.select_atoms(sel_str)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            coords = gatherer.get_coordinates(sel_str)
+        else:
+            # Original iteration-based approach
+            sel = u.select_atoms(sel_str)
+            
+            # Only align if explicitly requested (trajectory should be pre-aligned)
+            if not aligned:
+                warnings.warn("Computing RMSF on unaligned trajectory. Consider using AlignedTrajectory first.")
+                with mda.lib.util.tempdir.in_tempdir():
+                    align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
+            
+            coords = []
+            for ts in u.trajectory:
+                coords.append(sel.positions.copy())
+            coords = np.array(coords)  # (T, n, 3)
         
-        # Only align if explicitly requested (trajectory should be pre-aligned)
-        if not aligned:
-            warnings.warn("Computing RMSF on unaligned trajectory. Consider using AlignedTrajectory first.")
-            with mda.lib.util.tempdir.in_tempdir():
-                align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
-        
-        coords = []
-        for ts in u.trajectory:
-            coords.append(sel.positions.copy())
-        coords = np.array(coords)  # (T, n, 3)
         mean = coords.mean(axis=0)
         diffsq = (coords - mean) ** 2
         rmsf = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
         self.rmsf_cache[cache_key] = rmsf
         return rmsf
     
-    def radius_of_gyration(self, u: mda.Universe, sel_str: str) -> np.ndarray:
-        """Compute radius of gyration for each frame."""
+    def radius_of_gyration(self, u: mda.Universe, sel_str: str,
+                          gatherer: Optional['FrameGatherer'] = None) -> np.ndarray:
+        """Compute radius of gyration for each frame.
+        
+        Args:
+            u: MDAnalysis Universe
+            sel_str: Selection string
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
+        """
         cache_key = sel_str
         if cache_key in self.rg_cache:
             return self.rg_cache[cache_key]
         
-        sel = u.select_atoms(sel_str)
-        rgs = []
-        for ts in u.trajectory:
-            coords = sel.positions
-            com = sel.center_of_mass()
-            rg2 = ((coords - com) ** 2).sum(axis=1).mean()
-            rgs.append(np.sqrt(rg2))
-        result = np.array(rgs)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            coords = gatherer.get_coordinates(sel_str)
+            rgs = []
+            for frame_coords in coords:
+                com = frame_coords.mean(axis=0)
+                rg2 = ((frame_coords - com) ** 2).sum(axis=1).mean()
+                rgs.append(np.sqrt(rg2))
+            result = np.array(rgs)
+        else:
+            # Original iteration-based approach
+            sel = u.select_atoms(sel_str)
+            rgs = []
+            for ts in u.trajectory:
+                coords = sel.positions
+                com = sel.center_of_mass()
+                rg2 = ((coords - com) ** 2).sum(axis=1).mean()
+                rgs.append(np.sqrt(rg2))
+            result = np.array(rgs)
+        
         self.rg_cache[cache_key] = result
         return result
     
-    def contact_distances(self, u: mda.Universe, selA: str, selB: str) -> np.ndarray:
-        """Compute minimal contact distance between two selections for each frame."""
+    def contact_distances(self, u: mda.Universe, selA: str, selB: str,
+                         gatherer: Optional['FrameGatherer'] = None) -> np.ndarray:
+        """Compute minimal contact distance between two selections for each frame.
+        
+        Args:
+            u: MDAnalysis Universe
+            selA: First selection string
+            selB: Second selection string
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
+        """
         cache_key = (selA, selB)
         if cache_key in self.contact_cache:
             return self.contact_cache[cache_key]
         
-        A = u.select_atoms(selA)
-        B = u.select_atoms(selB)
-        if len(A) == 0 or len(B) == 0:
-            raise ValueError("Empty selection for contacts.")
-        dists = []
-        for ts in u.trajectory:
-            da = A.positions[:, None, :]
-            db = B.positions[None, :, :]
-            diff = da - db
-            dd = np.sqrt((diff * diff).sum(axis=2))
-            dists.append(dd.min())
-        result = np.array(dists)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            coordsA = gatherer.get_coordinates(selA)
+            coordsB = gatherer.get_coordinates(selB)
+            dists = []
+            for frame_idx in range(gatherer.get_n_frames()):
+                da = coordsA[frame_idx][:, None, :]
+                db = coordsB[frame_idx][None, :, :]
+                diff = da - db
+                dd = np.sqrt((diff * diff).sum(axis=2))
+                dists.append(dd.min())
+            result = np.array(dists)
+        else:
+            # Original iteration-based approach
+            A = u.select_atoms(selA)
+            B = u.select_atoms(selB)
+            if len(A) == 0 or len(B) == 0:
+                raise ValueError("Empty selection for contacts.")
+            dists = []
+            for ts in u.trajectory:
+                da = A.positions[:, None, :]
+                db = B.positions[None, :, :]
+                diff = da - db
+                dd = np.sqrt((diff * diff).sum(axis=2))
+                dists.append(dd.min())
+            result = np.array(dists)
+        
         self.contact_cache[cache_key] = result
         return result
     
-    def pca_on_fluctuations(self, u: mda.Universe, sel_str: str, n_components: int = 5, aligned: bool = True) -> Tuple[np.ndarray, PCA]:
+    def pca_on_fluctuations(self, u: mda.Universe, sel_str: str, n_components: int = 5, 
+                            aligned: bool = True, gatherer: Optional['FrameGatherer'] = None) -> Tuple[np.ndarray, PCA]:
         """Return PC projections (T x n_comp) and the fitted PCA model.
         
         Args:
@@ -360,22 +851,30 @@ class TrajectoryMetrics:
             n_components: Number of principal components to compute
             aligned: If True, assumes trajectory is already aligned (default: True)
                     If False, will align internally (not recommended)
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
         """
         cache_key = (sel_str, n_components)
         if cache_key in self.pca_cache:
             return self.pca_cache[cache_key]
         
-        sel = u.select_atoms(sel_str)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            coords = gatherer.get_coordinates(sel_str)
+            X = coords.reshape(coords.shape[0], -1)  # shape (T, 3N)
+        else:
+            # Original iteration-based approach
+            sel = u.select_atoms(sel_str)
+            
+            # Only align if explicitly requested (trajectory should be pre-aligned)
+            if not aligned:
+                warnings.warn("Computing PCA on unaligned trajectory. Consider using AlignedTrajectory first.")
+                align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
+            
+            coords = []
+            for ts in u.trajectory:
+                coords.append(sel.positions.copy().reshape(-1))
+            X = np.array(coords)  # shape (T, 3N)
         
-        # Only align if explicitly requested (trajectory should be pre-aligned)
-        if not aligned:
-            warnings.warn("Computing PCA on unaligned trajectory. Consider using AlignedTrajectory first.")
-            align.AlignTraj(u, u, select=sel_str, in_memory=True).run()
-        
-        coords = []
-        for ts in u.trajectory:
-            coords.append(sel.positions.copy().reshape(-1))
-        X = np.array(coords)  # shape (T, 3N)
         Xc = X - X.mean(axis=0)
         pca = PCA(n_components=n_components, svd_solver="auto")
         pcs = pca.fit_transform(Xc)
@@ -383,17 +882,32 @@ class TrajectoryMetrics:
         self.pca_cache[cache_key] = result
         return result
     
-    def local_affine_strain_proxy(self, u: mda.Universe, sel_str: str, window: int = 10, lag: int = 1) -> np.ndarray:
-        """Compute a lightweight proxy of local strain."""
+    def local_affine_strain_proxy(self, u: mda.Universe, sel_str: str, window: int = 10, lag: int = 1,
+                                  gatherer: Optional['FrameGatherer'] = None) -> np.ndarray:
+        """Compute a lightweight proxy of local strain.
+        
+        Args:
+            u: MDAnalysis Universe
+            sel_str: Selection string
+            window: Window size for strain computation
+            lag: Lag for strain computation
+            gatherer: Optional FrameGatherer instance with pre-gathered coordinates
+        """
         cache_key = (sel_str, window, lag)
         if cache_key in self.strain_cache:
             return self.strain_cache[cache_key]
         
-        sel = u.select_atoms(sel_str)
-        coords = []
-        for ts in u.trajectory:
-            coords.append(sel.positions.copy())
-        X = np.array(coords)  # (T, n, 3)
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            X = gatherer.get_coordinates(sel_str)  # (T, n, 3)
+        else:
+            # Original iteration-based approach
+            sel = u.select_atoms(sel_str)
+            coords = []
+            for ts in u.trajectory:
+                coords.append(sel.positions.copy())
+            X = np.array(coords)  # (T, n, 3)
+        
         T, n, _ = X.shape
         strain = np.full(T, np.nan)
         for t in range(0, T - lag):
@@ -863,232 +1377,8 @@ class FileIO:
 
 
 # ============================================================================
-# Class: GSAnalyzer
-# Purpose: GSA nanocube specific analysis functions
+# GSAnalyzer is now imported from gs_analyzer.py module
 # ============================================================================
-
-class GSAnalyzer:
-    """Analyze GSA nanocube structures and compute geometric metrics."""
-    
-    def __init__(self):
-        """Initialize GSAnalyzer with storage for computed results."""
-        self.nanocube_metrics_df: Optional[pd.DataFrame] = None
-        self.face_selections: Optional[List[str]] = None
-        self.planar_rms_cache: dict = {}
-    
-    def residue_planar_rms(self, atoms):
-        """Compute planar RMS for a residue/atom group."""
-        P = atoms.positions
-        if len(P) < 3:
-            return np.nan
-        P0 = P - P.mean(axis=0)
-        U, S, Vt = np.linalg.svd(P0, full_matrices=False)
-        face_normal_vector = Vt[-1]
-        dist = np.abs(P0 @ face_normal_vector)
-        planar_rms = float(np.sqrt((dist**2).mean()))
-        return planar_rms, face_normal_vector
-    
-    def gsa_nanocube_metrics(self, u: mda.Universe,
-                             face_sel_list: List[str],
-                             corner_sel_list: Optional[List[str]] = None,
-                             guest_sel: Optional[str] = None,
-                             out_prefix: Optional[str] = None) -> pd.DataFrame:
-        """Compute geometric observables for GSA nanocube behavior."""
-        faces = [u.select_atoms(s) for s in face_sel_list]
-        corners = [u.select_atoms(s) for s in (corner_sel_list or [])]
-        guest = u.select_atoms(guest_sel) if guest_sel else None
-        
-        # Combine all face selections for volume computation using VolumeAnalyzer
-        combined_sel = " or ".join([f"({s})" for s in face_sel_list])
-        
-        # Initialize VolumeAnalyzer if available
-        volume_analyzer = None
-        if HAS_VOLUME_ANALYZER and VolumeAnalyzer is not None:
-            try:
-                volume_analyzer = VolumeAnalyzer(
-                    universe=u,
-                    selection=combined_sel,
-                    spacing=1.0,
-                    probe_radius=1.4
-                )
-            except Exception as e:
-                warnings.warn(f"Failed to initialize VolumeAnalyzer: {e}. Falling back to edge-based volume computation.")
-                volume_analyzer = None
-        
-        rows = []
-        for ts in u.trajectory:
-            fcent = np.array([ag.center_of_geometry() for ag in faces])
-            edges = []
-            if len(fcent) >= 4:
-                for i in range(len(fcent)):
-                    d = np.linalg.norm(fcent - fcent[i], axis=1)
-                    nn = np.argsort(d)[1:5]
-                    for j in nn:
-                        if i < j:
-                            edges.append((i, j))
-            edges = list(set(edges))
-            
-            edge_len = [np.linalg.norm(fcent[i] - fcent[j]) for (i, j) in edges] if edges else [np.nan]
-            edge_mean = np.nanmean(edge_len)
-            
-            # Planarity per face
-            planar_rms_list = []
-            face_norms_list = []
-            for ag in faces:
-                planar_rms, face_normal_vector = self.residue_planar_rms(ag)
-                planar_rms_list.append(planar_rms)
-                face_norms_list.append(face_normal_vector)
-            
-            face_norms_array = np.array(face_norms_list)
-            face_norms_angle = np.degrees(np.arccos(np.clip(np.dot(face_norms_array, face_norms_array.T), -1.0, 1.0)))
-            face_angle_dict = {}
-            for i, face_i in enumerate(face_sel_list):
-                for j, face_j in enumerate(face_sel_list):
-                    if i != j:
-                        face_angle_dict[f'{face_i}{face_j}_angle'] = face_norms_angle[i, j]
-            
-            cube_center = fcent.mean(axis=0) if len(fcent) else np.array([np.nan, np.nan, np.nan])
-            guest_min = np.nan
-            if guest is not None and len(guest):
-                guest_min = float(np.linalg.norm(guest.positions - cube_center, axis=1).min())
-            
-            # Compute volume using VolumeAnalyzer if available, otherwise fallback to edge-based method
-            if volume_analyzer is not None:
-                try:
-                    target_volume, cavity_volume = volume_analyzer.compute_frame(ts.frame, return_masks=False)
-                    volume = target_volume+cavity_volume
-                except Exception as e:
-                    warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
-                    volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
-            else:
-                volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
-            
-            rows.append({
-                'frame': ts.frame,
-                'edge_mean': edge_mean,
-                'edge_min': float(np.nanmin(edge_len)) if len(edge_len) else np.nan,
-                'edge_max': float(np.nanmax(edge_len)) if len(edge_len) else np.nan,
-                'volume': volume,
-                'planarity_mean': float(np.nanmean(planar_rms_list)),
-                'planarity_max': float(np.nanmax(planar_rms_list)),
-                'guest_min_center_dist': guest_min,
-                **face_angle_dict,
-            })
-        df = pd.DataFrame(rows)
-        self.nanocube_metrics_df = df
-        self.face_selections = face_sel_list
-        if out_prefix:
-            df.to_csv(f"{out_prefix}_gsa_nanocube.csv", index=False)
-        return df
-    
-    def amber_preset_selections(self, u: mda.Universe,
-                                gsa_resnames: List[str] = ["GSA"],
-                                water_resnames: List[str] = ["WAT", "HOH", "TIP3", "TIP3P"],
-                                na_resnames: List[str] = ["Na+", "SOD", "NA"],
-                                i_resnames: List[str] = ["I-", "IOD", "IB"]) -> dict:
-        """Return a dict of robust MDAnalysis selection strings for Amber systems."""
-        gsa_or = " or ".join([f"resname {r}" for r in gsa_resnames]) if gsa_resnames else "resname GSA"
-        wat_or = " or ".join([f"resname {r}" for r in water_resnames])
-        na_or = " or ".join([f"resname {r}" for r in na_resnames])
-        i_or = " or ".join([f"resname {r}" for r in i_resnames])
-        
-        sels = {
-            'water': f"({wat_or})",
-            'sodium': f"(({na_or}) and (name Na* or type Na))",
-            'iodide': f"(({i_or}) and (name I* or type I))",
-            'gsa_all': f"({gsa_or})",
-            'non_solvent_non_ion': f"not ({wat_or}) and not ({na_or}) and not ({i_or})",
-        }
-        return sels
-    
-    def gsa_auto_faces_by_kmeans(self, u: mda.Universe,
-                                 gsa_sel: str = "resname GSA",
-                                 n_faces: int = 6,
-                                 group_by: str = 'residue') -> List[str]:
-        """Cluster GSA building blocks into ~6 faces by KMeans."""
-        ag = u.select_atoms(gsa_sel)
-        if group_by == 'residue':
-            groups = list({a.residue for a in ag.atoms})
-            coms = np.array([res.atoms.center_of_mass() for res in groups])
-            labels = KMeans(n_clusters=n_faces, n_init=20, random_state=0).fit_predict(coms)
-            faces = []
-            for k in range(n_faces):
-                resid_list = [str(res.resid) for i, res in enumerate(groups) if labels[i] == k]
-                if len(resid_list) == 0:
-                    faces.append("resid -1")
-                else:
-                    faces.append("resid " + " ".join(resid_list))
-            result_faces = faces
-        else:
-            coms = ag.positions
-            labels = KMeans(n_clusters=n_faces, n_init=20, random_state=0).fit_predict(coms)
-            faces = []
-            for k in range(n_faces):
-                idx = np.where(labels == k)[0]
-                if len(idx) == 0:
-                    faces.append("index -1")
-                else:
-                    faces.append("index " + " ".join(map(str, idx.tolist())))
-            result_faces = faces
-        
-        self.face_selections = result_faces
-        return result_faces
-    
-    def faces_from_atomname_blocks(self, u: 'mda.Universe',
-                                   gsa_reslabel: str = 'MOL',
-                                   n_faces: int = 6,
-                                   residues_per_face: int | None = None,
-                                   try_detect_period: bool = True) -> list[str]:
-        """Construct ~6 nanocube face selections from GSA building blocks."""
-        gsa_residues = [res for res in u.residues if res.resname.upper().startswith(gsa_reslabel.upper())]
-        if not gsa_residues:
-            raise ValueError(f"No residues with resname '{gsa_reslabel}' found in universe.")
-        
-        gsa_resids = [res.resid for res in gsa_residues]
-        
-        if residues_per_face is None and try_detect_period and len(gsa_residues) >= n_faces:
-            flat_names = [atom.name for res in gsa_residues for atom in res.atoms]
-            
-            def smallest_period(seq: list[str], max_p: int = 512) -> int | None:
-                for p in range(1, min(max_p, len(seq)//2) + 1):
-                    ok = True
-                    for i in range(len(seq) - p):
-                        if seq[i] != seq[i + p]:
-                            ok = False
-                            break
-                    if ok:
-                        return p
-                return None
-            
-            avg_atoms_per_res = int(round(np.mean([len(res.atoms) for res in gsa_residues])))
-            p = smallest_period(flat_names)
-            if p is not None and avg_atoms_per_res > 0:
-                rp = max(1, int(round(p / avg_atoms_per_res)))
-                residues_per_face = rp
-        
-        if residues_per_face is not None and len(gsa_resids) >= residues_per_face * n_faces:
-            faces = []
-            for k in range(n_faces):
-                chunk = gsa_resids[k*residues_per_face : (k+1)*residues_per_face]
-                if not chunk:
-                    faces.append('resid -1')
-                else:
-                    faces.append('resid ' + ' '.join(map(str, chunk)))
-            return faces
-        
-        coms = np.array([res.atoms.center_of_mass() for res in gsa_residues])
-        if len(coms) < n_faces:
-            raise ValueError(f"Not enough GSA residues ({len(coms)}) to form {n_faces} faces.")
-        labels = KMeans(n_clusters=n_faces, n_init=20, random_state=0).fit_predict(coms)
-        faces = []
-        for k in range(n_faces):
-            group_resids = [str(gsa_residues[i].resid) for i in range(len(gsa_residues)) if labels[i] == k]
-            if not group_resids:
-                faces.append('resid -1')
-            else:
-                faces.append('resid ' + " ".join(group_resids))
-        self.face_selections = faces
-        return faces
 
 
 # ============================================================================
@@ -1148,7 +1438,8 @@ class EndpointAnalyzer:
     
     def compute_endpoint_distances(self, u: mda.Universe,
                                    residue_sel_list: List[str],
-                                   endpoints_finder: Optional['EndpointsFinder'] = None) -> dict:
+                                   endpoints_finder: Optional['EndpointsFinder'] = None,
+                                   gatherer: Optional['FrameGatherer'] = None) -> dict:
         """Compute distances between endpoints of different residues over trajectory."""
         # Store configuration
         self.residue_sel_list = residue_sel_list
@@ -1199,36 +1490,85 @@ class EndpointAnalyzer:
                     all_pairs[(j, i)] = np.full((T, max_ep_j, max_ep_i), np.nan)
         
         # Now iterate through all frames and compute distances directly
-        for ts in u.trajectory:
-            frame = ts.frame
-            
-            # Get endpoint positions for all residues at this frame
-            frame_ep_positions = []
-            for idx, sel_str in enumerate(residue_sel_list):
-                try:
-                    ep_indices = stored_ep_indices[idx]
-                    
-                    if len(ep_indices) > 0:
-                        ep_positions = u.positions[ep_indices]
-                        frame_ep_positions.append(ep_positions)
-                    else:
-                        frame_ep_positions.append(None)
-                except Exception as e:
-                    warnings.warn(f"Failed to get endpoint positions for {sel_str} at frame {frame}: {e}")
-                    frame_ep_positions.append(None)
-            
-            # Compute distances for all residue pairs at this frame
-            for i in range(n_res):
-                for j in range(i + 1, n_res):
-                    ep_i = frame_ep_positions[i]
-                    ep_j = frame_ep_positions[j]
-                    
-                    if ep_i is not None and ep_j is not None and (i, j) in all_pairs:
-                        diff = ep_i[:, None, :] - ep_j[None, :, :]
-                        dists = np.linalg.norm(diff, axis=2)
-                        n_ep_i_actual, n_ep_j_actual = dists.shape
-                        all_pairs[(i, j)][frame, :n_ep_i_actual, :n_ep_j_actual] = dists
-                        all_pairs[(j, i)][frame, :n_ep_j_actual, :n_ep_i_actual] = dists.T
+        if gatherer is not None:
+            # Use pre-gathered coordinates
+            frame_indices = gatherer.get_frame_indices()
+            for frame_idx, frame_num in enumerate(frame_indices):
+                frame = int(frame_num)
+                
+                # Get endpoint positions for all residues at this frame
+                frame_ep_positions = []
+                for idx, sel_str in enumerate(residue_sel_list):
+                    try:
+                        ep_indices = stored_ep_indices[idx]
+                        
+                        if len(ep_indices) > 0:
+                            # Get coordinates from gatherer
+                            residue_coords = gatherer.get_coordinates(sel_str)[frame_idx]
+                            # Map endpoint indices to positions within the residue selection
+                            sel = u.select_atoms(sel_str)
+                            # Find local indices of endpoints within the selection
+                            sel_atom_ids = sel.atoms.ids
+                            local_ep_indices = []
+                            for ep_id in ep_indices:
+                                if ep_id in sel_atom_ids:
+                                    local_idx = np.where(sel_atom_ids == ep_id)[0]
+                                    if len(local_idx) > 0:
+                                        local_ep_indices.append(local_idx[0])
+                            
+                            if len(local_ep_indices) > 0:
+                                ep_positions = residue_coords[local_ep_indices]
+                                frame_ep_positions.append(ep_positions)
+                            else:
+                                frame_ep_positions.append(None)
+                        else:
+                            frame_ep_positions.append(None)
+                    except Exception as e:
+                        raise ValueError(f"Failed to get endpoint positions for {sel_str} at frame {frame}: {e}")
+                
+                # Compute distances for all residue pairs at this frame
+                for i in range(n_res):
+                    for j in range(i + 1, n_res):
+                        ep_i = frame_ep_positions[i]
+                        ep_j = frame_ep_positions[j]
+                        
+                        if ep_i is not None and ep_j is not None and (i, j) in all_pairs:
+                            diff = ep_i[:, None, :] - ep_j[None, :, :]
+                            dists = np.linalg.norm(diff, axis=2)
+                            n_ep_i_actual, n_ep_j_actual = dists.shape
+                            all_pairs[(i, j)][frame_idx, :n_ep_i_actual, :n_ep_j_actual] = dists
+                            all_pairs[(j, i)][frame_idx, :n_ep_j_actual, :n_ep_i_actual] = dists.T
+        else:
+            # Original iteration-based approach
+            for ts in u.trajectory:
+                frame = ts.frame
+                
+                # Get endpoint positions for all residues at this frame
+                frame_ep_positions = []
+                for idx, sel_str in enumerate(residue_sel_list):
+                    try:
+                        ep_indices = stored_ep_indices[idx]
+                        
+                        if len(ep_indices) > 0:
+                            ep_positions = u.atoms[ep_indices].positions
+                            frame_ep_positions.append(ep_positions)
+                        else:
+                            frame_ep_positions.append(None)
+                    except Exception as e:
+                        raise ValueError(f"Failed to get endpoint positions for {sel_str} at frame {frame}: {e}")
+                
+                # Compute distances for all residue pairs at this frame
+                for i in range(n_res):
+                    for j in range(i + 1, n_res):
+                        ep_i = frame_ep_positions[i]
+                        ep_j = frame_ep_positions[j]
+                        
+                        if ep_i is not None and ep_j is not None and (i, j) in all_pairs:
+                            diff = ep_i[:, None, :] - ep_j[None, :, :]
+                            dists = np.linalg.norm(diff, axis=2)
+                            n_ep_i_actual, n_ep_j_actual = dists.shape
+                            all_pairs[(i, j)][frame, :n_ep_i_actual, :n_ep_j_actual] = dists
+                            all_pairs[(j, i)][frame, :n_ep_j_actual, :n_ep_i_actual] = dists.T
         
         self.endpoints_distance_dict = {
             'all_pairs': all_pairs,
@@ -1239,7 +1579,8 @@ class EndpointAnalyzer:
     
     def compute_endpoint_metrics(self, u: mda.Universe,
                                 residue_sel_list: List[str],
-                                endpoints_finder: Optional['EndpointsFinder'] = None) -> pd.DataFrame:
+                                endpoints_finder: Optional['EndpointsFinder'] = None,
+                                gatherer: Optional['FrameGatherer'] = None) -> pd.DataFrame:
         """Compute comprehensive endpoint-based metrics for residues over trajectory."""
         # Store configuration
         self.residue_sel_list = residue_sel_list
@@ -1250,7 +1591,7 @@ class EndpointAnalyzer:
             warnings.warn("EndpointsFinder not available. Returning empty DataFrame.")
             return pd.DataFrame({'frame': range(len(u.trajectory))})
         
-        endpoint_dists_dict = self.compute_endpoint_distances(u, residue_sel_list, endpoints_finder)
+        endpoint_dists_dict = self.compute_endpoint_distances(u, residue_sel_list, endpoints_finder, gatherer=gatherer)
         all_pairs = endpoint_dists_dict['all_pairs']
         T = endpoint_dists_dict['n_frames']
         n_res = endpoint_dists_dict['n_residues']
