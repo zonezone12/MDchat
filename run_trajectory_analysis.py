@@ -14,28 +14,54 @@ import pandas as pd
 
 try:
     import MDAnalysis as mda
-    from MDAnalysis.analysis import align
+    from MDAnalysis.analysis import align  # noqa:F401
 except ImportError as e:
     import sys
+
     sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
     raise
 
-# Import classes from the workflow module
-from trajectory_deformation_workflow import (
-    AlignedTrajectory,
-    FrameGatherer,
-    FrameProcessor,
-    TrajectoryMetrics,
-    ClusteringAnalysis,
-    FrameSelection,
-    FileIO,
-    EndpointAnalyzer,
-    Plotter,
-    HAS_ENDPOINTS_FINDER,
-    HAS_VOLUME_ANALYZER,
-)
+# Import classes from the new modular src package
+from src.AlignedTrajectory import AlignedTrajectory
+from src.ClusteringAnalysis import ClusteringAnalysis
+from src.EndpointAnalyzer import EndpointAnalyzer
+from src.FileIO import FileIO
+from src.FrameGatherer import FrameGatherer
+from src.FrameProcessor import FrameProcessor
+from src.FrameSelection import FrameSelection
+from src.Plotter import Plotter
+from src.TrajectoryMetrics import TrajectoryMetrics
 
-from gs_analyzer import GSAnalyzer
+# Import optional dependencies
+try:
+    from src.EndpointAnalyzer import EndpointsFinder
+except ImportError:
+    # Fallback to old locations for backward compatibility
+    try:
+        from endpoints_finder import EndpointsFinder
+    except ImportError:
+        from MD_analysis.endpoints_finder import EndpointsFinder
+
+try:
+    from src.VolumeAnalyzer import VolumeAnalyzer
+except ImportError:
+    try:
+        from volume_analyser import VolumeAnalyzer
+    except ImportError:
+        from MD_analysis.volume_analyser import VolumeAnalyzer
+
+try:
+    from src.task import GSAnalyzer
+except ImportError:
+    # Fallback to old locations for backward compatibility
+    try:
+        from gs_analyzer import GSAnalyzer
+    except ImportError:
+        try:
+            from MD_analysis.gs_analyzer import GSAnalyzer
+        except ImportError:
+            GSAnalyzer = None
+            warnings.warn("gs_analyzer module not found. GSAnalyzer will not be available.")
 
 def main():
     p = argparse.ArgumentParser(description="Detect structural deformation and auto-select meaningful frames from trajectories.")
@@ -225,7 +251,7 @@ def main():
     endpoint_metrics_df = None
     endpoint_dists_array = None
     endpoint_analyzer = None
-    if args.endpoint_residues and HAS_ENDPOINTS_FINDER:
+    if args.endpoint_residues:
         print(f"Computing endpoint-based metrics for {len(args.endpoint_residues)} residues...")
         try:
             # Create a gatherer for endpoint selections if not already created
@@ -244,8 +270,6 @@ def main():
             endpoint_metrics_df = None
             endpoint_dists_array = None
             endpoint_analyzer = None
-    elif args.endpoint_residues and not HAS_ENDPOINTS_FINDER:
-        warnings.warn("Endpoint residues specified but EndpointsFinder not available. Skipping endpoint analysis.")
 
     # 6) Change-point detection on fused signal
     clustering = ClusteringAnalysis()

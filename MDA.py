@@ -5,7 +5,14 @@ from rdkit.Chem import AllChem
 import numpy as np
 from typing import List
 from trajectory_deformation_workflow import EndpointAnalyzer as ea
-from endpoints_finder import EndpointsFinder as ef
+try:
+    from src.EndpointAnalyzer import EndpointsFinder as ef
+except ImportError:
+    # Fallback to old location for backward compatibility
+    try:
+        from endpoints_finder import EndpointsFinder as ef
+    except ImportError:
+        from MD_analysis.endpoints_finder import EndpointsFinder as ef
 from rdkit.Chem import Draw
 from MDAnalysis.analysis import gnm
 import matplotlib.pyplot as plt
@@ -175,7 +182,14 @@ test=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=get_endpointsId_from_2d
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=center_endpoints_oppsite_ends(txy,get_endpointsId_from_2d_coords(txy)), highlightColor=(1, 0, 0))  # Red highlight
 mtest=Draw.MolToImage(tm, size=(600, 400), highlightAtoms=find_endpoints(tm), highlightColor=(1, 0, 0))  # Red highlight
 
-from endpoints_finder import EndpointsFinder
+try:
+    from src.EndpointAnalyzer import EndpointsFinder
+except ImportError:
+    # Fallback to old location for backward compatibility
+    try:
+        from endpoints_finder import EndpointsFinder
+    except ImportError:
+        from MD_analysis.endpoints_finder import EndpointsFinder
 ef=EndpointsFinder()
 
 mimage = Draw.MolToImage(m2d, size=(1200, 800), highlightAtoms=ef._get_endpoints_id_from_2d_coords(xy), highlightColor=(1, 0, 0))  # Red highlight

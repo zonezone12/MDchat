@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository provides a modular Python pipeline for analyzing molecular dynamics (MD) trajectories of Glycine Sulfate Amide (GSA) nanocubes, built on [MDAnalysis](https://www.mdanalysis.org/). The pipeline focuses on identifying structural dynamics, particularly shrinkage/expansion events and guest molecule interactions, by:
+This repository provides a modular Python pipeline for analyzing molecular dynamics (MD) trajectories of Gear shape amphiphile (GSA) nanocubes, built on [MDAnalysis](https://www.mdanalysis.org/). The pipeline focuses on identifying structural dynamics, particularly shrinkage/expansion events and guest molecule interactions, by:
 
 1. **Endpoint Identification**: Using RDKit and a custom `EndpointsFinder` to detect molecular endpoints (e.g., reactive sites or distant atoms) in individual GSA residue fragments.
 2. **Geometric Metrics**: Computing distances between endpoints across residues, correlating them with nanocube volume, and detecting key frames for conformational changes.
@@ -50,25 +50,38 @@ If you prefer, you can still use `pip` as shown below (but mamba/conda is recomm
 pip install MDAnalysis numpy pandas scikit-learn matplotlib hdbscan ruptures rdkit plotly scipy imageio
 ```
 
-No internet access is needed post-install; all analysis is offline.
-```
-
 No internet access needed post-install; all analysis is offline.
 
 ### Project Structure
 ```
 MD_analysis/
-├── trajectory_deformation_workflow.py  # Main pipeline classes (TrajectoryMetrics, ClusteringAnalysis, etc.)
-├── run_trajectory_analysis.py         # Main CLI entry point
-├── endpoints_finder.py                # Endpoint detection module
-├── volume_analyser.py                 # Volume analysis (target volume, cavity detection)
+├── src/                                # Modular package structure
+│   ├── AlignedTrajectory/             # Trajectory alignment and superposition
+│   ├── ClusteringAnalysis/            # Frame clustering (HDBSCAN/KMeans)
+│   ├── EndpointAnalyzer/              # Endpoint finding and analysis
+│   ├── FileIO/                        # File I/O utilities
+│   ├── FrameGatherer/                 # Efficient frame data collection
+│   ├── FrameProcessor/                # Frame processing utilities
+│   ├── FrameSelection/                # Frame selection and scoring
+│   ├── MetricRegistry/                # Metric registration system
+│   ├── Plotter/                       # Visualization and plotting
+│   ├── task/                          # GSA-specific analysis (GSAnalyzer)
+│   ├── TrajectoryIterator/            # Trajectory iteration utilities
+│   ├── TrajectoryMetrics/             # RMSD, RMSF, Rg, PCA, strain
+│   └── VolumeAnalyzer/                # Volume analysis (voxel-based)
+├── run_trajectory_analysis.py         # Main CLI entry point (full workflow)
+├── run_volume_endpoint_analysis.py    # Focused script for volume and endpoint analysis only
+├── trajectory_deformation_workflow.py # Legacy workflow (deprecated, use src/)
+├── endpoints_finder.py                # Legacy endpoint finder (moved to src/EndpointAnalyzer/)
+├── volume_analyser.py                 # Legacy volume analyzer (moved to src/VolumeAnalyzer/)
+├── gs_analyzer.py                     # Legacy GSA analyzer (moved to src/task/)
 ├── plotly_molecule.py                 # Interactive 3D molecule visualization
 ├── __init__.py                        # Package initialization
 ├── README.md                          # This file
 ├── script_in_hpc.py                   # HPC batch processing script
 ├── ngl_traj_plot.ipynb                # Jupyter notebook for visualization
 ├── MDA.py                             # Example/test script
-└── tests/                             # Unit tests (optional)
+└── test/                              # Test outputs and examples
 ```
 
 ## Quick Start
@@ -78,7 +91,7 @@ MD_analysis/
    - Trajectory: e.g., `gsa.nc` or `gsa.dcd`.
    - Residue IDs: Identify GSA residues (e.g., resids 1-24 for 6 faces × 4 residues).
 
-2. **Run Workflow**:
+2. **Run Full Workflow**:
    ```bash
    python run_trajectory_analysis.py --top gsa.prmtop --traj gsa.nc --out_prefix gsa_analysis
    ```
@@ -90,7 +103,19 @@ MD_analysis/
      --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6"
    ```
 
-3. **Outputs**:
+3. **Run Focused Volume/Endpoint Analysis** (faster, no clustering/frame selection):
+   ```bash
+   python run_volume_endpoint_analysis.py \
+     --top topology.prmtop \
+     --traj trajectory.dcd \
+     --out_prefix analysis_output \
+     --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" \
+     --cube_faces "resid 1-6" \
+     --guest_sel "name I" \
+     --plot_top_correlations 10
+   ```
+
+4. **Outputs**:
    - `gsa_analysis_metrics.csv`: Global trajectory metrics (RMSD, Rg, PCs, strain).
    - `gsa_analysis_scores.csv`: Frame scores with clustering labels and selection flags.
    - `gsa_analysis_endpoint_metrics.csv`: Endpoint-based metrics per residue (if endpoints enabled).
@@ -103,15 +128,21 @@ MD_analysis/
 ## Usage
 
 ### Core Classes
-- **`AlignedTrajectory`**: Trajectory alignment and superposition management.
-- **`TrajectoryMetrics`**: RMSD, RMSF, Rg, PCA, strain, contact distances.
-- **`ClusteringAnalysis`**: Frame clustering (HDBSCAN/KMeans), change-point detection.
-- **`FrameSelection`**: Scores/selects frames using endpoints + metrics.
-- **`GSAnalyzer`**: Nanocube-specific (faces, volume, planarity, guest dist).
-- **`EndpointAnalyzer`**: Finds endpoints, computes distances/correlations.
-- **`VolumeAnalyzer`**: Target volume and cavity volume analysis using voxel grids.
-- **`Plotter`**: Time-series and correlation plots.
-- **`FileIO`**: Saves PDBs.
+
+All core classes are organized in the `src/` package:
+
+- **`AlignedTrajectory`** (`src.AlignedTrajectory`): Trajectory alignment and superposition management.
+- **`TrajectoryMetrics`** (`src.TrajectoryMetrics`): RMSD, RMSF, Rg, PCA, strain, contact distances.
+- **`ClusteringAnalysis`** (`src.ClusteringAnalysis`): Frame clustering (HDBSCAN/KMeans), change-point detection.
+- **`FrameSelection`** (`src.FrameSelection`): Scores/selects frames using endpoints + metrics.
+- **`GSAnalyzer`** (`src.task`): Nanocube-specific (faces, volume, planarity, guest dist).
+- **`EndpointAnalyzer`** (`src.EndpointAnalyzer`): Finds endpoints, computes distances/correlations.
+- **`EndpointsFinder`** (`src.EndpointAnalyzer`): Endpoint detection algorithm.
+- **`VolumeAnalyzer`** (`src.VolumeAnalyzer`): Target volume and cavity volume analysis using voxel grids.
+- **`Plotter`** (`src.Plotter`): Time-series and correlation plots.
+- **`FileIO`** (`src.FileIO`): Saves PDBs.
+- **`FrameGatherer`** (`src.FrameGatherer`): Efficient frame data collection in single trajectory iteration.
+- **`TrajectoryIterator`** (`src.TrajectoryIterator`): Trajectory iteration utilities with observer pattern.
 
 ### Configuration
 - Customize in `run_trajectory_analysis.py` or via CLI arguments: Residue selections, finder params (e.g., ring gap for aromatics), thresholds (e.g., correlation >0.7 for "crucial" pairs).
@@ -121,8 +152,9 @@ MD_analysis/
 ### Example: Basic Analysis
 ```python
 import MDAnalysis as mda
-from trajectory_deformation_workflow import GSAnalyzer, EndpointAnalyzer, Plotter
-from endpoints_finder import EndpointsFinder
+from src.task import GSAnalyzer
+from src.EndpointAnalyzer import EndpointAnalyzer, EndpointsFinder
+from src.Plotter import Plotter
 
 u = mda.Universe("topology.pdb", "trajectory.dcd")
 gsa_sel = "resname GSA"
@@ -152,7 +184,7 @@ plotter.plot_endpoint_volume_correlation(dists_dict, volume, res_sel_list, corr_
 
 ### Example: Volume Analysis
 ```python
-from volume_analyser import VolumeAnalyzer
+from src.VolumeAnalyzer import VolumeAnalyzer
 import MDAnalysis as mda
 
 u = mda.Universe("topology.pdb", "trajectory.dcd")
@@ -224,8 +256,92 @@ Key CLI arguments:
 - `--cpd_n`: Number of change-points to detect (default: 6)
 - `--plot_top_correlations`: Number of top endpoint pairs to plot (default: 5)
 
-python run_trajectory_analysis.py --top C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop --traj C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v --out_prefix BMMpM_analy --max_frames 20 --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --guest_sel "I-" --plot_top_correlations 10
+Example with all options:
+```bash
+python run_trajectory_analysis.py \
+  --top topology.prmtop \
+  --traj trajectory.dcd \
+  --out_prefix analysis_output \
+  --max_frames 20 \
+  --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" \
+  --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" \
+  --guest_sel "I-" \
+  --plot_top_correlations 10
+```
+
 The script automatically labels crucial frames and generates comprehensive outputs.
+
+---
+
+## Focused Volume and Endpoint Analysis
+
+For cases where you only need endpoint and volume analysis without the full workflow (clustering, frame selection, etc.), use `run_volume_endpoint_analysis.py`. This script is faster and focuses exclusively on:
+
+1. **Endpoint-based analysis** for specified residues
+2. **Volume analysis** (cube volume from face selections)
+3. **Correlation analysis** between endpoint distances and volume
+
+### Usage
+
+```bash
+python run_volume_endpoint_analysis.py \
+  --top <topology_file> \
+  --traj <trajectory_file(s)> \
+  --out_prefix <output_prefix> \
+  --endpoint_residues <residue_selections> \
+  [--cube_faces <face_selections>] \
+  [--guest_sel <guest_selection>] \
+  [--plot_top_correlations <N>] \
+  [--endpoint_angle_tol <degrees>] \
+  [--endpoint_alpha <weight>]
+```
+
+### Arguments
+
+- `--top` (required): Topology file (PDB/PSF/PRMTOP/etc.)
+- `--traj` (required): One or more trajectory files (XTC/DCD/TRR/etc.)
+- `--out_prefix` (required): Prefix for all output files
+- `--endpoint_residues` (required): List of residue selection strings for endpoint analysis (e.g., `"resid 1" "resid 2" "resid 3"`)
+- `--cube_faces` (optional): List of face selection strings for cube volume computation (e.g., `"resid 1-4" "resid 5-8"`)
+- `--guest_sel` (optional): Selection for guest molecule (e.g., `"I-"`)
+- `--plot_top_correlations` (optional): Number of top endpoint pairs to plot for volume correlation (default: 5)
+- `--endpoint_angle_tol` (optional): Angle tolerance in degrees for endpoint finding (default: 15.0)
+- `--endpoint_alpha` (optional): Graph farness weight for endpoint finding (default: 0.2)
+
+### Example
+
+```bash
+python run_volume_endpoint_analysis.py \
+  --top BMMpM_ca.prmtop \
+  --traj BMMpM_mdcrd_v \
+  --out_prefix BMMpM_analy \
+  --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" \
+  --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" \
+  --guest_sel "I-" \
+  --plot_top_correlations 10
+```
+
+### Output Files (from `run_volume_endpoint_analysis.py`)
+
+- `{prefix}_endpoint_metrics.csv`: Endpoint-based metrics per residue
+- `{prefix}_endpoint_volume_correlation.csv`: Correlation between endpoint distances and cube volume
+- `{prefix}_endpoint_variation.csv`: Variation analysis of endpoint pair distances
+- `{prefix}_key_endpoint_pairs.csv`: Key endpoint pairs driving expansion/shrinkage (variation_score ≥ 0.1, |correlation| ≥ 0.7)
+- `{prefix}_gsa_nanocube.csv`: Cube metrics including volume, edge lengths, planarity
+- `{prefix}_endpoint_distances.png`: Plot of endpoint distances over time
+- `{prefix}_endpoint_volume_correlation.png`: Plot of top endpoint-volume correlations
+- `{prefix}_volume_change.png`: Plot of volume change over frames
+- `{prefix}_residue_endpoints.png`: Visualization of residue endpoints
+
+### Key Features
+
+- **Single trajectory iteration**: Uses `FrameGatherer` to efficiently collect coordinates for all selections in one pass
+- **Automatic correlation analysis**: Identifies endpoint pairs that correlate with volume changes
+- **Variation analysis**: Quantifies how much each endpoint pair distance varies over time
+- **Key pair identification**: Automatically finds endpoint pairs most relevant for expansion/shrinkage events
+- **Comprehensive plotting**: Generates multiple visualization plots for analysis
+
+---
 
 ## Output Files
 
@@ -244,15 +360,28 @@ The pipeline generates several output files:
 
 ## Programmatic Usage
 
-For programmatic access, import classes directly:
+For programmatic access, import classes directly from the `src` package:
 
 ```python
-from trajectory_deformation_workflow import (
+from src.AlignedTrajectory import AlignedTrajectory
+from src.TrajectoryMetrics import TrajectoryMetrics
+from src.ClusteringAnalysis import ClusteringAnalysis
+from src.FrameSelection import FrameSelection
+from src.task import GSAnalyzer
+from src.EndpointAnalyzer import EndpointAnalyzer, EndpointsFinder
+from src.Plotter import Plotter
+from src.FileIO import FileIO
+from src.VolumeAnalyzer import VolumeAnalyzer
+```
+
+Alternatively, you can use the package-level imports (backward compatible):
+
+```python
+from MD_analysis import (
     AlignedTrajectory, TrajectoryMetrics, ClusteringAnalysis,
-    FrameSelection, GSAnalyzer, EndpointAnalyzer, Plotter, FileIO
+    FrameSelection, GSAnalyzer, EndpointAnalyzer, Plotter, FileIO,
+    VolumeAnalyzer, EndpointsFinder
 )
-from endpoints_finder import EndpointsFinder
-from volume_analyser import VolumeAnalyzer
 ```
 
 ## Advanced Features

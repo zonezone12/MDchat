@@ -57,46 +57,41 @@ except Exception:
     HAS_RUPTURES = False
 
 
+# Import EndpointsFinder
 try:
-    # Try absolute import first (works when imported from outside the package)
-    from MD_analysis.endpoints_finder import EndpointsFinder
-    HAS_ENDPOINTS_FINDER = True
+    # Try new location first (in src/EndpointAnalyzer)
+    from src.EndpointAnalyzer import EndpointsFinder
 except ImportError:
     try:
+        # Fallback to absolute import (works when imported from outside the package)
+        from MD_analysis.endpoints_finder import EndpointsFinder
+    except ImportError:
         # Fallback to relative import (works when run from within the directory)
         from endpoints_finder import EndpointsFinder
-        HAS_ENDPOINTS_FINDER = True
-    except ImportError:
-        HAS_ENDPOINTS_FINDER = False
-        EndpointsFinder = None  # type: ignore
-        warnings.warn("endpoints_finder module not found. Endpoint-based metrics will be disabled.")
 
 # Import VolumeAnalyzer for volume computation
 try:
     # Try absolute import first (works when imported from outside the package)
     from MD_analysis.volume_analyser import VolumeAnalyzer
-    HAS_VOLUME_ANALYZER = True
 except ImportError:
-    try:
-        # Fallback to relative import (works when run from within the directory)
-        from volume_analyser import VolumeAnalyzer
-        HAS_VOLUME_ANALYZER = True
-    except ImportError:
-        HAS_VOLUME_ANALYZER = False
-        VolumeAnalyzer = None  # type: ignore
-        warnings.warn("volume_analyser module not found. Volume computation will fallback to edge-based method.")
+    # Fallback to relative import (works when run from within the directory)
+    from volume_analyser import VolumeAnalyzer
 
 # Import GSAnalyzer from separate module
 try:
-    # Try absolute import first (works when imported from outside the package)
-    from MD_analysis.gs_analyzer import GSAnalyzer
+    # Try new location first (in src/task)
+    from src.task import GSAnalyzer
 except ImportError:
     try:
-        # Fallback to relative import (works when run from within the directory)
-        from gs_analyzer import GSAnalyzer
+        # Fallback to absolute import (works when imported from outside the package)
+        from MD_analysis.gs_analyzer import GSAnalyzer
     except ImportError:
-        warnings.warn("gs_analyzer module not found. GSAnalyzer will not be available.")
-        GSAnalyzer = None  # type: ignore
+        try:
+            # Fallback to relative import (works when run from within the directory)
+            from gs_analyzer import GSAnalyzer
+        except ImportError:
+            warnings.warn("gs_analyzer module not found. GSAnalyzer will not be available.")
+            GSAnalyzer = None  # type: ignore
 
 
 # ============================================================================
@@ -250,6 +245,61 @@ class AlignedTrajectory:
 
 
 # ============================================================================
+# Class: MetricRegistry
+# Purpose: Container for metric definitions allowing dynamic metric selection
+# ============================================================================
+
+class MetricRegistry:
+    """Registry for metric definitions that can be dynamically selected."""
+    
+    def __init__(self):
+        """Initialize the metric registry."""
+        self._metrics: dict = {}
+        self._default_metrics: List[str] = []
+    
+    def register(self, name: str, metric_func, default: bool = False):
+        """
+        Register a metric function.
+        
+        Args:
+            name: Name identifier for the metric
+            metric_func: Function that computes the metric. Should accept:
+                - universe: mda.Universe
+                - frame_data: dict with frame-specific data
+                - config: dict with metric configuration
+                Returns: tuple (frame_result, needs_postprocessing)
+            default: Whether this metric should be included by default
+        """
+        self._metrics[name] = metric_func
+        if default:
+            if name not in self._default_metrics:
+                self._default_metrics.append(name)
+    
+    def unregister(self, name: str):
+        """Unregister a metric."""
+        if name in self._metrics:
+            del self._metrics[name]
+        if name in self._default_metrics:
+            self._default_metrics.remove(name)
+    
+    def get(self, name: str):
+        """Get a metric function by name."""
+        return self._metrics.get(name)
+    
+    def list_metrics(self) -> List[str]:
+        """List all registered metric names."""
+        return list(self._metrics.keys())
+    
+    def get_default_metrics(self) -> List[str]:
+        """Get list of default metric names."""
+        return self._default_metrics.copy()
+    
+    def has_metric(self, name: str) -> bool:
+        """Check if a metric is registered."""
+        return name in self._metrics
+
+
+# ============================================================================
 # Class: FrameProcessor
 # Purpose: Process frames and compute metrics on-the-fly (memory-efficient)
 # ============================================================================
@@ -259,14 +309,17 @@ class FrameProcessor:
     
     This class is memory-efficient as it only stores final results, not all
     coordinates. Use this for large trajectories where memory is a concern.
+    
+    Metrics can be selected dynamically using the metric registry system.
     """
     
-    def __init__(self, u: mda.Universe):
+    def __init__(self, u: mda.Universe, metric_registry: Optional[MetricRegistry] = None):
         """
         Initialize FrameProcessor.
         
         Args:
             u: MDAnalysis Universe to process
+            metric_registry: Optional MetricRegistry instance. If None, creates a default one.
         """
         self.universe = u
         self.n_frames = len(u.trajectory)
@@ -274,6 +327,303 @@ class FrameProcessor:
         self.frame_indices: np.ndarray = np.array([])
         self.times: np.ndarray = np.array([])
         self._processed = False
+        
+        # Initialize metric registry
+        if metric_registry is None:
+            self.metric_registry = MetricRegistry()
+            self._register_builtin_metrics()
+        else:
+            self.metric_registry = metric_registry
+    
+    def _register_builtin_metrics(self):
+        """Register built-in metrics with the registry."""
+        # Register each metric with its computation function (using lambda to bind self)
+        self.metric_registry.register('rmsd', lambda u, fd, cfg: self._compute_rmsd_metric(u, fd, cfg), default=True)
+        self.metric_registry.register('rmsf', lambda u, fd, cfg: self._compute_rmsf_metric(u, fd, cfg), default=True)
+        self.metric_registry.register('rg', lambda u, fd, cfg: self._compute_rg_metric(u, fd, cfg), default=True)
+        self.metric_registry.register('pca', lambda u, fd, cfg: self._compute_pca_metric(u, fd, cfg), default=True)
+        self.metric_registry.register('strain', lambda u, fd, cfg: self._compute_strain_metric(u, fd, cfg), default=True)
+        self.metric_registry.register('contacts', lambda u, fd, cfg: self._compute_contacts_metric(u, fd, cfg), default=False)
+    
+    def _compute_rmsd_metric(self, universe, frame_data, config):
+        """Compute RMSD for a single frame."""
+        atoms = universe.select_atoms(config['sel'])
+        ref_pos = config['ref_pos']
+        R, rmsd_val = align.rotation_matrix(atoms.positions, ref_pos)
+        return rmsd_val, False  # False = no post-processing needed
+    
+    def _compute_rmsf_metric(self, universe, frame_data, config):
+        """Store coordinates for RMSF computation (needs post-processing)."""
+        atoms = universe.select_atoms(config['sel'])
+        return atoms.positions.copy(), True  # True = needs post-processing
+    
+    def _compute_rg_metric(self, universe, frame_data, config):
+        """Compute radius of gyration for a single frame."""
+        atoms = universe.select_atoms(config['sel'])
+        com = atoms.center_of_mass()
+        rg2 = ((atoms.positions - com) ** 2).sum(axis=1).mean()
+        return np.sqrt(rg2), False
+    
+    def _compute_pca_metric(self, universe, frame_data, config):
+        """Store coordinates for PCA computation (needs post-processing)."""
+        atoms = universe.select_atoms(config['sel'])
+        return atoms.positions.copy().reshape(-1), True
+    
+    def _compute_strain_metric(self, universe, frame_data, config):
+        """Store coordinates for strain computation (needs post-processing)."""
+        atoms = universe.select_atoms(config['sel'])
+        return atoms.positions.copy(), True
+    
+    def _compute_contacts_metric(self, universe, frame_data, config):
+        """Compute contact distance for a single frame."""
+        selA = config.get('selA')
+        selB = config.get('selB')
+        if selA and selB:
+            atomsA = universe.select_atoms(selA)
+            atomsB = universe.select_atoms(selB)
+            if len(atomsA) > 0 and len(atomsB) > 0:
+                da = atomsA.positions[:, None, :]
+                db = atomsB.positions[None, :, :]
+                diff = da - db
+                dd = np.sqrt((diff * diff).sum(axis=2))
+                return dd.min(), False
+        return None, False
+    
+    def process_metrics(self,
+                       metrics_to_compute: Optional[List[str]] = None,
+                       metric_configs: Optional[dict] = None,
+                       **kwargs) -> dict:
+        """
+        Compute selected metrics in a single iteration through the trajectory.
+        
+        This method allows you to dynamically choose which metrics to compute,
+        rather than computing all metrics at once.
+        
+        Args:
+            metrics_to_compute: List of metric names to compute. If None, uses default metrics.
+                               Available metrics: 'rmsd', 'rmsf', 'rg', 'pca', 'strain', 'contacts'
+            metric_configs: Dictionary mapping metric names to their configurations.
+                          Each config should contain the necessary parameters:
+                          - 'rmsd': {'sel': str, 'ref_frame': int}
+                          - 'rmsf': {'sel': str}
+                          - 'rg': {'sel': str}
+                          - 'pca': {'sel': str, 'n_components': int}
+                          - 'strain': {'sel': str, 'window': int, 'lag': int}
+                          - 'contacts': {'selA': str, 'selB': str}
+            **kwargs: Additional parameters for backward compatibility with process_all_metrics
+        
+        Returns:
+            Dictionary with computed metrics
+        
+        Examples:
+            >>> # Compute only RMSD and radius of gyration
+            >>> processor = FrameProcessor(universe)
+            >>> results = processor.process_metrics(
+            ...     metrics_to_compute=['rmsd', 'rg'],
+            ...     metric_configs={
+            ...         'rmsd': {'sel': 'protein', 'ref_frame': 0},
+            ...         'rg': {'sel': 'protein'}
+            ...     }
+            ... )
+            
+            >>> # Compute default metrics with custom selections
+            >>> results = processor.process_metrics(
+            ...     metric_configs={
+            ...         'rmsd': {'sel': 'backbone', 'ref_frame': 0},
+            ...         'rg': {'sel': 'protein'}
+            ...     }
+            ... )
+            
+            >>> # List available metrics
+            >>> print(processor.list_available_metrics())
+            ['rmsd', 'rmsf', 'rg', 'pca', 'strain', 'contacts']
+        """
+        if self._processed:
+            return self.results
+        
+        # Handle backward compatibility: if old-style parameters are provided, use them
+        if metrics_to_compute is None and metric_configs is None:
+            # Check if old-style parameters are provided
+            if any(k in kwargs for k in ['rmsd_sel', 'rmsf_sel', 'rg_sel', 'pca_sel']):
+                return self.process_all_metrics(**kwargs)
+            # Otherwise use default metrics
+            metrics_to_compute = self.metric_registry.get_default_metrics()
+        
+        if metrics_to_compute is None:
+            metrics_to_compute = self.metric_registry.get_default_metrics()
+        
+        if metric_configs is None:
+            metric_configs = {}
+        
+        # Validate requested metrics
+        for metric_name in metrics_to_compute:
+            if not self.metric_registry.has_metric(metric_name):
+                raise ValueError(f"Metric '{metric_name}' is not registered. "
+                               f"Available metrics: {self.metric_registry.list_metrics()}")
+        
+        # Prepare metric configurations
+        configs = {}
+        frame_data_storage = {}  # For metrics that need post-processing
+        
+        # Initialize frame tracking
+        self.frame_indices = np.zeros(self.n_frames, dtype=int)
+        self.times = np.zeros(self.n_frames)
+        
+        # Prepare configurations for each metric
+        for metric_name in metrics_to_compute:
+            config = metric_configs.get(metric_name, {}).copy()
+            
+            if metric_name == 'rmsd':
+                sel = config.get('sel', kwargs.get('rmsd_sel'))
+                ref_frame = config.get('ref_frame', kwargs.get('rmsd_ref_frame', 0))
+                if sel is None:
+                    raise ValueError("rmsd requires 'sel' in metric_configs or rmsd_sel parameter")
+                atoms = self.universe.select_atoms(sel)
+                self.universe.trajectory[ref_frame]
+                config['sel'] = sel
+                config['ref_pos'] = atoms.positions.copy()
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+            
+            elif metric_name == 'rmsf':
+                sel = config.get('sel', kwargs.get('rmsf_sel'))
+                if sel is None:
+                    raise ValueError("rmsf requires 'sel' in metric_configs or rmsf_sel parameter")
+                config['sel'] = sel
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+            
+            elif metric_name == 'rg':
+                sel = config.get('sel', kwargs.get('rg_sel'))
+                if sel is None:
+                    raise ValueError("rg requires 'sel' in metric_configs or rg_sel parameter")
+                config['sel'] = sel
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+            
+            elif metric_name == 'pca':
+                sel = config.get('sel', kwargs.get('pca_sel'))
+                n_components = config.get('n_components', kwargs.get('pca_n_components', 5))
+                if sel is None:
+                    raise ValueError("pca requires 'sel' in metric_configs or pca_sel parameter")
+                config['sel'] = sel
+                config['n_components'] = n_components
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+            
+            elif metric_name == 'strain':
+                sel = config.get('sel', kwargs.get('strain_sel', kwargs.get('pca_sel')))
+                window = config.get('window', kwargs.get('strain_window', 10))
+                lag = config.get('lag', kwargs.get('strain_lag', 1))
+                if sel is None:
+                    raise ValueError("strain requires 'sel' in metric_configs or strain_sel/pca_sel parameter")
+                config['sel'] = sel
+                config['window'] = window
+                config['lag'] = lag
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+            
+            elif metric_name == 'contacts':
+                selA = config.get('selA', kwargs.get('contact_selA'))
+                selB = config.get('selB', kwargs.get('contact_selB'))
+                if selA is None or selB is None:
+                    warnings.warn("contacts metric requires both selA and selB. Skipping.")
+                    # Don't add to configs, so it won't be computed
+                    continue
+                config['selA'] = selA
+                config['selB'] = selB
+                configs[metric_name] = config
+                frame_data_storage[metric_name] = []
+        
+        # SINGLE ITERATION - compute selected metrics on-the-fly
+        for frame_idx, ts in enumerate(self.universe.trajectory):
+            self.frame_indices[frame_idx] = ts.frame
+            self.times[frame_idx] = ts.time
+            
+            # Compute each requested metric
+            for metric_name in metrics_to_compute:
+                if metric_name not in configs:
+                    continue
+                
+                metric_func = self.metric_registry.get(metric_name)
+                if metric_func is None:
+                    continue
+                
+                try:
+                    result, needs_postprocessing = metric_func(self.universe, {}, configs[metric_name])
+                    if needs_postprocessing:
+                        frame_data_storage[metric_name].append(result)
+                    else:
+                        if metric_name not in frame_data_storage:
+                            frame_data_storage[metric_name] = []
+                        frame_data_storage[metric_name].append(result)
+                except Exception as e:
+                    warnings.warn(f"Error computing {metric_name} at frame {frame_idx}: {e}")
+                    if metric_name not in frame_data_storage:
+                        frame_data_storage[metric_name] = []
+                    frame_data_storage[metric_name].append(np.nan)
+        
+        # Post-process metrics that need it
+        self.results = {}
+        
+        for metric_name in metrics_to_compute:
+            if metric_name not in frame_data_storage or len(frame_data_storage[metric_name]) == 0:
+                continue
+            
+            if metric_name == 'rmsd':
+                self.results['rmsd'] = np.array(frame_data_storage[metric_name])
+            
+            elif metric_name == 'rmsf':
+                rmsf_coords = np.array(frame_data_storage[metric_name])  # (T, n, 3)
+                mean = rmsf_coords.mean(axis=0)
+                diffsq = (rmsf_coords - mean) ** 2
+                rmsf_vals = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
+                self.results['rmsf'] = rmsf_vals
+                del rmsf_coords
+            
+            elif metric_name == 'rg':
+                self.results['rg'] = np.array(frame_data_storage[metric_name])
+            
+            elif metric_name == 'pca':
+                pca_coords = np.array(frame_data_storage[metric_name])  # (T, 3N)
+                Xc = pca_coords - pca_coords.mean(axis=0)
+                n_components = configs[metric_name]['n_components']
+                pca = PCA(n_components=n_components, svd_solver="auto")
+                pcs = pca.fit_transform(Xc)
+                self.results['pcs'] = pcs
+                self.results['pca_model'] = pca
+                del pca_coords
+            
+            elif metric_name == 'strain':
+                strain_coords = np.array(frame_data_storage[metric_name])  # (T, n, 3)
+                T, n, _ = strain_coords.shape
+                strain = np.full(T, np.nan)
+                window = configs[metric_name]['window']
+                lag = configs[metric_name]['lag']
+                for t in range(0, T - lag):
+                    if t < window:
+                        continue
+                    A = strain_coords[t - window:t, :, :].reshape(-1, 3)
+                    B = strain_coords[t - window + lag:t + lag, :, :].reshape(-1, 3)
+                    A_aug = np.concatenate([A, np.ones((A.shape[0], 1))], axis=1)
+                    Xsol, *_ = np.linalg.lstsq(A_aug, B, rcond=None)
+                    F = Xsol[:3, :]
+                    C = F.T @ F
+                    E = 0.5 * (C - np.eye(3))
+                    strain[t] = np.linalg.norm(E, ord='fro')
+                self.results['strain'] = strain
+                del strain_coords
+            
+            elif metric_name == 'contacts':
+                contact_vals = frame_data_storage[metric_name]
+                valid_vals = [v for v in contact_vals if v is not None]
+                if valid_vals:
+                    self.results['contacts'] = np.array(valid_vals)
+                else:
+                    self.results['contacts'] = None
+        
+        self._processed = True
+        return self.results
     
     def process_all_metrics(self,
                           rmsd_sel: str,
@@ -289,6 +639,9 @@ class FrameProcessor:
                           rmsd_ref_frame: int = 0) -> dict:
         """
         Compute all metrics in a single iteration through the trajectory.
+        
+        This method is maintained for backward compatibility. It uses the new
+        metric registry system internally.
         
         Args:
             rmsd_sel: Selection for RMSD computation
@@ -306,122 +659,32 @@ class FrameProcessor:
         Returns:
             Dictionary with computed metrics
         """
-        if self._processed:
-            return self.results
-        
-        if strain_sel is None:
-            strain_sel = pca_sel
-        
-        # Get selections once
-        rmsd_atoms = self.universe.select_atoms(rmsd_sel)
-        rmsf_atoms = self.universe.select_atoms(rmsf_sel)
-        rg_atoms = self.universe.select_atoms(rg_sel)
-        pca_atoms = self.universe.select_atoms(pca_sel)
-        strain_atoms = self.universe.select_atoms(strain_sel)
-        
-        # Initialize result arrays (small memory footprint)
-        rmsd_vals = []
-        rmsf_coords = []  # Temporary storage for RMSF
-        rg_vals = []
-        pca_coords = []   # Temporary storage for PCA
-        strain_coords = []  # Temporary storage for strain
-        contact_vals = []
-        
-        # Get reference for RMSD
-        self.universe.trajectory[rmsd_ref_frame]
-        ref_pos = rmsd_atoms.positions.copy()
-        
-        # Get contact selections if needed
-        contact_A = None
-        contact_B = None
+        # Determine which metrics to compute
+        metrics_to_compute = ['rmsd', 'rmsf', 'rg', 'pca', 'strain']
         if contact_selA and contact_selB:
-            contact_A = self.universe.select_atoms(contact_selA)
-            contact_B = self.universe.select_atoms(contact_selB)
-            if len(contact_A) == 0 or len(contact_B) == 0:
-                warnings.warn("Empty selection for contacts.")
-                contact_A = None
-                contact_B = None
+            metrics_to_compute.append('contacts')
         
-        # Initialize frame tracking
-        self.frame_indices = np.zeros(self.n_frames, dtype=int)
-        self.times = np.zeros(self.n_frames)
-        
-        # SINGLE ITERATION - compute everything on-the-fly
-        for frame_idx, ts in enumerate(self.universe.trajectory):
-            self.frame_indices[frame_idx] = ts.frame
-            self.times[frame_idx] = ts.time
-            
-            # RMSD
-            R, rmsd_val = align.rotation_matrix(rmsd_atoms.positions, ref_pos)
-            rmsd_vals.append(rmsd_val)
-            
-            # RMSF (need to store coords temporarily)
-            rmsf_coords.append(rmsf_atoms.positions.copy())
-            
-            # Radius of gyration (compute immediately)
-            com = rg_atoms.center_of_mass()
-            rg2 = ((rg_atoms.positions - com) ** 2).sum(axis=1).mean()
-            rg_vals.append(np.sqrt(rg2))
-            
-            # PCA (need to store coords temporarily)
-            pca_coords.append(pca_atoms.positions.copy().reshape(-1))
-            
-            # Strain (need to store coords temporarily)
-            strain_coords.append(strain_atoms.positions.copy())
-            
-            # Contacts (if needed)
-            if contact_A is not None and contact_B is not None:
-                da = contact_A.positions[:, None, :]
-                db = contact_B.positions[None, :, :]
-                diff = da - db
-                dd = np.sqrt((diff * diff).sum(axis=2))
-                contact_vals.append(dd.min())
-        
-        # Post-process stored arrays (only what's needed)
-        # RMSF
-        rmsf_coords = np.array(rmsf_coords)  # (T, n, 3)
-        mean = rmsf_coords.mean(axis=0)
-        diffsq = (rmsf_coords - mean) ** 2
-        rmsf_vals = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
-        del rmsf_coords  # Free memory immediately
-        
-        # PCA
-        pca_coords = np.array(pca_coords)  # (T, 3N)
-        Xc = pca_coords - pca_coords.mean(axis=0)
-        pca = PCA(n_components=pca_n_components, svd_solver="auto")
-        pcs = pca.fit_transform(Xc)
-        del pca_coords  # Free memory immediately
-        
-        # Strain
-        strain_coords = np.array(strain_coords)  # (T, n, 3)
-        T, n, _ = strain_coords.shape
-        strain = np.full(T, np.nan)
-        for t in range(0, T - strain_lag):
-            if t < strain_window:
-                continue
-            A = strain_coords[t - strain_window:t, :, :].reshape(-1, 3)
-            B = strain_coords[t - strain_window + strain_lag:t + strain_lag, :, :].reshape(-1, 3)
-            A_aug = np.concatenate([A, np.ones((A.shape[0], 1))], axis=1)
-            Xsol, *_ = np.linalg.lstsq(A_aug, B, rcond=None)
-            F = Xsol[:3, :]
-            C = F.T @ F
-            E = 0.5 * (C - np.eye(3))
-            strain[t] = np.linalg.norm(E, ord='fro')
-        del strain_coords  # Free memory immediately
-        
-        # Store results (small memory footprint)
-        self.results = {
-            'rmsd': np.array(rmsd_vals),
-            'rmsf': rmsf_vals,
-            'rg': np.array(rg_vals),
-            'pcs': pcs,
-            'pca_model': pca,
-            'strain': strain,
-            'contacts': np.array(contact_vals) if contact_vals else None
+        # Prepare metric configurations
+        metric_configs = {
+            'rmsd': {'sel': rmsd_sel, 'ref_frame': rmsd_ref_frame},
+            'rmsf': {'sel': rmsf_sel},
+            'rg': {'sel': rg_sel},
+            'pca': {'sel': pca_sel, 'n_components': pca_n_components},
+            'strain': {
+                'sel': strain_sel if strain_sel is not None else pca_sel,
+                'window': strain_window,
+                'lag': strain_lag
+            }
         }
         
-        self._processed = True
-        return self.results
+        if contact_selA and contact_selB:
+            metric_configs['contacts'] = {'selA': contact_selA, 'selB': contact_selB}
+        
+        # Use the new process_metrics method
+        return self.process_metrics(
+            metrics_to_compute=metrics_to_compute,
+            metric_configs=metric_configs
+        )
     
     def get_frame_indices(self) -> np.ndarray:
         """Get frame indices for all processed frames."""
@@ -434,6 +697,33 @@ class FrameProcessor:
     def get_n_frames(self) -> int:
         """Get number of frames."""
         return self.n_frames
+    
+    def list_available_metrics(self) -> List[str]:
+        """List all available metric names."""
+        return self.metric_registry.list_metrics()
+    
+    def register_custom_metric(self, name: str, metric_func, default: bool = False):
+        """
+        Register a custom metric function.
+        
+        Args:
+            name: Name identifier for the metric
+            metric_func: Function that computes the metric. Should accept:
+                - universe: mda.Universe
+                - frame_data: dict with frame-specific data (currently unused, for future use)
+                - config: dict with metric configuration
+                Returns: tuple (frame_result, needs_postprocessing)
+                where needs_postprocessing is True if the result needs post-processing
+            default: Whether this metric should be included by default
+        """
+        self.metric_registry.register(name, metric_func, default=default)
+    
+    def reset_processing(self):
+        """Reset the processed state to allow reprocessing with different metrics."""
+        self._processed = False
+        self.results = {}
+        self.frame_indices = np.array([])
+        self.times = np.array([])
 
 
 # ============================================================================
@@ -1408,13 +1698,6 @@ class EndpointAnalyzer:
                                sel_str: str,
                                endpoints_finder: Optional['EndpointsFinder'] = None) -> Tuple[np.ndarray, List[int]]:
         """Find the endpoints of a residue using EndpointsFinder."""
-        if not HAS_ENDPOINTS_FINDER:
-            sel = u.select_atoms(sel_str)
-            center = sel.center_of_geometry()
-            distances = np.linalg.norm(sel.positions - center, axis=1)
-            endpoints = np.argsort(distances)[::-1][:4].tolist()
-            return center, endpoints
-        
         if endpoints_finder is None:
             endpoints_finder = EndpointsFinder()
         
@@ -1445,17 +1728,6 @@ class EndpointAnalyzer:
         self.residue_sel_list = residue_sel_list
         if endpoints_finder is not None:
             self._endpoints_finder = endpoints_finder
-        
-        if not HAS_ENDPOINTS_FINDER:
-            warnings.warn("EndpointsFinder not available. Returning empty structure.")
-            n_res = len(residue_sel_list)
-            T = len(u.trajectory)
-            self.endpoints_distance_dict = {
-                'all_pairs': {},
-                'n_residues': n_res,
-                'n_frames': T
-            }
-            return self.endpoints_distance_dict
         
         if endpoints_finder is None:
             endpoints_finder = EndpointsFinder()
@@ -1586,10 +1858,6 @@ class EndpointAnalyzer:
         self.residue_sel_list = residue_sel_list
         if endpoints_finder is not None:
             self._endpoints_finder = endpoints_finder
-        
-        if not HAS_ENDPOINTS_FINDER:
-            warnings.warn("EndpointsFinder not available. Returning empty DataFrame.")
-            return pd.DataFrame({'frame': range(len(u.trajectory))})
         
         endpoint_dists_dict = self.compute_endpoint_distances(u, residue_sel_list, endpoints_finder, gatherer=gatherer)
         all_pairs = endpoint_dists_dict['all_pairs']
@@ -2044,6 +2312,88 @@ class Plotter:
         self.output_prefix = out_prefix
         self.plots_generated.append(plot_path)
         print(f"Endpoint-volume correlation plot saved to {plot_path}")
+    
+    def plot_volume_change(self, volume: np.ndarray,
+                           out_prefix: str,
+                           frame_indices: Optional[np.ndarray] = None,
+                           times: Optional[np.ndarray] = None,
+                           xlabel: str = 'Frame',
+                           ylabel: str = 'Volume (Å³)',
+                           title: Optional[str] = None,
+                           show_stats: bool = True) -> None:
+        """Plot volume change through frames.
+        
+        Args:
+            volume: Array of volume values for each frame
+            out_prefix: Output prefix for the plot file
+            frame_indices: Optional array of frame indices (default: np.arange(len(volume)))
+            times: Optional array of time values (if provided, xlabel will be 'Time (ps)')
+            xlabel: Label for x-axis (default: 'Frame')
+            ylabel: Label for y-axis (default: 'Volume (Å³)')
+            title: Optional title for the plot (default: 'Volume Change Through Frames')
+            show_stats: If True, display statistics in the plot (default: True)
+        """
+        if not HAS_MATPLOTLIB:
+            warnings.warn("matplotlib not available. Skipping volume change plot.")
+            return
+        
+        if volume is None or len(volume) == 0:
+            warnings.warn("Volume array is None or empty. Skipping plot.")
+            return
+        
+        # Determine x-axis values
+        if times is not None and len(times) == len(volume):
+            x_values = times
+            xlabel = 'Time (ps)'
+        elif frame_indices is not None and len(frame_indices) == len(volume):
+            x_values = frame_indices
+        else:
+            x_values = np.arange(len(volume))
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=self.figure_size)
+        
+        # Plot volume
+        ax.plot(x_values, volume, 'b-', linewidth=2, alpha=0.8, label='Volume')
+        
+        # Add statistics if requested
+        valid_volume = volume[~np.isnan(volume)]
+        if show_stats and len(valid_volume) > 0:
+            mean_vol = np.mean(valid_volume)
+            std_vol = np.std(valid_volume)
+            min_vol = np.min(valid_volume)
+            max_vol = np.max(valid_volume)
+            
+            # Add horizontal lines for mean and std
+            ax.axhline(mean_vol, color='r', linestyle='--', alpha=0.5, linewidth=1, label=f'Mean: {mean_vol:.2f} Å³')
+            ax.axhline(mean_vol + std_vol, color='orange', linestyle=':', alpha=0.5, linewidth=1, label=f'Mean ± Std: {mean_vol:.2f} ± {std_vol:.2f} Å³')
+            ax.axhline(mean_vol - std_vol, color='orange', linestyle=':', alpha=0.5, linewidth=1)
+            
+            # Add text box with statistics
+            stats_text = f'Mean: {mean_vol:.2f} Å³\nStd: {std_vol:.2f} Å³\nMin: {min_vol:.2f} Å³\nMax: {max_vol:.2f} Å³'
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                   fontsize=10, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Set labels and title
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        if title is None:
+            title = 'Volume Change Through Frames'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        
+        # Add legend if stats are shown
+        if show_stats and len(valid_volume) > 0:
+            ax.legend(loc='best', fontsize=9)
+        
+        plt.tight_layout()
+        plot_path = f"{out_prefix}_volume_change.png"
+        plt.savefig(plot_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+        self.output_prefix = out_prefix
+        self.plots_generated.append(plot_path)
+        print(f"Volume change plot saved to {plot_path}")
    
     def plot_residue_endpoints(self, u: mda.Universe, residue_sel: str = 'resid 1', out_prefix: str = 'residue_endpoints') -> None:
         """Plot the endpoints of a residue."""

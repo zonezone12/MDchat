@@ -17,15 +17,8 @@ except ImportError as e:
     raise ImportError("MDAnalysis is required. pip install MDAnalysis") from e
 
 from sklearn.cluster import KMeans
-
-# Import VolumeAnalyzer for volume computation
-try:
-    # Try absolute import first (works when imported from outside the package)
-    from MD_analysis.volume_analyser import VolumeAnalyzer
-except ImportError:
-    # Fallback to relative import (works when run from within the directory)
-    from volume_analyser import VolumeAnalyzer
-
+from src.VolumeAnalyzer import VolumeAnalyzer
+from src.TrajectoryIterator import FrameObserver, TrajectoryIterator
 
 class GSAnalyzer:
     """Analyze GSA nanocube structures and compute geometric metrics."""
@@ -346,4 +339,186 @@ class GSAnalyzer:
                 faces.append('resid ' + " ".join(group_resids))
         self.face_selections = faces
         return faces
+
+
+class GSAnalyzerObserver(FrameObserver):
+    """
+    Observer implementation of GSAnalyzer for single-pass trajectory iteration.
+    
+    Processes nanocube metrics during trajectory iteration without storing
+    coordinates in memory.
+    """
+    
+    def __init__(
+        self,
+        face_sel_list: List[str],
+        corner_sel_list: Optional[List[str]] = None,
+        guest_sel: Optional[str] = None,
+        out_prefix: Optional[str] = None,
+    ):
+        """
+        Initialize GSAnalyzerObserver.
+        
+        Args:
+            face_sel_list: List of face selection strings
+            corner_sel_list: Optional list of corner selection strings
+            guest_sel: Optional guest selection string
+            out_prefix: Optional output prefix for saving results
+        """
+        self.face_sel_list = face_sel_list
+        self.corner_sel_list = corner_sel_list or []
+        self.guest_sel = guest_sel
+        self.out_prefix = out_prefix
+        
+        # Storage for results
+        self.rows: List[dict] = []
+        self.volume_analyzer: Optional[VolumeAnalyzer] = None
+        self._initialized = False
+        
+        # Reference to analyzer for utility methods
+        self._analyzer = GSAnalyzer()
+    
+    def get_selections_needed(self) -> List[str]:
+        """Return list of selection strings needed by this observer."""
+        selections = list(self.face_sel_list)
+        if self.guest_sel:
+            selections.append(self.guest_sel)
+        return selections
+    
+    def on_frame_start(self, iterator: TrajectoryIterator) -> None:
+        """Initialize data structures before iteration."""
+        u = iterator.universe
+        
+        # Initialize VolumeAnalyzer
+        combined_sel = " or ".join([f"({s})" for s in self.face_sel_list])
+        try:
+            self.volume_analyzer = VolumeAnalyzer(
+                universe=u,
+                selection=combined_sel,
+                spacing=1.0,
+                probe_radius=1.4
+            )
+        except Exception as e:
+            warnings.warn(
+                f"Failed to initialize VolumeAnalyzer: {e}. "
+                "Falling back to edge-based volume computation."
+            )
+            self.volume_analyzer = None
+        
+        self.rows = []
+        self._initialized = True
+    
+    def on_frame(self, ts: mda.coordinates.base.Timestep, frame_idx: int,
+                 universe: mda.Universe) -> None:
+        """Process a single frame during iteration."""
+        if not self._initialized:
+            return
+        
+        # Get face centers (universe is already at current frame)
+        fcent = []
+        for face_sel in self.face_sel_list:
+            try:
+                ag = universe.select_atoms(face_sel)
+                fcent.append(ag.center_of_geometry())
+            except Exception as e:
+                warnings.warn(f"Failed to get face center for {face_sel} at frame {ts.frame}: {e}")
+                fcent.append(np.array([np.nan, np.nan, np.nan]))
+        
+        fcent = np.array(fcent)
+        
+        # Compute edges
+        edges = []
+        if len(fcent) >= 4:
+            for i in range(len(fcent)):
+                d = np.linalg.norm(fcent - fcent[i], axis=1)
+                nn = np.argsort(d)[1:5]
+                for j in nn:
+                    if i < j:
+                        edges.append((i, j))
+        edges = list(set(edges))
+        
+        edge_len = [np.linalg.norm(fcent[i] - fcent[j]) for (i, j) in edges] if edges else [np.nan]
+        edge_mean = np.nanmean(edge_len)
+        
+        # Planarity per face
+        planar_rms_list = []
+        face_norms_list = []
+        for face_sel in self.face_sel_list:
+            try:
+                ag = universe.select_atoms(face_sel)
+                planar_rms, face_normal_vector = self._analyzer.residue_planar_rms(ag)
+                planar_rms_list.append(planar_rms)
+                face_norms_list.append(face_normal_vector)
+            except Exception as e:
+                warnings.warn(f"Failed to compute planarity for {face_sel} at frame {ts.frame}: {e}")
+                planar_rms_list.append(np.nan)
+                face_norms_list.append(np.array([np.nan, np.nan, np.nan]))
+        
+        face_norms_array = np.array(face_norms_list)
+        face_norms_angle = np.degrees(np.arccos(np.clip(np.dot(face_norms_array, face_norms_array.T), -1.0, 1.0)))
+        face_angle_dict = {}
+        for i, face_i in enumerate(self.face_sel_list):
+            for j, face_j in enumerate(self.face_sel_list):
+                if i != j:
+                    face_angle_dict[f'{face_i}{face_j}_angle'] = face_norms_angle[i, j]
+        
+        cube_center = fcent.mean(axis=0) if len(fcent) else np.array([np.nan, np.nan, np.nan])
+        guest_min = np.nan
+        if self.guest_sel:
+            try:
+                guest = universe.select_atoms(self.guest_sel)
+                if len(guest):
+                    guest_min = float(np.linalg.norm(guest.positions - cube_center, axis=1).min())
+            except Exception:
+                pass
+        
+        # Compute volume
+        if self.volume_analyzer is not None:
+            try:
+                target_volume, cavity_volume = self.volume_analyzer.compute_frame(
+                    ts.frame, return_masks=False
+                )
+                volume = target_volume + cavity_volume
+            except Exception as e:
+                warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
+                volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
+        else:
+            volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
+        
+        self.rows.append({
+            'frame': ts.frame,
+            'edge_mean': edge_mean,
+            'edge_min': float(np.nanmin(edge_len)) if len(edge_len) else np.nan,
+            'edge_max': float(np.nanmax(edge_len)) if len(edge_len) else np.nan,
+            'volume': volume,
+            'planarity_mean': float(np.nanmean(planar_rms_list)),
+            'planarity_max': float(np.nanmax(planar_rms_list)),
+            'guest_min_center_dist': guest_min,
+            **face_angle_dict,
+        })
+    
+    def on_frame_end(self, iterator: TrajectoryIterator) -> None:
+        """Finalize results after iteration."""
+        # Convert rows to DataFrame
+        df = pd.DataFrame(self.rows)
+        self._analyzer.nanocube_metrics_df = df
+        self._analyzer.face_selections = self.face_sel_list
+        
+        # Save if out_prefix is provided
+        if self.out_prefix:
+            df.to_csv(f"{self.out_prefix}_gsa_nanocube.csv", index=False)
+    
+    def get_metrics_df(self) -> pd.DataFrame:
+        """Get computed metrics DataFrame."""
+        return pd.DataFrame(self.rows) if self.rows else pd.DataFrame()
+    
+    def get_volume(self) -> np.ndarray:
+        """Get volume array from computed metrics."""
+        df = self.get_metrics_df()
+        if 'volume' in df.columns:
+            return df['volume'].values
+        elif 'edge_mean' in df.columns:
+            return df['edge_mean'].values ** 3
+        else:
+            return np.array([])
 

@@ -19,18 +19,16 @@ try:
     import MDAnalysis as mda
 except ImportError as e:
     import sys
+
     sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
     raise
 
-# Import classes from the workflow module
-from trajectory_deformation_workflow import (
-    EndpointAnalyzer,
-    Plotter,
-    HAS_ENDPOINTS_FINDER,
-    HAS_VOLUME_ANALYZER,
-)
-
-from gs_analyzer import GSAnalyzer
+# Import classes from the new modular src package
+from src.AlignedTrajectory import AlignedTrajectory
+from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver
+from src.TrajectoryIterator import TrajectoryIterator
+from src.Plotter import Plotter
+from src.task import GSAnalyzer, GSAnalyzerObserver
 
 def main():
     p = argparse.ArgumentParser(
@@ -39,6 +37,7 @@ def main():
     p.add_argument('--top', required=True, help='Topology file (PDB/PSF/PRMTOP/etc.)')
     p.add_argument('--traj', required=True, nargs='+', help='One or more trajectory files (XTC/DCD/TRR/etc.)')
     p.add_argument('--out_prefix', required=True, help='Prefix for outputs (CSV, plots, etc.).')
+    p.add_argument('--align_sel', default='resid 1', help='Selection used for trajectory alignment/superposition (default: resid 1).')
     
     # Endpoint-based analysis arguments
     p.add_argument('--endpoint_residues', nargs='+', required=True, 
@@ -70,49 +69,71 @@ def main():
     
     print(f"Loaded trajectory with {len(u.trajectory)} frames")
     
+    # Align trajectory to remove global motion using AlignedTrajectory class
+    # Note: We align the full universe first, then filter atoms later for analysis
+    print("\nAligning trajectory...")
+    try:
+        aligned_traj = AlignedTrajectory(
+            universe=u,
+            align_sel=args.align_sel,
+            ref_frame=0,
+            align_first_and_last=True,
+            in_memory=True
+        )
+        u = aligned_traj.get_aligned_universe()
+        print("Trajectory alignment completed.")
+    except Exception as e:
+        warnings.warn(f"Alignment failed or selection invalid: {e}. Using original universe.")
+        aligned_traj = None
+    
     # Ensure output directory exists
     os.makedirs(os.path.dirname(args.out_prefix) if os.path.dirname(args.out_prefix) else '.', exist_ok=True)
     
-    # 1) Endpoint-based analysis
+    # Create TrajectoryIterator for single-pass architecture
+    print(f"\n{'='*60}")
+    print("Setting up single-pass trajectory iteration...")
+    print(f"{'='*60}")
+    iterator = TrajectoryIterator(u)
+    
+    # 1) Endpoint-based analysis observer
     endpoint_metrics_df = None
     endpoint_dists_array = None
     endpoint_analyzer = None
-    
-    if HAS_ENDPOINTS_FINDER:
-        print(f"\n{'='*60}")
-        print("Computing endpoint-based metrics...")
-        print(f"{'='*60}")
-        print(f"Analyzing {len(args.endpoint_residues)} residues:")
-        for i, sel in enumerate(args.endpoint_residues):
-            print(f"  {i}: {sel}")
-        
-            endpoint_analyzer = EndpointAnalyzer()
-            endpoint_metrics_df = endpoint_analyzer.compute_endpoint_metrics(
-                u, args.endpoint_residues)
-            endpoint_dists_array = endpoint_analyzer.compute_endpoint_distances(
-                u, args.endpoint_residues)
-            
-            print(f"Endpoint metrics computed successfully.")
-            print(f"  Found {len(endpoint_metrics_df.columns)} metric columns")
-            print(f"  Computed distances for {endpoint_dists_array.get('n_residues', 0)} residues")
-            
+    endpoint_observer = None
 
-    else:
-        warnings.warn("EndpointsFinder not available. Skipping endpoint analysis.")
-        print("Install required dependencies: pip install rdkit")
+    print(f"\n{'='*60}")
+    print("Setting up endpoint analysis observer...")
+    print(f"{'='*60}")
+    print(f"Analyzing {len(args.endpoint_residues)} residues:")
+    for i, sel in enumerate(args.endpoint_residues):
+        print(f"  {i}: {sel}")
     
-    # Save endpoint metrics
-    if endpoint_metrics_df is not None and len(endpoint_metrics_df) > 0:
-        endpoint_metrics_df.to_csv(f"{args.out_prefix}_endpoint_metrics.csv", index=False)
-        print(f"\nEndpoint metrics saved to {args.out_prefix}_endpoint_metrics.csv")
+    try:
+        from src.EndpointAnalyzer.endpoints_finder import EndpointsFinder
+        endpoints_finder = EndpointsFinder(
+            angle_tol_deg=args.endpoint_angle_tol,
+            alpha=args.endpoint_alpha
+        )
+        endpoint_observer = EndpointAnalyzerObserver(
+            residue_sel_list=args.endpoint_residues,
+            endpoints_finder=endpoints_finder
+        )
+        iterator.subscribe(endpoint_observer)
+        print("Endpoint observer subscribed successfully.")
+    except Exception as e:
+        warnings.warn(f"Failed to create endpoint observer: {e}")
+        import traceback
+        traceback.print_exc()
+        endpoint_observer = None
     
-    # 2) Volume analysis (cube volume from face selections)
+    # 2) Volume analysis observer (cube volume from face selections)
     volume = None
     cube_metrics_df = None
+    volume_observer = None
     
     if args.cube_faces and len(args.cube_faces) > 0:
         print(f"\n{'='*60}")
-        print("Computing cube volume from face selections...")
+        print("Setting up volume analysis observer...")
         print(f"{'='*60}")
         print(f"Using {len(args.cube_faces)} face selections:")
         for i, sel in enumerate(args.cube_faces):
@@ -121,39 +142,55 @@ def main():
             print(f"Guest selection: {args.guest_sel}")
         
         try:
-            gsa_analyzer = GSAnalyzer()
-            cube_metrics_df = gsa_analyzer.gsa_nanocube_metrics(
-                u, 
-                face_sel_list=args.cube_faces, 
-                guest_sel=args.guest_sel, 
+            volume_observer = GSAnalyzerObserver(
+                face_sel_list=args.cube_faces,
+                guest_sel=args.guest_sel,
                 out_prefix=args.out_prefix
             )
-            
-            if 'volume' in cube_metrics_df.columns:
-                volume = cube_metrics_df['volume'].values
-                print(f"\nCube volume computed successfully.")
-                print(f"  Mean volume: {np.nanmean(volume):.2f} Å³")
-                print(f"  Std volume: {np.nanstd(volume):.2f} Å³")
-                print(f"  Min volume: {np.nanmin(volume):.2f} Å³")
-                print(f"  Max volume: {np.nanmax(volume):.2f} Å³")
-            else:
-                # Fallback: compute from edge_mean if available
-                if 'edge_mean' in cube_metrics_df.columns:
-                    volume = cube_metrics_df['edge_mean'].values ** 3
-                    print(f"\nCube volume computed from edge_mean.")
-                    print(f"  Mean volume: {np.nanmean(volume):.2f} Å³")
-                else:
-                    warnings.warn("No volume column found in cube metrics.")
-                    volume = None
-                    
+            iterator.subscribe(volume_observer)
+            print("Volume observer subscribed successfully.")
         except Exception as e:
-            warnings.warn(f"Failed to compute volume from cube faces: {e}")
+            warnings.warn(f"Failed to create volume observer: {e}")
             import traceback
             traceback.print_exc()
-            volume = None
+            volume_observer = None
     else:
         print("\nNo cube faces provided. Skipping volume analysis.")
         print("Use --cube_faces to enable volume computation.")
+    
+    # Perform single-pass iteration
+    print(f"\n{'='*60}")
+    print("Iterating trajectory (single pass)...")
+    print(f"{'='*60}")
+    iterator.iterate()
+    print(f"Completed iteration of {iterator.get_n_frames()} frames.")
+    
+    # Extract results from observers
+    if endpoint_observer is not None:
+        endpoint_metrics_df = endpoint_observer.get_endpoint_metrics()
+        endpoint_dists_array = endpoint_observer.get_endpoint_distances()
+        endpoint_analyzer = EndpointAnalyzer()  # For utility methods
+        
+        print(f"\nEndpoint metrics computed successfully.")
+        print(f"  Found {len(endpoint_metrics_df.columns)} metric columns")
+        if endpoint_dists_array:
+            print(f"  Computed distances for {endpoint_dists_array.get('n_residues', 0)} residues")
+        
+        # Save endpoint metrics
+        if endpoint_metrics_df is not None and len(endpoint_metrics_df) > 0:
+            endpoint_metrics_df.to_csv(f"{args.out_prefix}_endpoint_metrics.csv", index=False)
+            print(f"\nEndpoint metrics saved to {args.out_prefix}_endpoint_metrics.csv")
+    
+    if volume_observer is not None:
+        cube_metrics_df = volume_observer.get_metrics_df()
+        volume = volume_observer.get_volume()
+        
+        if volume is not None and len(volume) > 0:
+            print(f"\nCube volume computed successfully.")
+            print(f"  Mean volume: {np.nanmean(volume):.2f} Å³")
+            print(f"  Std volume: {np.nanstd(volume):.2f} Å³")
+            print(f"  Min volume: {np.nanmin(volume):.2f} Å³")
+            print(f"  Max volume: {np.nanmax(volume):.2f} Å³")
     
     # 3) Correlation analysis between endpoint distances and volume
     correlation_df = None
@@ -231,7 +268,12 @@ def main():
                         endpoint_dists_array, volume, args.endpoint_residues,
                         correlation_df, args.out_prefix, top_n=args.plot_top_correlations
                     )
-                    
+                    #plot volume change
+                    print("\nPlotting volume change over frames...")
+                    plotter.plot_volume_change(volume, args.out_prefix)
+                    #plot residue endpoints
+                    print("\nPlotting residue endpoints...")
+                    plotter.plot_residue_endpoints(u, args.endpoint_residues, args.out_prefix)
             except Exception as e:
                 warnings.warn(f"Failed to compute endpoint-volume correlations: {e}")
                 import traceback
@@ -269,3 +311,4 @@ def main():
 if __name__ == '__main__':
     main()
 
+#python run_volume_endpoint_analysis.py --top C:\Users\zonezone\Desktop\YCU_research\BHHpH_ca.prmtop --traj C:\Users\zonezone\Desktop\YCU_research\BHHpH_ca_mdcrd_v --out_prefix test\BHHpH --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --guest_sel "resname IOD" --plot_top_correlations 10

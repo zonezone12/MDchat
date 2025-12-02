@@ -12,10 +12,15 @@ from MD_analysis.trajectory_deformation_workflow import (
     GSAnalyzer,
     EndpointAnalyzer,
     Plotter,
-    HAS_ENDPOINTS_FINDER,
-    HAS_VOLUME_ANALYZER
 )
-from MD_analysis.endpoints_finder import EndpointsFinder as ef
+try:
+    from src.EndpointAnalyzer import EndpointsFinder as ef
+except ImportError:
+    # Fallback to old location for backward compatibility
+    try:
+        from MD_analysis.endpoints_finder import EndpointsFinder as ef
+    except ImportError:
+        from endpoints_finder import EndpointsFinder as ef
 from MD_analysis.volume_analyser import VolumeAnalyzer
 
 prmtop_list=[i for i in os.listdir() if i.endswith('.prmtop')]

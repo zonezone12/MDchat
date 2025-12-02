@@ -21,8 +21,6 @@ try:
         FileIO,
         EndpointAnalyzer,
         Plotter,
-        HAS_ENDPOINTS_FINDER,
-        HAS_VOLUME_ANALYZER,
     )
     from gs_analyzer import GSAnalyzer
 except ImportError:
@@ -36,8 +34,6 @@ except ImportError:
             FileIO,
             EndpointAnalyzer,
             Plotter,
-            HAS_ENDPOINTS_FINDER,
-            HAS_VOLUME_ANALYZER,
         )
         from MD_analysis.gs_analyzer import GSAnalyzer
     except ImportError:
@@ -52,12 +48,16 @@ except ImportError:
         VolumeAnalyzer = None
 
 try:
-    from endpoints_finder import EndpointsFinder
+    from src.EndpointAnalyzer import EndpointsFinder
 except ImportError:
+    # Fallback to old locations for backward compatibility
     try:
-        from MD_analysis.endpoints_finder import EndpointsFinder
+        from endpoints_finder import EndpointsFinder
     except ImportError:
-        EndpointsFinder = None
+        try:
+            from MD_analysis.endpoints_finder import EndpointsFinder
+        except ImportError:
+            EndpointsFinder = None
 
 __all__ = [
     "GSAnalyzer",
@@ -70,7 +70,5 @@ __all__ = [
     "Plotter",
     "VolumeAnalyzer",
     "EndpointsFinder",
-    "HAS_ENDPOINTS_FINDER",
-    "HAS_VOLUME_ANALYZER",
 ]
 
