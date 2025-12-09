@@ -7,6 +7,17 @@ import re
 import warnings
 from typing import List, Optional, Tuple, Union
 
+# Try to import multiprocessing for parallel frame generation
+try:
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from multiprocessing import cpu_count
+    PARALLEL_AVAILABLE = True
+except ImportError:
+    PARALLEL_AVAILABLE = False
+    ProcessPoolExecutor = None
+    as_completed = None
+    cpu_count = None
+
 import numpy as np
 import pandas as pd
 from rdkit.Chem import Draw
@@ -41,6 +52,174 @@ except ImportError:
 # Endpoint finder (now in EndpointAnalyzer module)
 from src.EndpointAnalyzer import EndpointsFinder, EndpointAnalyzer  # type: ignore
 from src.EndpointAnalyzer import EndpointAnalyzerObserver  # type: ignore   
+
+
+def _generate_timeline_frame(
+    current_frame: int,
+    entry_frames: List[int],
+    exit_frames: List[int],
+    entry_guest_indices: List[List[int]],
+    exit_guest_indices: List[List[int]],
+    sorted_guest_indices: List[int],
+    guest_index_to_y: dict,
+    guest_residence_stats: dict,
+    x_min: float,
+    x_max: float,
+    figure_size: Tuple[int, int],
+    dpi: int,
+    show_connections: bool,
+) -> np.ndarray:
+    """
+    Helper function to generate a single frame for the timeline GIF.
+    This is a module-level function to enable multiprocessing.
+    """
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    
+    # Import imageio (needed in worker processes)
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        import imageio
+    
+    fig, ax = plt.subplots(figsize=figure_size)
+    
+    # Filter events up to current frame
+    current_entry_frames = [f for f in entry_frames if f <= current_frame]
+    current_exit_frames = [f for f in exit_frames if f <= current_frame]
+    current_entry_indices = [idx for i, idx in enumerate(entry_guest_indices) if entry_frames[i] <= current_frame]
+    current_exit_indices = [idx for i, idx in enumerate(exit_guest_indices) if exit_frames[i] <= current_frame]
+
+    # Plot entry-exit connections for each guest (up to current frame)
+    if show_connections:
+        # Build a timeline for each guest: list of (entry_frame, exit_frame) pairs
+        guest_timelines = {gidx: [] for gidx in sorted_guest_indices}
+        
+        # Process entry events up to current frame
+        for entry_frame, guest_indices in zip(entry_frames, entry_guest_indices):
+            if entry_frame <= current_frame:
+                for gidx in guest_indices:
+                    if gidx in guest_timelines:
+                        guest_timelines[gidx].append({'entry': entry_frame, 'exit': None})
+        
+        # Process exit events up to current frame and match with entries
+        for exit_frame, guest_indices in zip(exit_frames, exit_guest_indices):
+            if exit_frame <= current_frame:
+                for gidx in guest_indices:
+                    if gidx in guest_timelines:
+                        # Find the most recent unmatched entry for this guest
+                        for timeline_entry in reversed(guest_timelines[gidx]):
+                            if timeline_entry['exit'] is None:
+                                timeline_entry['exit'] = exit_frame
+                                break
+        
+        # Draw horizontal lines for each guest's residence periods
+        for gidx, timeline in guest_timelines.items():
+            y_pos = guest_index_to_y[gidx]
+            for period in timeline:
+                entry_frame = period['entry']
+                exit_frame = period['exit'] if period['exit'] is not None else current_frame
+                ax.plot(
+                    [entry_frame, exit_frame],
+                    [y_pos, y_pos],
+                    color='lightblue',
+                    linewidth=3,
+                    alpha=0.5,
+                    zorder=1
+                )
+
+    # Plot entry events up to current frame
+    entry_x = []
+    entry_y = []
+    for entry_frame, guest_indices in zip(entry_frames, entry_guest_indices):
+        if entry_frame <= current_frame:
+            for gidx in guest_indices:
+                if gidx in guest_index_to_y:
+                    entry_x.append(entry_frame)
+                    entry_y.append(guest_index_to_y[gidx])
+
+    if entry_x:
+        ax.scatter(
+            entry_x,
+            entry_y,
+            color='green',
+            marker='^',
+            s=150,
+            zorder=3,
+            label=f'Entry events (n={len(entry_x)})',
+            edgecolors='darkgreen',
+            linewidths=1.5
+        )
+
+    # Plot exit events up to current frame
+    exit_x = []
+    exit_y = []
+    for exit_frame, guest_indices in zip(exit_frames, exit_guest_indices):
+        if exit_frame <= current_frame:
+            for gidx in guest_indices:
+                if gidx in guest_index_to_y:
+                    exit_x.append(exit_frame)
+                    exit_y.append(guest_index_to_y[gidx])
+
+    if exit_x:
+        ax.scatter(
+            exit_x,
+            exit_y,
+            color='red',
+            marker='v',
+            s=150,
+            zorder=3,
+            label=f'Exit events (n={len(exit_x)})',
+            edgecolors='darkred',
+            linewidths=1.5
+        )
+
+    # Add vertical line showing current frame
+    ax.axvline(x=current_frame, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=2, label='Current frame')
+
+    # Set labels and title
+    ax.set_xlabel("Frame", fontsize=12)
+    ax.set_ylabel("Guest Index", fontsize=12)
+    ax.set_title(f"Guest Entry/Exit Timeline (Frame {current_frame})", fontsize=14, fontweight="bold")
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-0.5, len(sorted_guest_indices) - 0.5)
+    ax.set_yticks(range(len(sorted_guest_indices)))
+    ax.set_yticklabels([str(gidx) for gidx in sorted_guest_indices])
+    ax.grid(True, alpha=0.3, axis='x')
+    ax.legend(loc='upper left', fontsize=9)
+
+    # Add statistics text box
+    stats_text = []
+    if guest_residence_stats.get('n_entries', 0) > 0:
+        stats_text.append(f"Total entries: {guest_residence_stats['n_entries']}")
+        stats_text.append(f"Total exits: {guest_residence_stats['n_exits']}")
+        stats_text.append(f"Unique guests: {len(sorted_guest_indices)}")
+        if guest_residence_stats.get('first_entry_frame') is not None:
+            stats_text.append(f"First entry: Frame {guest_residence_stats['first_entry_frame']}")
+    
+    if stats_text:
+        ax.text(
+            0.98,
+            0.02,
+            '\n'.join(stats_text),
+            transform=ax.transAxes,
+            fontsize=10,
+            verticalalignment='bottom',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        )
+
+    plt.tight_layout()
+    
+    # Convert figure to image using BytesIO
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    img = imageio.imread(buf)
+    return img
+
 
 class Plotter:
     """Handle plotting operations for trajectory analysis."""
@@ -109,7 +288,9 @@ class Plotter:
                 fontweight="bold",
             )
             ax.grid(True, alpha=0.3)
-            ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8, ncol=1)
+            handles, labels = ax.get_legend_handles_labels()
+            if labels:
+                ax.legend(handles, labels, bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8, ncol=1)
             plt.tight_layout()
             plot_path = f"{out_prefix}_endpoint_distances.png"
             plt.savefig(plot_path, dpi=self.dpi, bbox_inches="tight")
@@ -878,6 +1059,7 @@ class Plotter:
         max_frames: Optional[int] = None,
         fps: float = 5.0,
         frame_step: int = 5,
+        n_jobs: Optional[int] = None,
     ) -> None:
         """
         Create an animated GIF version of guest entry/exit timeline plot from CSV files.
@@ -889,6 +1071,8 @@ class Plotter:
             max_frames: Optional maximum frame number for x-axis limit. If None, uses max frame from events
             fps: Frames per second for the GIF animation
             frame_step: Step size for animation frames (1 = every frame, 10 = every 10th frame, etc.)
+            n_jobs: Number of parallel workers for frame generation. If None, uses all available CPU cores.
+                   If 1, runs sequentially. Use > 1 for parallel processing.
         """
         if not HAS_MATPLOTLIB or plt is None:
             warnings.warn("matplotlib not available. Skipping guest entry/exit timeline GIF.")
@@ -1098,147 +1282,86 @@ class Plotter:
         if not animation_frames:
             animation_frames = [int(x_min), int(x_max)]
 
-        images = []
-        
         print(f"Creating animated GIF with {len(animation_frames)} frames...")
         
-        for current_frame in animation_frames:
-            fig, ax = plt.subplots(figsize=self.figure_size)
+        # Determine number of workers
+        if n_jobs is None:
+            if PARALLEL_AVAILABLE and cpu_count is not None:
+                n_jobs = cpu_count()
+            else:
+                n_jobs = 1
+        elif n_jobs == -1:
+            if PARALLEL_AVAILABLE and cpu_count is not None:
+                n_jobs = cpu_count()
+            else:
+                n_jobs = 1
+        
+        # Use parallel processing if n_jobs > 1 and parallel is available
+        if n_jobs > 1 and PARALLEL_AVAILABLE and ProcessPoolExecutor is not None:
+            print(f"Using {n_jobs} parallel workers for frame generation...")
+            images_dict = {}  # Store images by frame index to maintain order
             
-            # Filter events up to current frame
-            current_entry_frames = [f for f in entry_frames if f <= current_frame]
-            current_exit_frames = [f for f in exit_frames if f <= current_frame]
-            current_entry_indices = [idx for i, idx in enumerate(entry_guest_indices) if entry_frames[i] <= current_frame]
-            current_exit_indices = [idx for i, idx in enumerate(exit_guest_indices) if exit_frames[i] <= current_frame]
-
-            # Plot entry-exit connections for each guest (up to current frame)
-            if show_connections:
-                # Build a timeline for each guest: list of (entry_frame, exit_frame) pairs
-                guest_timelines = {gidx: [] for gidx in sorted_guest_indices}
+            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+                # Submit all frame generation tasks
+                future_to_frame = {
+                    executor.submit(
+                        _generate_timeline_frame,
+                        current_frame,
+                        entry_frames,
+                        exit_frames,
+                        entry_guest_indices,
+                        exit_guest_indices,
+                        sorted_guest_indices,
+                        guest_index_to_y,
+                        guest_residence_stats,
+                        x_min,
+                        x_max,
+                        self.figure_size,
+                        self.dpi,
+                        show_connections,
+                    ): current_frame
+                    for current_frame in animation_frames
+                }
                 
-                # Process entry events up to current frame
-                for entry_frame, guest_indices in zip(entry_frames, entry_guest_indices):
-                    if entry_frame <= current_frame:
-                        for gidx in guest_indices:
-                            if gidx in guest_timelines:
-                                guest_timelines[gidx].append({'entry': entry_frame, 'exit': None})
-                
-                # Process exit events up to current frame and match with entries
-                for exit_frame, guest_indices in zip(exit_frames, exit_guest_indices):
-                    if exit_frame <= current_frame:
-                        for gidx in guest_indices:
-                            if gidx in guest_timelines:
-                                # Find the most recent unmatched entry for this guest
-                                for timeline_entry in reversed(guest_timelines[gidx]):
-                                    if timeline_entry['exit'] is None:
-                                        timeline_entry['exit'] = exit_frame
-                                        break
-                
-                # Draw horizontal lines for each guest's residence periods
-                for gidx, timeline in guest_timelines.items():
-                    y_pos = guest_index_to_y[gidx]
-                    for period in timeline:
-                        entry_frame = period['entry']
-                        exit_frame = period['exit'] if period['exit'] is not None else current_frame
-                        ax.plot(
-                            [entry_frame, exit_frame],
-                            [y_pos, y_pos],
-                            color='lightblue',
-                            linewidth=3,
-                            alpha=0.5,
-                            zorder=1
-                        )
-
-            # Plot entry events up to current frame
-            entry_x = []
-            entry_y = []
-            for entry_frame, guest_indices in zip(entry_frames, entry_guest_indices):
-                if entry_frame <= current_frame:
-                    for gidx in guest_indices:
-                        if gidx in guest_index_to_y:
-                            entry_x.append(entry_frame)
-                            entry_y.append(guest_index_to_y[gidx])
-
-            if entry_x:
-                ax.scatter(
-                    entry_x,
-                    entry_y,
-                    color='green',
-                    marker='^',
-                    s=150,
-                    zorder=3,
-                    label=f'Entry events (n={len(entry_x)})',
-                    edgecolors='darkgreen',
-                    linewidths=1.5
-                )
-
-            # Plot exit events up to current frame
-            exit_x = []
-            exit_y = []
-            for exit_frame, guest_indices in zip(exit_frames, exit_guest_indices):
-                if exit_frame <= current_frame:
-                    for gidx in guest_indices:
-                        if gidx in guest_index_to_y:
-                            exit_x.append(exit_frame)
-                            exit_y.append(guest_index_to_y[gidx])
-
-            if exit_x:
-                ax.scatter(
-                    exit_x,
-                    exit_y,
-                    color='red',
-                    marker='v',
-                    s=150,
-                    zorder=3,
-                    label=f'Exit events (n={len(exit_x)})',
-                    edgecolors='darkred',
-                    linewidths=1.5
-                )
-
-            # Add vertical line showing current frame
-            ax.axvline(x=current_frame, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=2, label='Current frame')
-
-            # Set labels and title
-            ax.set_xlabel("Frame", fontsize=12)
-            ax.set_ylabel("Guest Index", fontsize=12)
-            ax.set_title(f"Guest Entry/Exit Timeline (Frame {current_frame})", fontsize=14, fontweight="bold")
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(-0.5, len(sorted_guest_indices) - 0.5)
-            ax.set_yticks(range(len(sorted_guest_indices)))
-            ax.set_yticklabels([str(gidx) for gidx in sorted_guest_indices])
-            ax.grid(True, alpha=0.3, axis='x')
-            ax.legend(loc='upper left', fontsize=9)
-
-            # Add statistics text box
-            stats_text = []
-            if guest_residence_stats.get('n_entries', 0) > 0:
-                stats_text.append(f"Total entries: {guest_residence_stats['n_entries']}")
-                stats_text.append(f"Total exits: {guest_residence_stats['n_exits']}")
-                stats_text.append(f"Unique guests: {len(sorted_guest_indices)}")
-                if guest_residence_stats.get('first_entry_frame') is not None:
-                    stats_text.append(f"First entry: Frame {guest_residence_stats['first_entry_frame']}")
+                # Collect results as they complete
+                completed = 0
+                for future in as_completed(future_to_frame):
+                    current_frame = future_to_frame[future]
+                    try:
+                        img = future.result()
+                        images_dict[current_frame] = img
+                        completed += 1
+                        if completed % 10 == 0 or completed == len(animation_frames):
+                            print(f"  Progress: {completed}/{len(animation_frames)} frames completed")
+                    except Exception as e:
+                        warnings.warn(f"Failed to generate frame {current_frame}: {e}")
             
-            if stats_text:
-                ax.text(
-                    0.98,
-                    0.02,
-                    '\n'.join(stats_text),
-                    transform=ax.transAxes,
-                    fontsize=10,
-                    verticalalignment='bottom',
-                    horizontalalignment='right',
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+            # Sort images by frame index to maintain order
+            images = [images_dict[frame] for frame in animation_frames if frame in images_dict]
+        else:
+            # Sequential processing
+            if n_jobs > 1:
+                warnings.warn("Parallel processing requested but not available. Using sequential processing.")
+            images = []
+            for i, current_frame in enumerate(animation_frames):
+                img = _generate_timeline_frame(
+                    current_frame,
+                    entry_frames,
+                    exit_frames,
+                    entry_guest_indices,
+                    exit_guest_indices,
+                    sorted_guest_indices,
+                    guest_index_to_y,
+                    guest_residence_stats,
+                    x_min,
+                    x_max,
+                    self.figure_size,
+                    self.dpi,
+                    show_connections,
                 )
-
-            plt.tight_layout()
-            
-            # Convert figure to image using BytesIO (more compatible)
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png", dpi=self.dpi, bbox_inches="tight")
-            plt.close(fig)
-            buf.seek(0)
-            img = imageio.imread(buf)
-            images.append(img)
+                images.append(img)
+                if (i + 1) % 10 == 0 or (i + 1) == len(animation_frames):
+                    print(f"  Progress: {i + 1}/{len(animation_frames)} frames completed")
 
         if not images:
             warnings.warn("No frames collected for GIF.")

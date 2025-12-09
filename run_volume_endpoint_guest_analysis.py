@@ -37,6 +37,7 @@ from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver
 from src.TrajectoryIterator import TrajectoryIterator
 from src.Plotter import Plotter
 from src.task import GSAnalyzerObserver
+from src.FrameSelection import FrameSelection
 
 def log_memory(label=""):
     """Log current memory usage (RSS and VMS) if psutil is available."""
@@ -489,6 +490,53 @@ def main():
     elif endpoint_dists_array is None and volume is not None:
         print("\nWarning: Endpoint distances not computed. Cannot perform correlation analysis.")
     log_memory("After computing correlations between endpoint distances and volume")
+    
+    # 4) Simulation scoring and validation
+    simulation_score = None
+    score_details = None
+    if volume is not None or guest_stats is not None or correlation_df is not None:
+        print(f"\n{'='*60}")
+        print("Scoring simulation quality...")
+        print(f"{'='*60}")
+        
+        try:
+            frame_selection = FrameSelection()
+            simulation_score, score_details = frame_selection.score_simulation(
+                guest_stats=guest_stats,
+                volume=volume,
+                correlation_df=correlation_df,
+                endpoint_dists_array=endpoint_dists_array,
+                endpoint_metrics_df=endpoint_metrics_df,
+                cube_metrics_df=cube_metrics_df,
+                min_guest_entry=args.guest_sel is not None,  # Require guest entry if guest_sel provided
+                min_volume_change_pct=10.0,
+                min_correlation=0.5,
+            )
+            
+            # Print summary
+            print(frame_selection.get_simulation_score_summary())
+            
+            # Save score as CSV
+            # Extract trajectory ID from out_prefix (last component of path)
+            trajectory_id = os.path.basename(args.out_prefix) if args.out_prefix else None
+            if trajectory_id:
+                # Remove any common suffixes to get clean ID
+                trajectory_id = trajectory_id.replace('_test', '').replace('_analysis', '')
+            
+            frame_selection.save_simulation_score_csv(
+                output_path=f"{args.out_prefix}_simulation_score.csv",
+                trajectory_id=trajectory_id,
+                guest_stats=guest_stats,
+                volume=volume,
+                correlation_df=correlation_df,
+            )
+            print(f"\nSimulation score saved to {args.out_prefix}_simulation_score.csv")
+            
+        except Exception as e:
+            warnings.warn(f"Failed to score simulation: {e}")
+            import traceback
+            traceback.print_exc()
+    
     # Summary
     print(f"\n{'='*60}")
     print("Analysis Summary")
@@ -516,6 +564,17 @@ def main():
         print(f"  ✓ Guest entering statistics: {args.out_prefix}_guest_entering_stats.csv")
         if guest_stats.get('entry_frames'):
             print(f"  ✓ Guest entering events: {args.out_prefix}_guest_entering_events.csv")
+    
+    if simulation_score is not None:
+        print(f"\nSimulation Quality Scoring:")
+        print(f"  ✓ Overall score: {simulation_score:.3f} / 1.000")
+        print(f"  ✓ Valid: {'Yes' if score_details and score_details.get('is_valid') else 'No'}")
+        print(f"  ✓ Score details: {args.out_prefix}_simulation_score.csv")
+        if score_details:
+            print(f"    - Guest Entry Score: {score_details.get('guest_entry_score', 0):.3f}")
+            print(f"    - Volume Dynamics Score: {score_details.get('volume_dynamics_score', 0):.3f}")
+            print(f"    - Correlation Score: {score_details.get('correlation_score', 0):.3f}")
+            print(f"    - Structural Dynamics Score: {score_details.get('structural_stability_score', 0):.3f}")
     
     print("\nDone!")
 

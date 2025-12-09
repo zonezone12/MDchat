@@ -607,16 +607,25 @@ class EndpointAnalyzerObserver(FrameObserver):
         u.trajectory[0]  # Go to initial frame
         
         self.stored_ep_indices = []
-        for sel_str in self.residue_sel_list:
+        for idx, sel_str in enumerate(self.residue_sel_list):
             try:
                 _, ep_indices = EndpointAnalyzer.find_residue_endpoints(
                     u, sel_str, self.endpoints_finder
                 )
                 self.stored_ep_indices.append(ep_indices)
+                if len(ep_indices) == 0:
+                    warnings.warn(
+                        f"No endpoints found for residue {idx} ({sel_str}) on initial frame. "
+                        f"Check selection string and EndpointsFinder parameters."
+                    )
+                else:
+                    print(f"  Residue {idx} ({sel_str}): Found {len(ep_indices)} endpoint(s)")
             except Exception as e:
                 warnings.warn(
                     f"Failed to find endpoints for {sel_str} on initial frame: {e}"
                 )
+                import traceback
+                traceback.print_exc()
                 self.stored_ep_indices.append([])
         
         # Determine max number of endpoints per residue
@@ -624,6 +633,7 @@ class EndpointAnalyzerObserver(FrameObserver):
         
         # Initialize distance arrays
         self.all_pairs = {}
+        pairs_initialized = 0
         for i in range(self.n_res):
             for j in range(i + 1, self.n_res):
                 max_ep_i = max_ep_per_residue[i]
@@ -632,6 +642,18 @@ class EndpointAnalyzerObserver(FrameObserver):
                     pair_distances = np.full((self.n_frames, max_ep_i, max_ep_j), np.nan)
                     self.all_pairs[(i, j)] = pair_distances
                     self.all_pairs[(j, i)] = np.full((self.n_frames, max_ep_j, max_ep_i), np.nan)
+                    pairs_initialized += 1
+        
+        if pairs_initialized == 0:
+            warnings.warn(
+                f"No endpoint pairs initialized. This can happen if:\n"
+                f"  1. No endpoints were found for any residue\n"
+                f"  2. Only one residue was provided (need at least 2 for pairs)\n"
+                f"  3. Endpoints were found but all residues have 0 endpoints\n"
+                f"  Found endpoints per residue: {max_ep_per_residue}"
+            )
+        else:
+            print(f"  Initialized {pairs_initialized} endpoint pair(s) for distance computation")
         
         self._initialized = True
     
@@ -677,6 +699,29 @@ class EndpointAnalyzerObserver(FrameObserver):
         """Finalize results after iteration."""
         # Results are already stored in self.all_pairs
         pass
+    
+    def merge_results(self, other: 'EndpointAnalyzerObserver') -> None:
+        """
+        Merge results from another observer instance (used in parallel processing).
+        
+        Args:
+            other: Another EndpointAnalyzerObserver instance with results to merge
+        """
+        if not isinstance(other, EndpointAnalyzerObserver):
+            return
+        
+        if not self._initialized or not other._initialized:
+            return
+        
+        # Merge all_pairs dictionaries
+        # For each pair, copy non-NaN values from other into self
+        for (i, j), other_array in other.all_pairs.items():
+            if (i, j) in self.all_pairs:
+                self_array = self.all_pairs[(i, j)]
+                # Copy non-NaN values from other_array to self_array
+                # Use np.where to only update where other_array has valid values
+                valid_mask = ~np.isnan(other_array)
+                self_array[valid_mask] = other_array[valid_mask]
     
     def get_endpoint_distances(self) -> dict:
         """

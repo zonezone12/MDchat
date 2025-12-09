@@ -238,7 +238,7 @@ class FrameSelection:
         - Guest entry/exit behavior
         - Volume dynamics
         - Endpoint-volume correlations
-        - Structural stability
+        - Structural dynamics (higher variation indicates abnormal/interesting events)
         
         Args:
             guest_stats: Dictionary with guest residence statistics from GSAnalyzerObserver
@@ -254,6 +254,8 @@ class FrameSelection:
             weights: Dictionary of weights for different scoring components.
                     Default: {'guest_entry': 0.3, 'volume_dynamics': 0.25, 
                             'correlation': 0.25, 'structural_stability': 0.2}
+                    Note: 'structural_stability' actually scores for structural dynamics/variation
+                          (higher variation = higher score, as it indicates abnormal events)
         
         Returns:
             Tuple of (total_score, score_details_dict) where:
@@ -298,6 +300,25 @@ class FrameSelection:
                 if n_entries > 1:
                     guest_score += min(0.2, (n_entries - 1) * 0.05)
                     score_details['reasons'].append(f"Multiple entry events indicate dynamic behavior")
+                
+                # Bonus if more entries than exits (guest staying inside)
+                if n_entries > n_exits:
+                    entry_exit_diff = n_entries - n_exits
+                    guest_score += min(0.3, 0.15 + entry_exit_diff * 0.05)
+                    score_details['reasons'].append(
+                        f"More entries than exits ({n_entries} entries, {n_exits} exits) - guest staying inside"
+                    )
+                elif n_entries == n_exits and n_entries > 0:
+                    # Balanced entries/exits
+                    guest_score += 0.1
+                    score_details['reasons'].append(
+                        f"Balanced entry/exit events ({n_entries} entries, {n_exits} exits)"
+                    )
+                elif n_exits > n_entries:
+                    # More exits than entries (guest leaving more)
+                    score_details['warnings'].append(
+                        f"More exits than entries ({n_entries} entries, {n_exits} exits) - guest may not be stable inside"
+                    )
                 
                 # Residence time scoring
                 if total_time_inside > 0:
@@ -439,23 +460,23 @@ class FrameSelection:
                     # Base score for having endpoint data
                     stability_score += 0.3
                     
-                    # Score based on reasonable variation (not too stable, not too chaotic)
+                    # Score based on variation: Higher variation = higher score (abnormal events are interesting)
                     if dist_mean > 0:
                         cv = dist_std / dist_mean
-                        if 0.05 < cv < 0.2:  # Moderate, meaningful variation
+                        if cv >= 0.2:  # High variation - interesting abnormal events
                             stability_score += 0.5
                             score_details['reasons'].append(
-                                f"Reasonable structural variation (CV={cv:.3f})"
+                                f"High structural variation detected (CV={cv:.3f}) - abnormal events present"
                             )
-                        elif cv < 0.05:  # Too stable (might be stuck)
-                            stability_score += 0.2
-                            score_details['warnings'].append(
-                                f"Very stable structure (CV={cv:.3f}, might be stuck)"
+                        elif 0.05 < cv < 0.2:  # Moderate variation
+                            stability_score += 0.3
+                            score_details['reasons'].append(
+                                f"Moderate structural variation (CV={cv:.3f})"
                             )
-                        else:  # Too chaotic
-                            stability_score += 0.2
+                        else:  # Too stable (might be stuck, less interesting)
+                            stability_score += 0.1
                             score_details['warnings'].append(
-                                f"High structural variation (CV={cv:.3f}, might be unstable)"
+                                f"Very stable structure (CV={cv:.3f}, might be stuck or lack dynamics)"
                             )
         elif cube_metrics_df is not None and not cube_metrics_df.empty:
             # Fallback to cube metrics for stability
@@ -464,8 +485,18 @@ class FrameSelection:
                 valid_edges = edges[~np.isnan(edges)]
                 if len(valid_edges) > 1:
                     edge_cv = np.nanstd(valid_edges) / np.nanmean(valid_edges)
-                    stability_score = 0.5 if 0.05 < edge_cv < 0.2 else 0.3
-                    score_details['reasons'].append("Structural stability assessed from edge metrics")
+                    # Higher CV (more variation) = higher score
+                    if edge_cv >= 0.2:
+                        stability_score = 0.8
+                        score_details['reasons'].append(
+                            f"High structural variation from edge metrics (CV={edge_cv:.3f}) - abnormal events"
+                        )
+                    elif edge_cv >= 0.05:
+                        stability_score = 0.6
+                        score_details['reasons'].append("Moderate structural variation from edge metrics")
+                    else:
+                        stability_score = 0.4
+                        score_details['warnings'].append("Low structural variation from edge metrics")
         else:
             score_details['warnings'].append("Structural stability metrics not available")
         
@@ -500,7 +531,7 @@ class FrameSelection:
             f"  Guest Entry:        {details['guest_entry_score']:.3f} / 1.000",
             f"  Volume Dynamics:   {details['volume_dynamics_score']:.3f} / 1.000",
             f"  Correlation:       {details['correlation_score']:.3f} / 1.000",
-            f"  Structural Stability: {details['structural_stability_score']:.3f} / 1.000",
+            f"  Structural Dynamics: {details['structural_stability_score']:.3f} / 1.000",
             "",
         ]
         
@@ -519,5 +550,181 @@ class FrameSelection:
         lines.append("=" * 60)
         
         return "\n".join(lines)
+
+    def save_simulation_score_csv(
+        self,
+        output_path: str,
+        trajectory_id: Optional[str] = None,
+        guest_stats: Optional[Dict[str, Any]] = None,
+        volume: Optional[np.ndarray] = None,
+        correlation_df: Optional[pd.DataFrame] = None,
+    ) -> None:
+        """
+        Save simulation score summary as CSV for easy comparison across trajectories.
+        
+        Args:
+            output_path: Path to save the CSV file (e.g., "output/simulation_score.csv")
+            trajectory_id: Optional identifier for this trajectory (e.g., "traj_001")
+            guest_stats: Optional guest statistics dictionary (for extracting metrics)
+            volume: Optional volume array (for extracting volume statistics)
+            correlation_df: Optional correlation DataFrame (for extracting correlation statistics)
+        """
+        if self.simulation_score is None or self.simulation_score_details is None:
+            raise ValueError("Simulation not scored yet. Call score_simulation() first.")
+        
+        details = self.simulation_score_details
+        
+        # Extract key metrics for comparison
+        n_entries = guest_stats.get('n_entries', 0) if guest_stats else 0
+        n_exits = guest_stats.get('n_exits', 0) if guest_stats else 0
+        total_time_inside = guest_stats.get('total_time_inside', 0.0) if guest_stats else 0.0
+        total_time_outside = guest_stats.get('total_time_outside', 0.0) if guest_stats else 0.0
+        first_entry_frame = guest_stats.get('first_entry_frame') if guest_stats else None
+        first_entry_time = guest_stats.get('first_entry_time') if guest_stats else None
+        
+        # Volume statistics
+        if volume is not None and len(volume) > 0:
+            valid_volume = volume[~np.isnan(volume)]
+            if len(valid_volume) > 0:
+                vol_mean = float(np.nanmean(valid_volume))
+                vol_std = float(np.nanstd(valid_volume))
+                vol_min = float(np.nanmin(valid_volume))
+                vol_max = float(np.nanmax(valid_volume))
+                vol_range = vol_max - vol_min
+                vol_change_pct = (vol_range / vol_mean * 100.0) if vol_mean > 0 else 0.0
+                vol_cv = (vol_std / vol_mean) if vol_mean > 0 else 0.0
+            else:
+                vol_mean = vol_std = vol_min = vol_max = vol_range = vol_change_pct = vol_cv = np.nan
+        else:
+            vol_mean = vol_std = vol_min = vol_max = vol_range = vol_change_pct = vol_cv = np.nan
+        
+        # Correlation statistics
+        max_correlation = np.nan
+        n_significant_correlations = 0
+        if correlation_df is not None and not correlation_df.empty:
+            if 'correlation' in correlation_df.columns:
+                abs_correlations = correlation_df['correlation'].abs()
+                max_correlation = float(abs_correlations.max())
+                n_significant_correlations = int((abs_correlations >= 0.5).sum())
+        
+        # Combine reasons and warnings (semicolon-separated for CSV)
+        reasons_str = "; ".join(details['reasons']) if details['reasons'] else ""
+        warnings_str = "; ".join(details['warnings']) if details['warnings'] else ""
+        
+        # Create DataFrame with single row
+        score_data = {
+            'trajectory_id': trajectory_id if trajectory_id else 'unknown',
+            'overall_score': round(self.simulation_score, 4),
+            'is_valid': details['is_valid'],
+            'guest_entry_score': round(details['guest_entry_score'], 4),
+            'volume_dynamics_score': round(details['volume_dynamics_score'], 4),
+            'correlation_score': round(details['correlation_score'], 4),
+            'structural_dynamics_score': round(details['structural_stability_score'], 4),
+            # Guest metrics
+            'n_entries': n_entries,
+            'n_exits': n_exits,
+            'entry_exit_diff': n_entries - n_exits,
+            'total_time_inside_ps': round(total_time_inside, 2) if total_time_inside > 0 else 0.0,
+            'total_time_outside_ps': round(total_time_outside, 2) if total_time_outside > 0 else 0.0,
+            'residence_fraction': round(total_time_inside / (total_time_inside + total_time_outside), 4) 
+                                   if (total_time_inside + total_time_outside) > 0 else 0.0,
+            'first_entry_frame': first_entry_frame if first_entry_frame is not None else np.nan,
+            'first_entry_time_ps': round(first_entry_time, 2) if first_entry_time is not None else np.nan,
+            # Volume metrics
+            'volume_mean_A3': round(vol_mean, 2) if not np.isnan(vol_mean) else np.nan,
+            'volume_std_A3': round(vol_std, 2) if not np.isnan(vol_std) else np.nan,
+            'volume_min_A3': round(vol_min, 2) if not np.isnan(vol_min) else np.nan,
+            'volume_max_A3': round(vol_max, 2) if not np.isnan(vol_max) else np.nan,
+            'volume_change_pct': round(vol_change_pct, 2) if not np.isnan(vol_change_pct) else np.nan,
+            'volume_cv': round(vol_cv, 4) if not np.isnan(vol_cv) else np.nan,
+            # Correlation metrics
+            'max_correlation': round(max_correlation, 4) if not np.isnan(max_correlation) else np.nan,
+            'n_significant_correlations': n_significant_correlations,
+            # Summary text
+            'positive_indicators': reasons_str,
+            'warnings': warnings_str,
+        }
+        
+        df = pd.DataFrame([score_data])
+        
+        # Save to CSV
+        df.to_csv(output_path, index=False)
+        
+        return
+
+
+def load_and_compare_simulation_scores(
+    csv_paths: List[str],
+    output_path: Optional[str] = None,
+    sort_by: str = 'overall_score',
+    ascending: bool = False,
+) -> pd.DataFrame:
+    """
+    Load and compare multiple simulation score CSV files.
+    
+    This function is useful for batch analysis - load all trajectory score CSVs
+    and rank them to identify which simulations to investigate first.
+    
+    Args:
+        csv_paths: List of paths to simulation score CSV files
+        output_path: Optional path to save the combined/ranked results
+        sort_by: Column name to sort by (default: 'overall_score')
+        ascending: If True, sort ascending (default: False, highest scores first)
+    
+    Returns:
+        DataFrame with all simulation scores, sorted by the specified column
+    
+    Example:
+        >>> from src.FrameSelection import load_and_compare_simulation_scores
+        >>> import glob
+        >>> 
+        >>> # Find all simulation score CSV files
+        >>> csv_files = glob.glob("output/*_simulation_score.csv")
+        >>> 
+        >>> # Load and compare
+        >>> comparison_df = load_and_compare_simulation_scores(
+        ...     csv_files,
+        ...     output_path="output/all_simulations_ranked.csv",
+        ...     sort_by='overall_score'
+        ... )
+        >>> 
+        >>> # Print top 5
+        >>> print(comparison_df.head(5)[['trajectory_id', 'overall_score', 'is_valid']])
+    """
+    all_scores = []
+    
+    for csv_path in csv_paths:
+        try:
+            df = pd.read_csv(csv_path)
+            if len(df) > 0:
+                all_scores.append(df)
+            else:
+                warnings.warn(f"Empty CSV file: {csv_path}")
+        except Exception as e:
+            warnings.warn(f"Failed to load {csv_path}: {e}")
+    
+    if not all_scores:
+        raise ValueError("No valid simulation score CSV files could be loaded")
+    
+    # Combine all DataFrames
+    combined_df = pd.concat(all_scores, ignore_index=True)
+    
+    # Sort by specified column
+    if sort_by in combined_df.columns:
+        combined_df = combined_df.sort_values(by=sort_by, ascending=ascending, na_last=True)
+    else:
+        warnings.warn(f"Column '{sort_by}' not found. Available columns: {list(combined_df.columns)}")
+        warnings.warn("Sorting by 'overall_score' instead")
+        if 'overall_score' in combined_df.columns:
+            combined_df = combined_df.sort_values(by='overall_score', ascending=False, na_last=True)
+    
+    # Add rank column
+    combined_df.insert(0, 'rank', range(1, len(combined_df) + 1))
+    
+    # Save if output path provided
+    if output_path:
+        combined_df.to_csv(output_path, index=False)
+    
+    return combined_df
 
 
