@@ -120,8 +120,6 @@ def main():
             universe=u,
             align_sel=args.align_sel,
             ref_frame=0,
-            align_first_and_last=True,
-            in_memory=True
         )
         u = aligned_traj.get_aligned_universe()
         print("Trajectory alignment completed.")

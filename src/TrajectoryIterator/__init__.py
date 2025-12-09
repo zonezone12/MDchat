@@ -1,4 +1,5 @@
-from .TrajectoryIterator import TrajectoryIterator
+from .TrajectoryIterator import TrajectoryIterator,FrameObserver
 
-__all__ = ["TrajectoryIterator"]
+
+__all__ = ["TrajectoryIterator", "FrameObserver"]
 

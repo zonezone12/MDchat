@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Script to run only Volume and Endpoint Analyzer parts of the trajectory analysis.
+Script to run Volume, Endpoint, and Guest Entering Analyzer parts of the trajectory analysis.
 
 This script focuses on:
 1. Endpoint-based analysis for specified residues
-2. Volume analysis (cube volume from face selections)
+2. Volume analysis (cube volume from face selections) with integrated guest tracking
 3. Correlation analysis between endpoint distances and volume
+4. Guest entering/exiting analysis (integrated in GSAnalyzerObserver)
 """
 
 import argparse
 import os
 import warnings
+import datetime
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,12 @@ except ImportError as e:
     sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
     raise
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+    warnings.warn("psutil not available. Memory logging will be disabled.")
+
 # Import classes from the new modular src package
 from src.AlignedTrajectory import AlignedTrajectory
 from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver
@@ -30,33 +38,149 @@ from src.TrajectoryIterator import TrajectoryIterator
 from src.Plotter import Plotter
 from src.task import GSAnalyzerObserver
 
+def log_memory(label=""):
+    """Log current memory usage (RSS and VMS) if psutil is available."""
+    if psutil is None:
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        rss_gb = process.memory_info().rss / 1e9
+        vms_gb = process.memory_info().vms / 1e9
+        print(f"[{datetime.datetime.now()}] MEM {label:30s} → RSS: {rss_gb:7.1f} GB | VMS: {vms_gb:7.1f} GB", flush=True)
+    except Exception as e:
+        warnings.warn(f"Failed to log memory: {e}")
+
+
+def estimate_memory_per_worker(universe: mda.Universe, n_atoms: int = None) -> float:
+    """
+    Estimate memory usage per worker process in GB.
+    
+    Each worker loads the trajectory, so we estimate based on:
+    - Universe overhead: ~0.5 GB
+    - Trajectory data: depends on number of atoms and frames
+    - Observer overhead: ~0.1-0.3 GB per observer
+    
+    Args:
+        universe: MDAnalysis Universe
+        n_atoms: Number of atoms (if None, uses universe.atoms.n_atoms)
+    
+    Returns:
+        Estimated memory per worker in GB
+    """
+    if n_atoms is None:
+        n_atoms = universe.atoms.n_atoms
+    
+    # Rough estimate: 0.5 GB base + 0.1 GB per 10k atoms
+    base_memory_gb = 0.5
+    atom_memory_gb = (n_atoms / 10000) * 0.1
+    observer_overhead_gb = 0.3  # For endpoint + volume observers
+    
+    return base_memory_gb + atom_memory_gb + observer_overhead_gb
+
+
+def auto_limit_workers(requested_n_jobs: int, universe: mda.Universe, 
+                       available_memory_gb: float = None) -> int:
+    """
+    Automatically limit number of workers based on available memory.
+    
+    Args:
+        requested_n_jobs: Requested number of workers (-1 means all cores)
+        universe: MDAnalysis Universe
+        available_memory_gb: Available memory in GB (if None, tries to detect)
+    
+    Returns:
+        Limited number of workers
+    """
+    if requested_n_jobs == 1:
+        return 1  # Sequential processing, no limit needed
+    
+    # Get available memory
+    if available_memory_gb is None and psutil is not None:
+        try:
+            mem = psutil.virtual_memory()
+            # Use 80% of available memory to leave some headroom
+            available_memory_gb = (mem.available / 1e9) * 0.8
+        except Exception:
+            available_memory_gb = None
+    
+    if available_memory_gb is None:
+        # Can't detect memory, use conservative default
+        warnings.warn(
+            "Cannot detect available memory. Using conservative limit of 4 workers. "
+            "Set --n_jobs explicitly or increase SLURM --mem allocation."
+        )
+        return min(4, requested_n_jobs if requested_n_jobs > 0 else 4)
+    
+    # Estimate memory per worker
+    memory_per_worker = estimate_memory_per_worker(universe)
+    
+    # Calculate max workers based on available memory
+    # Leave 2 GB headroom for main process
+    max_workers_by_memory = max(1, int((available_memory_gb - 2.0) / memory_per_worker))
+    
+    # Get CPU count if requested all cores
+    if requested_n_jobs == -1:
+        try:
+            cpu_count = os.cpu_count() or 2
+        except Exception:
+            cpu_count = 2
+        requested_n_jobs = cpu_count
+    
+    # Limit to minimum of requested and memory-limited
+    limited_n_jobs = min(requested_n_jobs, max_workers_by_memory)
+    
+    if limited_n_jobs < requested_n_jobs:
+        warnings.warn(
+            f"Limiting workers from {requested_n_jobs} to {limited_n_jobs} based on "
+            f"available memory ({available_memory_gb:.1f} GB). "
+            f"Estimated {memory_per_worker:.2f} GB per worker. "
+            f"To use more workers, increase SLURM --mem allocation or set --n_jobs explicitly."
+        )
+    
+    return limited_n_jobs
+
+
 def main():
     p = argparse.ArgumentParser(
-        description="Run volume and endpoint analysis on MD trajectories."
+        description="Run volume, endpoint, and guest entering analysis on MD trajectories."
     )
     p.add_argument('--top', required=True, help='Topology file (PDB/PSF/PRMTOP/etc.)')
     p.add_argument('--traj', required=True, nargs='+', help='One or more trajectory files (XTC/DCD/TRR/etc.)')
     p.add_argument('--out_prefix', required=True, help='Prefix for outputs (CSV, plots, etc.).')
-    p.add_argument('--align_sel', default='resid 1', help='Selection used for trajectory alignment/superposition (default: resid 1).')
+    p.add_argument('--align_sel', default='resid 1-6', help='Selection used for trajectory alignment/superposition (default: resid 1-6).')
     
     # Endpoint-based analysis arguments
-    p.add_argument('--endpoint_residues', nargs='+', required=True, 
-                   help='List of residue selection strings for endpoint analysis (e.g., "resid 1" "resid 2").')
+    p.add_argument('--endpoint_residues', nargs='+', default=['resid 1','resid 2','resid 3','resid 4','resid 5','resid 6'], 
+                   help='List of residue selection strings for endpoint analysis (e.g., "resid 1" "resid 2", default: resid 1-6).')
     p.add_argument('--endpoint_angle_tol', type=float, default=15.0,
                    help='Angle tolerance in degrees for endpoint finding (default: 15.0).')
     p.add_argument('--endpoint_alpha', type=float, default=0.2,
                    help='Graph farness weight for endpoint finding (default: 0.2).')
     
-    # Cube volume computation arguments
-    p.add_argument('--cube_faces', nargs='+', default=None,
-                   help='List of face selection strings for cube volume computation (e.g., "resid 1-10" "resid 11-20").')
-    p.add_argument('--guest_sel', default=None,
-                   help='Selection for guest molecule (e.g., "I-").')
+    # Cube volume computation arguments (GSAnalyzerObserver handles both volume and guest tracking)
+    p.add_argument('--cube_faces', nargs='+', default=['resid 1', 'resid 2', 'resid 3', 'resid 4', 'resid 5', 'resid 6'],
+                   help='List of face selection strings for cube volume computation (e.g., "resid 1-10" "resid 11-20", default: resid 1-6).')
+    p.add_argument('--guest_sel', default='name I',
+                   help='Selection for guest molecule (e.g., "name I"). Used for both volume analysis and guest tracking.')
     p.add_argument('--plot_top_correlations', type=int, default=5,
                    help='Number of top endpoint pairs to plot for volume correlation (default: 5).')
     
+    # Guest entering analysis arguments (now handled by GSAnalyzerObserver)
+    p.add_argument('--guest_tracking_method', choices=['distance', 'volume'], default='distance',
+                   help='Method to determine if guest is inside host: "distance" (faster) or "volume" (more accurate, default: distance).')
+    p.add_argument('--guest_distance_threshold', type=float, default=None,
+                   help='Distance threshold in Angstrom for guest entering detection (if None, auto-calculate).')
+    
+    # Parallel processing arguments
+    p.add_argument('--n_jobs', type=int, default=-1,
+                   help='Number of parallel jobs. Default: 1 (sequential). Use > 1 for parallel processing. Use -1 to use all CPU cores (WARNING: may cause OOM on large trajectories).')
+    p.add_argument('--use_dask', action='store_true',
+                   help='Use Dask Distributed for parallel processing (requires dask installed).')
+    p.add_argument('--auto_limit_workers', action='store_true', default=True,
+                   help='Automatically limit number of workers based on available memory. Recommended for HPC environments.')
+    
     args = p.parse_args()
-
+    log_memory("Start of script")
     # Load trajectory
     print("Loading trajectory...")
     try:
@@ -68,7 +192,7 @@ def main():
         raise ValueError("Trajectory loading failed")
     
     print(f"Loaded trajectory with {len(u.trajectory)} frames")
-    
+    log_memory("After loading universe")
     # Align trajectory to remove global motion using AlignedTrajectory class
     # Note: We align the full universe first, then filter atoms later for analysis
     print("\nAligning trajectory...")
@@ -83,7 +207,7 @@ def main():
     except Exception as e:
         warnings.warn(f"Alignment failed or selection invalid: {e}. Using original universe.")
         aligned_traj = None
-    
+    log_memory("After aligning trajectory")
     # Ensure output directory exists
     os.makedirs(os.path.dirname(args.out_prefix) if os.path.dirname(args.out_prefix) else '.', exist_ok=True)
     
@@ -91,8 +215,8 @@ def main():
     print(f"\n{'='*60}")
     print("Setting up single-pass trajectory iteration...")
     print(f"{'='*60}")
-    iterator = TrajectoryIterator(u)
-    
+    iterator = TrajectoryIterator(u, use_dask=args.use_dask)
+    log_memory("After creating trajectory iterator")
     # 1) Endpoint-based analysis observer
     endpoint_metrics_df = None
     endpoint_dists_array = None
@@ -123,30 +247,37 @@ def main():
         import traceback
         traceback.print_exc()
         endpoint_observer = None
-    
-    # 2) Volume analysis observer (cube volume from face selections)
+    log_memory("After creating endpoint observer")
+    # 2) Volume analysis observer with integrated guest tracking (GSAnalyzerObserver)
     volume = None
     cube_metrics_df = None
     volume_observer = None
-    
+    guest_stats = None
     if args.cube_faces and len(args.cube_faces) > 0:
         print(f"\n{'='*60}")
-        print("Setting up volume analysis observer...")
+        print("Setting up volume analysis observer with guest tracking...")
         print(f"{'='*60}")
         print(f"Using {len(args.cube_faces)} face selections:")
         for i, sel in enumerate(args.cube_faces):
             print(f"  Face {i+1}: {sel}")
         if args.guest_sel:
             print(f"Guest selection: {args.guest_sel}")
+            print(f"Guest tracking method: {args.guest_tracking_method}")
+            if args.guest_distance_threshold:
+                print(f"Distance threshold: {args.guest_distance_threshold} Å")
+            else:
+                print("Distance threshold: auto-calculate")
         
         try:
             volume_observer = GSAnalyzerObserver(
                 face_sel_list=args.cube_faces,
                 guest_sel=args.guest_sel,
-                out_prefix=args.out_prefix
+                out_prefix=args.out_prefix,
+                guest_tracking_method=args.guest_tracking_method,
+                guest_distance_threshold=args.guest_distance_threshold,
             )
             iterator.subscribe(volume_observer)
-            print("Volume observer subscribed successfully.")
+            print("Volume observer with guest tracking subscribed successfully.")
         except Exception as e:
             warnings.warn(f"Failed to create volume observer: {e}")
             import traceback
@@ -155,14 +286,31 @@ def main():
     else:
         print("\nNo cube faces provided. Skipping volume analysis.")
         print("Use --cube_faces to enable volume computation.")
-    
+    log_memory("After creating volume observer")
     # Perform single-pass iteration
     print(f"\n{'='*60}")
     print("Iterating trajectory (single pass)...")
     print(f"{'='*60}")
-    iterator.iterate()
-    print(f"Completed iteration of {iterator.get_n_frames()} frames.")
     
+    # Determine n_jobs for iteration
+    n_jobs = args.n_jobs if args.n_jobs is not None else 1
+    
+    # Auto-limit workers based on memory if requested
+    if args.auto_limit_workers and n_jobs != 1:
+        print("\nAuto-limiting workers based on available memory...")
+        n_jobs = auto_limit_workers(n_jobs, u)
+        print(f"Using {n_jobs} worker(s) for parallel processing.")
+    elif n_jobs == -1:
+        # Warn about using all cores without memory checking
+        warnings.warn(
+            "Using all CPU cores (n_jobs=-1) without memory checking. "
+            "This may cause OOM on large trajectories. "
+            "Consider using --auto_limit_workers or set --n_jobs to a specific number."
+        )
+    
+    iterator.iterate(n_jobs=n_jobs)
+    print(f"Completed iteration of {iterator.get_n_frames()} frames.")
+    log_memory("After performing single-pass iteration")
     # Extract results from observers
     if endpoint_observer is not None:
         endpoint_metrics_df = endpoint_observer.get_endpoint_metrics()
@@ -189,7 +337,64 @@ def main():
             print(f"  Std volume: {np.nanstd(volume):.2f} Å³")
             print(f"  Min volume: {np.nanmin(volume):.2f} Å³")
             print(f"  Max volume: {np.nanmax(volume):.2f} Å³")
-    
+        
+        # Get guest residence statistics from GSAnalyzerObserver
+        if args.guest_sel:
+            guest_stats = volume_observer.get_guest_residence_stats()
+            
+            print(f"\n{'='*60}")
+            print("Guest Entering Analysis Results")
+            print(f"{'='*60}")
+            
+            if guest_stats and guest_stats.get('n_entries', 0) > 0:
+                print(f"First entry frame: {guest_stats['first_entry_frame']}")
+                if guest_stats['first_entry_time'] is not None:
+                    print(f"First entry time: {guest_stats['first_entry_time']:.2f} ps")
+                print(f"Total entries: {guest_stats['n_entries']}")
+                print(f"Total exits: {guest_stats['n_exits']}")
+                print(f"Total time inside: {guest_stats['total_time_inside']:.2f} ps")
+                print(f"Total time outside: {guest_stats['total_time_outside']:.2f} ps")
+                
+                if guest_stats['durations_inside']:
+                    print(f"Average stay duration: {np.mean(guest_stats['durations_inside']):.2f} ps")
+                    print(f"Longest stay duration: {np.max(guest_stats['durations_inside']):.2f} ps")
+                    print(f"Shortest stay duration: {np.min(guest_stats['durations_inside']):.2f} ps")
+            else:
+                print("Guest never entered the host.")
+            
+            # Save guest entering statistics
+            if guest_stats:
+                guest_stats_df = pd.DataFrame({
+                    'metric': ['first_entry_frame', 'first_entry_time', 'n_entries', 'n_exits',
+                              'total_time_inside', 'total_time_outside',
+                              'avg_stay_duration', 'max_stay_duration', 'min_stay_duration'],
+                    'value': [
+                        guest_stats.get('first_entry_frame'),
+                        guest_stats.get('first_entry_time'),
+                        guest_stats.get('n_entries', 0),
+                        guest_stats.get('n_exits', 0),
+                        guest_stats.get('total_time_inside', 0.0),
+                        guest_stats.get('total_time_outside', 0.0),
+                        np.mean(guest_stats['durations_inside']) if guest_stats.get('durations_inside') else None,
+                        np.max(guest_stats['durations_inside']) if guest_stats.get('durations_inside') else None,
+                        np.min(guest_stats['durations_inside']) if guest_stats.get('durations_inside') else None,
+                    ]
+                })
+                guest_stats_df.to_csv(f"{args.out_prefix}_guest_entering_stats.csv", index=False)
+                print(f"\nGuest entering statistics saved to {args.out_prefix}_guest_entering_stats.csv")
+                
+                # Save detailed entry/exit events
+                if guest_stats.get('entry_frames'):
+                    events_df = pd.DataFrame({
+                        'event_type': ['entry'] * len(guest_stats['entry_frames']) + ['exit'] * len(guest_stats['exit_frames']),
+                        'frame': guest_stats['entry_frames'] + guest_stats['exit_frames'],
+                        'time': guest_stats['entry_times'] + guest_stats['exit_times'],
+                        'guest_indices': guest_stats['entry_guest_indices'] + guest_stats['exit_guest_indices']
+                    })
+                    events_df = events_df.sort_values('frame')
+                    events_df.to_csv(f"{args.out_prefix}_guest_entering_events.csv", index=False)
+                    print(f"Guest entering events saved to {args.out_prefix}_guest_entering_events.csv")
+    log_memory("After extracting results from observers")
     # 3) Correlation analysis between endpoint distances and volume
     correlation_df = None
     
@@ -271,7 +476,10 @@ def main():
                     plotter.plot_volume_change(volume, args.out_prefix)
                     #plot residue endpoints
                     print("\nPlotting residue endpoints...")
-                    plotter.plot_residue_endpoints(u, args.endpoint_residues, args.out_prefix)
+                    plotter.plot_residue_endpoints(u, endpoint_observer, args.endpoint_residues, args.out_prefix)
+                   #plot guest entry/exit timeline
+                    print("\nPlotting guest entry/exit timeline...")
+                    plotter.plot_guest_entry_exit_timeline(guest_stats, args.out_prefix)
             except Exception as e:
                 warnings.warn(f"Failed to compute endpoint-volume correlations: {e}")
                 import traceback
@@ -280,7 +488,7 @@ def main():
         print("\nWarning: Cube volume not computed. Provide --cube_faces to enable correlation analysis.")
     elif endpoint_dists_array is None and volume is not None:
         print("\nWarning: Endpoint distances not computed. Cannot perform correlation analysis.")
-    
+    log_memory("After computing correlations between endpoint distances and volume")
     # Summary
     print(f"\n{'='*60}")
     print("Analysis Summary")
@@ -303,10 +511,17 @@ def main():
         print(f"\nVolume Analysis:")
         print(f"  ✓ Cube metrics: {args.out_prefix}_gsa_nanocube.csv")
     
+    if guest_stats is not None:
+        print(f"\nGuest Entering Analysis:")
+        print(f"  ✓ Guest entering statistics: {args.out_prefix}_guest_entering_stats.csv")
+        if guest_stats.get('entry_frames'):
+            print(f"  ✓ Guest entering events: {args.out_prefix}_guest_entering_events.csv")
+    
     print("\nDone!")
 
 
 if __name__ == '__main__':
     main()
 
-#python run_volume_endpoint_analysis.py --top C:\Users\zonezone\Desktop\YCU_research\BHHpH_ca.prmtop --traj C:\Users\zonezone\Desktop\YCU_research\BHHpH_ca_mdcrd_v --out_prefix test\BHHpH --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --guest_sel "resname IOD" --plot_top_correlations 10
+# Example usage:
+# python run_volume_endpoint_guest_analysis.py --top topology.prmtop --traj trajectory.mdcrd --out_prefix output/test --align_sel "resid 1-6" --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6"   --guest_sel "resname IOD" --guest_tracking_method distance --plot_top_correlations 10

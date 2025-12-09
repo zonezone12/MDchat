@@ -9,8 +9,10 @@ the need to store coordinates in memory since MDAnalysis already provides them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import warnings
+import pickle
+import os
 
 try:
     import MDAnalysis as mda
@@ -18,6 +20,24 @@ except ImportError:
     import sys
     sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
     raise
+
+# Try to import Dask Distributed (preferred)
+try:
+    import dask
+    from dask.distributed import Client, as_completed
+    DASK_AVAILABLE = True
+except ImportError:
+    DASK_AVAILABLE = False
+    Client = None
+    as_completed = None
+
+# Fallback to multiprocessing if Dask is not available
+try:
+    import multiprocessing as mp
+    MULTIPROCESSING_AVAILABLE = True
+except ImportError:
+    MULTIPROCESSING_AVAILABLE = False
+    mp = None
 
 
 class FrameObserver(ABC):
@@ -52,6 +72,18 @@ class FrameObserver(ABC):
         Used for optimization and validation.
         """
         return []
+    
+    def merge_results(self, other: 'FrameObserver') -> None:
+        """
+        Merge results from another observer instance (used in parallel processing).
+        
+        By default, this does nothing. Subclasses should override this method
+        if they need to merge state from parallel workers.
+        
+        Args:
+            other: Another observer instance with results to merge
+        """
+        pass
 
 
 class TrajectoryIterator:
@@ -61,21 +93,39 @@ class TrajectoryIterator:
     Iterates through a trajectory once and notifies all registered observers
     for each frame. This eliminates redundant iterations and memory storage.
     
+    Supports both sequential and parallel processing. For parallel processing,
+    observers must be pickle-able and should implement merge_results() to
+    combine results from parallel workers.
+    
+    Parallel processing is implemented using Dask Distributed, which supports both
+    local multi-core processing and distributed cluster computing (HPC). Falls back
+    to multiprocessing if Dask is not available.
+    
     Example:
         >>> iterator = TrajectoryIterator(u)
         >>> endpoint_observer = EndpointAnalyzerObserver(...)
         >>> volume_observer = VolumeAnalyzerObserver(...)
         >>> iterator.subscribe(endpoint_observer)
         >>> iterator.subscribe(volume_observer)
-        >>> iterator.iterate()  # Single pass through trajectory
+        >>> iterator.iterate()  # Sequential processing
+        >>> iterator.iterate(n_jobs=4)  # Parallel processing with 4 workers
+        >>> iterator.iterate(n_jobs=-1)  # Use all available CPU cores
+        
+        # With Dask Distributed cluster
+        >>> from dask.distributed import Client
+        >>> client = Client("tcp://scheduler:8786")  # HPC cluster
+        >>> iterator.iterate(dask_client=client)  # Use cluster
     """
     
-    def __init__(self, universe: mda.Universe):
+    def __init__(self, universe: mda.Universe, use_dask: bool = True):
         """
         Initialize TrajectoryIterator.
         
         Args:
             universe: MDAnalysis Universe to iterate
+            use_dask: If True, prefer Dask Distributed for parallel processing.
+                     Falls back to multiprocessing if Dask is unavailable.
+                     If False, use multiprocessing directly.
         """
         self.universe = universe
         self.observers: List[FrameObserver] = []
@@ -83,6 +133,9 @@ class TrajectoryIterator:
         self.frame_indices: List[int] = []
         self.times: List[float] = []
         self._iterated = False
+        self.use_dask = use_dask and DASK_AVAILABLE
+        self._dask_client: Optional[Client] = None
+        self._dask_client_managed = False  # Track if we created the client
     
     def subscribe(self, observer: FrameObserver) -> None:
         """
@@ -105,14 +158,23 @@ class TrajectoryIterator:
             self.observers.remove(observer)
     
     def iterate(self, start: Optional[int] = None, stop: Optional[int] = None, 
-                step: Optional[int] = None) -> None:
+                step: Optional[int] = None, n_jobs: Optional[int] = None,
+                dask_client: Optional[Client] = None) -> None:
         """
         Iterate through trajectory once and notify all observers.
         
         Args:
             start: Start frame index (default: 0)
             stop: Stop frame index (default: n_frames)
-            step: Step size (default: 1)
+            step: Step size (default: 1)  
+            n_jobs: Number of parallel jobs. If None or 1, runs sequentially.
+                   If > 1, uses parallel processing (Dask or multiprocessing).
+                   If -1, uses all available CPU cores.
+                   Ignored if dask_client is provided (uses client's workers).
+            dask_client: Optional Dask Distributed Client for cluster computing.
+                        If provided, uses this client instead of creating a local one.
+                        If None and use_dask=True, creates a local Dask cluster.
+                        Example: Client("tcp://scheduler:8786") for HPC cluster.
         """
         if self._iterated:
             warnings.warn(
@@ -120,6 +182,45 @@ class TrajectoryIterator:
                 "Reset observers if you need to iterate again."
             )
         
+        # Determine number of jobs
+        if n_jobs is None or n_jobs == 1:
+            self._iterate_sequential(start, stop, step)
+        else:
+            # Use provided client or determine parallel backend
+            if dask_client is not None:
+                self._dask_client = dask_client
+                self._dask_client_managed = False
+                self._iterate_parallel_dask(start, stop, step, n_jobs, dask_client)
+            elif self.use_dask:
+                self._iterate_parallel_dask(start, stop, step, n_jobs, None)
+            else:
+                # Fallback to multiprocessing
+                if not MULTIPROCESSING_AVAILABLE:
+                    warnings.warn(
+                        "Neither Dask nor multiprocessing available. "
+                        "Falling back to sequential processing."
+                    )
+                    self._iterate_sequential(start, stop, step)
+                else:
+                    if n_jobs == -1:
+                        n_jobs = mp.cpu_count()
+                    self._iterate_parallel_multiprocessing(start, stop, step, n_jobs)
+        
+        # Clean up managed Dask client if we created it
+        if self._dask_client_managed and self._dask_client is not None:
+            try:
+                self._dask_client.close()
+            except Exception:
+                pass
+            self._dask_client = None
+            self._dask_client_managed = False
+        
+        self._iterated = True
+    
+    def _iterate_sequential(self, start: Optional[int] = None, 
+                           stop: Optional[int] = None, 
+                           step: Optional[int] = None) -> None:
+        """Sequential iteration (original implementation)."""
         # Notify observers that iteration is starting
         for observer in self.observers:
             observer.on_frame_start(self)
@@ -149,8 +250,292 @@ class TrajectoryIterator:
         # Notify observers that iteration is complete
         for observer in self.observers:
             observer.on_frame_end(self)
+    
+    def _iterate_parallel_dask(self, start: Optional[int] = None,
+                               stop: Optional[int] = None,
+                               step: Optional[int] = None,
+                               n_jobs: Optional[int] = None,
+                               client: Optional[Client] = None) -> None:
+        """Parallel iteration using Dask Distributed."""
+        if not DASK_AVAILABLE:
+            warnings.warn(
+                "Dask not available. Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
         
-        self._iterated = True
+        # Get trajectory file paths and format for creating new Universe instances
+        try:
+            top_file = self.universe.filename
+            traj_file = self.universe.trajectory.filename
+            
+            # Get trajectory format to preserve it in worker processes
+            traj_format = self._get_trajectory_format()
+            
+            # Handle multiple trajectory files
+            if isinstance(traj_file, (list, tuple)):
+                if len(traj_file) > 1:
+                    warnings.warn(
+                        f"Multiple trajectory files detected. Using first file for parallel processing: {traj_file[0]}"
+                    )
+                traj_file = traj_file[0]
+                
+        except (AttributeError, TypeError) as e:
+            warnings.warn(
+                f"Cannot get file paths from Universe for parallel processing: {e}. "
+                "Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
+        
+        # Collect all frame indices to process efficiently
+        traj = self.universe.trajectory
+        n_frames = len(traj)
+        s = slice(start, stop, step)
+        indices = list(range(n_frames))[s]
+        frame_indices_to_process = indices
+        times_to_process = [traj[i].time for i in indices]
+
+        if len(frame_indices_to_process) == 0:
+            return
+        
+        # Notify observers that iteration is starting
+        for observer in self.observers:
+            observer.on_frame_start(self)
+        
+        # Split frames into batches for parallel processing
+        n_frames_to_process = len(frame_indices_to_process)
+        
+        # Determine number of workers
+        if client is None:
+            # Create local Dask client
+            if n_jobs is None or n_jobs == -1:
+                n_jobs = os.cpu_count() or 2
+            client = Client(n_workers=n_jobs, threads_per_worker=1)
+            self._dask_client = client
+            self._dask_client_managed = True
+            print(f"Created local Dask cluster with {n_jobs} workers")
+            print(f"Dask dashboard: {client.dashboard_link}")
+        else:
+            # Use provided client
+            self._dask_client = client
+            self._dask_client_managed = False
+            n_workers = len(client.scheduler_info()['workers'])
+            print(f"Using Dask cluster with {n_workers} workers")
+            if hasattr(client, 'dashboard_link'):
+                print(f"Dask dashboard: {client.dashboard_link}")
+        
+        # Calculate batch size based on number of workers
+        # Use much larger batches to minimize overhead (especially for lightweight computations)
+        # For lightweight work, fewer larger batches are better than many small batches
+        n_workers = len(client.scheduler_info()['workers'])
+        # Use only 1-2 batches per worker to minimize overhead
+        target_batches_per_worker = 1.5  # Very few batches to reduce overhead
+        target_total_batches = max(1, int(n_workers * target_batches_per_worker))
+        # Much larger minimum batch size to reduce Universe recreation overhead
+        min_batch_size = 500  # Increased from 100 to significantly reduce overhead
+        batch_size = max(min_batch_size, n_frames_to_process // target_total_batches)
+        
+        # Warn if we still have too many batches (indicates lightweight computation)
+        estimated_batches = (n_frames_to_process + batch_size - 1) // batch_size
+        if estimated_batches > n_workers * 3 and n_frames_to_process > 1000:
+            warnings.warn(
+                f"Estimated {estimated_batches} batches for {n_frames_to_process} frames with {n_workers} workers. "
+                f"Dask overhead may outweigh benefits for lightweight computations. "
+                "Consider using sequential processing (n_jobs=1) or multiprocessing (use_dask=False) instead."
+            )
+        
+        batches = []
+        
+        for i in range(0, n_frames_to_process, batch_size):
+            batch_end = min(i + batch_size, n_frames_to_process)
+            batches.append((i, batch_end, frame_indices_to_process[i:batch_end]))
+        
+        print(f"Processing {n_frames_to_process} frames in {len(batches)} batches "
+              f"(~{batch_size} frames per batch, {n_workers} workers)")
+        
+        # Submit batches to Dask cluster
+        try:
+            futures = []
+            for batch_start_idx, batch_end_idx, batch_frames in batches:
+                future = client.submit(
+                    _process_frame_batch,
+                    top_file,
+                    traj_file,
+                    traj_format,
+                    batch_frames,
+                    batch_start_idx,
+                    self.observers
+                )
+                futures.append(future)
+            
+            # Gather results as they complete (with progress tracking)
+            results = []
+            completed = 0
+            total = len(futures)
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                    completed += 1
+                    if completed % max(1, total // 10) == 0:
+                        print(f"Progress: {completed}/{total} batches completed ({100*completed/total:.1f}%)")
+                except Exception as e:
+                    warnings.warn(
+                        f"Error processing batch in Dask worker: {e}. "
+                        "This batch will be skipped."
+                    )
+                    results.append(None)
+            
+            print(f"Completed all {total} batches")
+            
+        except Exception as e:
+            warnings.warn(
+                f"Dask parallel processing failed: {e}. "
+                "Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
+        
+        # Merge results from all batches
+        self.frame_indices = frame_indices_to_process
+        self.times = times_to_process
+        
+        # Merge observer results from parallel workers
+        for batch_results in results:
+            if batch_results is None:
+                continue
+            for observer_idx, observer_result in enumerate(batch_results):
+                if observer_idx < len(self.observers) and observer_result is not None:
+                    try:
+                        self.observers[observer_idx].merge_results(observer_result)
+                    except Exception as e:
+                        warnings.warn(
+                            f"Failed to merge results for observer "
+                            f"{type(self.observers[observer_idx]).__name__}: {e}"
+                        )
+        
+        # Notify observers that iteration is complete
+        for observer in self.observers:
+            observer.on_frame_end(self)
+    
+    def _iterate_parallel_multiprocessing(self, start: Optional[int] = None,
+                                         stop: Optional[int] = None,
+                                         step: Optional[int] = None,
+                                         n_jobs: int = 2) -> None:
+        """Parallel iteration using multiprocessing (fallback)."""
+        if not MULTIPROCESSING_AVAILABLE:
+            warnings.warn(
+                "Multiprocessing not available. Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
+        # Get trajectory file paths and format for creating new Universe instances
+        try:
+            top_file = self.universe.filename
+            traj_file = self.universe.trajectory.filename
+            
+            # Get trajectory format to preserve it in worker processes
+            traj_format = self._get_trajectory_format()
+                
+            # Handle multiple trajectory files (convert to list if needed)
+            if isinstance(traj_file, (list, tuple)):
+                # For multiple files, we'll need to pass them all
+                # For now, use the first file and warn
+                if len(traj_file) > 1:
+                    warnings.warn(
+                        f"Multiple trajectory files detected. Using first file for parallel processing: {traj_file[0]}"
+                    )
+                traj_file = traj_file[0]
+                
+        except (AttributeError, TypeError) as e:
+            warnings.warn(
+                f"Cannot get file paths from Universe for parallel processing: {e}. "
+                "Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
+        
+        # Collect all frame indices to process efficiently
+        traj = self.universe.trajectory
+        n_frames = len(traj)
+        # handle None for start/stop/step as slice does
+        s = slice(start, stop, step)
+        indices = list(range(n_frames))[s]
+        frame_indices_to_process = indices
+        times_to_process = [traj[i].time for i in indices]
+
+        if len(frame_indices_to_process) == 0:
+            return
+        
+        # Notify observers that iteration is starting
+        for observer in self.observers:
+            observer.on_frame_start(self)
+        
+        # Split frames into batches for parallel processing
+        n_frames = len(frame_indices_to_process)
+        batch_size = max(1, n_frames // n_jobs)
+        batches = []
+        
+        for i in range(0, n_frames, batch_size):
+            batch_end = min(i + batch_size, n_frames)
+            batches.append((i, batch_end, frame_indices_to_process[i:batch_end]))
+        
+        # Process batches in parallel
+        try:
+            with mp.Pool(processes=n_jobs) as pool:
+                results = pool.starmap(
+                    _process_frame_batch,
+                    [(top_file, traj_file, traj_format, batch_frames, batch_start_idx, 
+                      self.observers) for batch_start_idx, batch_end_idx, batch_frames in batches]
+                )
+        except Exception as e:
+            warnings.warn(
+                f"Parallel processing failed: {e}. Falling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step)
+            return
+        
+        # Merge results from all batches
+        self.frame_indices = frame_indices_to_process
+        self.times = times_to_process
+        
+        # Merge observer results from parallel workers
+        for batch_results in results:
+            if batch_results is None:
+                continue
+            for observer_idx, observer_result in enumerate(batch_results):
+                if observer_idx < len(self.observers) and observer_result is not None:
+                    try:
+                        self.observers[observer_idx].merge_results(observer_result)
+                    except Exception as e:
+                        warnings.warn(
+                            f"Failed to merge results for observer "
+                            f"{type(self.observers[observer_idx]).__name__}: {e}"
+                        )
+        
+        # Notify observers that iteration is complete
+        for observer in self.observers:
+            observer.on_frame_end(self)
+    
+    def _get_trajectory_format(self) -> Optional[str]:
+        """Extract trajectory format from Universe."""
+        traj_format = None
+        if hasattr(self.universe.trajectory, 'format'):
+            traj_format = self.universe.trajectory.format[0]
+        elif hasattr(self.universe.trajectory, '__class__'):
+            # Try to infer from class name (e.g., MDCRDReader -> MDCRD)
+            class_name = self.universe.trajectory.__class__.__name__
+            # Remove 'Reader' suffix if present
+            if class_name.endswith('Reader'):
+                traj_format = class_name[:-6]
+        
+        # Handle empty string format
+        if traj_format == '':
+            traj_format = None
+        
+        return traj_format
     
     def get_frame_indices(self) -> List[int]:
         """Get list of frame indices from last iteration."""
@@ -169,4 +554,121 @@ class TrajectoryIterator:
         self._iterated = False
         self.frame_indices = []
         self.times = []
+        
+        # Clean up Dask client if we managed it
+        if self._dask_client_managed and self._dask_client is not None:
+            try:
+                self._dask_client.close()
+            except Exception:
+                pass
+            self._dask_client = None
+            self._dask_client_managed = False
+    
+    def get_dask_client(self) -> Optional[Client]:
+        """
+        Get the current Dask client (if using Dask).
+        
+        Returns:
+            Dask Client instance or None if not using Dask
+        """
+        return self._dask_client
+    
+    def get_dask_dashboard_link(self) -> Optional[str]:
+        """
+        Get the Dask dashboard link for monitoring (if using Dask).
+        
+        Returns:
+            Dashboard URL string or None if not available
+        """
+        if self._dask_client is not None and hasattr(self._dask_client, 'dashboard_link'):
+            return self._dask_client.dashboard_link
+        return None
+
+
+def _process_frame_batch(top_file: str, traj_file: str, traj_format: Optional[str],
+                         frame_indices: List[int], batch_start_idx: int, 
+                         observers: List[FrameObserver]) -> List[Any]:
+    """
+    Process a batch of frames in a worker process.
+    
+    Args:
+        top_file: Topology file path
+        traj_file: Trajectory file path
+        traj_format: Trajectory format (e.g., 'MDCRD', 'XTC', 'TRR', etc.)
+        frame_indices: List of frame indices to process
+        batch_start_idx: Starting index for this batch (for frame_idx parameter)
+        observers: List of observer instances (will be pickled and recreated)
+    
+    Returns:
+        List of observer results (one per observer)
+    """
+    try:
+        # Create new Universe in worker process with explicit format
+        # If format is provided, use it; otherwise let MDAnalysis try to auto-detect
+        try:
+            if traj_format:
+                u = mda.Universe(top_file, traj_file, format=traj_format)
+            else:
+                u = mda.Universe(top_file, traj_file)
+        except (ValueError, OSError) as e:
+            # If format detection fails, try common formats for the file
+            # This is a fallback for cases where format wasn't properly detected
+            if 'format' in str(e).lower() or 'reader' in str(e).lower():
+                # Try to infer format from filename extension or common patterns
+                traj_lower = str(traj_file).lower()
+                if 'mdcrd' in traj_lower or traj_lower.endswith('.mdcrd'):
+                    u = mda.Universe(top_file, traj_file, format='MDCRD')
+                elif traj_lower.endswith('.xtc'):
+                    u = mda.Universe(top_file, traj_file, format='XTC')
+                elif traj_lower.endswith('.trr'):
+                    u = mda.Universe(top_file, traj_file, format='TRR')
+                elif traj_lower.endswith('.dcd'):
+                    u = mda.Universe(top_file, traj_file, format='DCD')
+                else:
+                    # Re-raise the original error if we can't infer format
+                    raise
+            else:
+                raise
+        
+        # Recreate observers in worker process (they need to be pickle-able)
+        worker_observers = []
+        for observer in observers:
+            try:
+                # Try to pickle and unpickle the observer
+                pickled = pickle.dumps(observer)
+                worker_observer = pickle.loads(pickled)
+                worker_observers.append(worker_observer)
+            except Exception as e:
+                warnings.warn(
+                    f"Observer {type(observer).__name__} is not pickle-able, "
+                    f"skipping parallel processing: {e}"
+                )
+                worker_observers.append(None)
+        
+        # Note: on_frame_start and on_frame_end are called in the main process,
+        # not in worker processes. Workers only process frames.
+        
+        # Process each frame in the batch
+        for local_idx, frame_num in enumerate(frame_indices):
+            global_idx = batch_start_idx + local_idx
+            u.trajectory[frame_num]  # Seek to frame
+            ts = u.trajectory.ts
+            
+            # Notify all observers
+            for worker_observer in worker_observers:
+                if worker_observer is not None:
+                    try:
+                        worker_observer.on_frame(ts, global_idx, u)
+                    except Exception as e:
+                        warnings.warn(
+                            f"Observer {type(worker_observer).__name__} raised exception "
+                            f"on frame {global_idx}: {e}"
+                        )
+        
+        # Return observer instances (they contain the results)
+        return worker_observers
+        
+    except Exception as e:
+        warnings.warn(f"Error in worker process: {e}")
+        return [None] * len(observers)
 

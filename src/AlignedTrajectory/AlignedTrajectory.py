@@ -16,8 +16,7 @@ class AlignedTrajectory:
     """Store and manage an aligned MDAnalysis Universe.
 
     By default, aligns the trajectory to the first frame (trajectory[0]) of
-    the main structure. It can also create aligned universes for the first
-    and last frames.
+    the main structure.
     """
 
     def __init__(
@@ -25,8 +24,7 @@ class AlignedTrajectory:
         universe: mda.Universe,
         align_sel: Optional[str] = None,
         ref_frame: int = 0,
-        align_first_and_last: bool = True,
-        in_memory: bool = True,
+        in_memory: bool = False,  # Changed default to False to avoid loading full trajectory in memory
     ):
         self.original_universe = universe
         self.align_sel = (
@@ -35,11 +33,8 @@ class AlignedTrajectory:
             else "not water and not name I and not name Na+"
         )
         self.ref_frame = ref_frame
-        self.align_first_and_last = align_first_and_last
         self.in_memory = in_memory
         self.aligned_universe: Optional[mda.Universe] = None
-        self.first_frame_universe: Optional[mda.Universe] = None
-        self.last_frame_universe: Optional[mda.Universe] = None
         self._alignment_performed = False
 
         # Perform alignment immediately
@@ -55,10 +50,14 @@ class AlignedTrajectory:
             if hasattr(self.original_universe, "filename") and hasattr(
                 self.original_universe.trajectory, "filename"
             ):
-                self.aligned_universe = mda.Universe(
+                try:
+                    self.aligned_universe = mda.Universe(
                     self.original_universe.filename,
-                    self.original_universe.trajectory.filename,
+                    self.original_universe.trajectory.filename,format=self.original_universe.trajectory.format[0]
                 )
+                except Exception as e:
+                    warnings.warn(f"Failed to create aligned universe: {e}. Using original universe.")
+                    self.aligned_universe = self.original_universe
             else:
                 warnings.warn(
                     "Cannot create independent copy. "
@@ -69,43 +68,11 @@ class AlignedTrajectory:
             # Align all frames to the reference frame
             align.AlignTraj(
                 self.aligned_universe,
-                self.aligned_universe,
+                self.original_universe,
                 select=self.align_sel,
                 ref_frame=self.ref_frame,
                 in_memory=self.in_memory,
             ).run()
-
-            if self.align_first_and_last and hasattr(
-                self.original_universe, "filename"
-            ) and hasattr(self.original_universe.trajectory, "filename"):
-                # First-frame universe
-                self.first_frame_universe = mda.Universe(
-                    self.original_universe.filename,
-                    self.original_universe.trajectory.filename,
-                )
-                self.first_frame_universe.trajectory[0]
-                align.AlignTraj(
-                    self.first_frame_universe,
-                    self.first_frame_universe,
-                    select=self.align_sel,
-                    ref_frame=0,
-                    in_memory=self.in_memory,
-                ).run()
-
-                # Last-frame universe aligned to first
-                self.last_frame_universe = mda.Universe(
-                    self.original_universe.filename,
-                    self.original_universe.trajectory.filename,
-                )
-                self.last_frame_universe.trajectory[-1]
-                if self.first_frame_universe is not None:
-                    align.AlignTraj(
-                        self.last_frame_universe,
-                        self.first_frame_universe,
-                        select=self.align_sel,
-                        ref_frame=0,
-                        in_memory=self.in_memory,
-                    ).run()
 
             self._alignment_performed = True
         except Exception as e:  # pragma: no cover - defensive
@@ -123,14 +90,6 @@ class AlignedTrajectory:
             else self.original_universe
         )
 
-    def get_first_frame_universe(self) -> Optional[mda.Universe]:
-        """Get the universe with first frame aligned (if available)."""
-        return self.first_frame_universe
-
-    def get_last_frame_universe(self) -> Optional[mda.Universe]:
-        """Get the universe with last frame aligned to first (if available)."""
-        return self.last_frame_universe
-
     def realign(
         self, align_sel: Optional[str] = None, ref_frame: Optional[int] = None
     ) -> None:
@@ -142,8 +101,6 @@ class AlignedTrajectory:
 
         self._alignment_performed = False
         self.aligned_universe = None
-        self.first_frame_universe = None
-        self.last_frame_universe = None
         self.align()
 
     def __getattr__(self, name):

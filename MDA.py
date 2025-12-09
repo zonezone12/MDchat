@@ -1,30 +1,60 @@
-import MDAnalysis as mda
 from MDAnalysis.analysis import align, rms
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np
 from typing import List
 from trajectory_deformation_workflow import EndpointAnalyzer as ea
-try:
-    from src.EndpointAnalyzer import EndpointsFinder as ef
-except ImportError:
-    # Fallback to old location for backward compatibility
-    try:
-        from endpoints_finder import EndpointsFinder as ef
-    except ImportError:
-        from MD_analysis.endpoints_finder import EndpointsFinder as ef
+from src.EndpointAnalyzer import EndpointsFinder as ef
+from src.VolumeAnalyzer import VolumeAnalyzer as va
 from rdkit.Chem import Draw
 from MDAnalysis.analysis import gnm
 import matplotlib.pyplot as plt
 
+import MDAnalysis as mda
 prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
 crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
 first_u= mda.Universe(prmtop, crd,format="TRJ")
+
+from src.utils.guest_in import guest_entering
+# For lightweight distance calculations, sequential processing is typically fastest
+# Dask overhead (Universe recreation, pickling, task submission) outweighs benefits
+# Option 1: Sequential (fastest for lightweight work) - ~10 minutes
+frame = guest_entering(first_u, 'not water and not name I and not name Na+', 'resname IOD', return_stats=True, n_jobs=-1,use_dask=True)
+
+# Option 2: Multiprocessing (less overhead than Dask for local computations)
+# frame = guest_entering(first_u, 'not water and not name I and not name Na+', 'resname IOD', return_stats=True, n_jobs=4, use_dask=False)
+
+# Option 3: Dask (only recommended for heavy computations or distributed clusters)
+# from dask.distributed import Client
+# client = Client(n_workers=4, threads_per_worker=1)
+# frame = guest_entering(first_u, 'not water and not name I and not name Na+', 'resname IOD', return_stats=True, n_jobs=4, dask_client=client)
+print(f"Guest entered at frame {frame}")
 
 last_u=mda.Universe(prmtop, crd,format="TRJ")
 last_u.trajectory[-1]
 first_u.trajectory[0]
 first_sel=first_u.select_atoms('not water and not name I and not name Na+')
+
+from MDAnalysis.coordinates.XYZ import XYZWriter
+writer = XYZWriter("BMMpM.xyz")
+writer.write(first_sel)
+writer.close()
+import pore_mapper as pm
+
+# Read in host from xyz file.
+host = pm.Host.init_from_xyz_file(path='BMMpM.xyz')
+host = host.with_centroid([0., 0., 0.])
+
+# Define calculator object.
+calculator = pm.Inflater(bead_sigma=1.0, centroid=host.get_centroid())
+
+# Run calculator on host object, analysing output.
+final_result = calculator.get_inflated_blob(host=host)
+
+# Analysis.
+windows = final_result.pore.get_windows()
+print(f'windows: {windows}, pore_volume: {final_result.pore.get_volume()}') 
+
 last_sel=last_u.select_atoms('not water and not name I and not name Na+')
 unaligned_rmsd = rms.rmsd(first_sel.positions, last_sel.positions, superposition=False)
 print(f"Unaligned RMSD: {unaligned_rmsd:.2f}")
@@ -42,14 +72,13 @@ lrep_sel=last_u.select_atoms('resid 1')
 al_rmsd_resid1=rms.rmsd(rep_sel[rep[1]].positions, lrep_sel[rep[1]].positions, superposition=False)
 print(f"Aligned RMSD of residue 1: {al_rmsd_resid1:.2f}")
 
-from volume_analyser import VolumeAnalyzer
-VA=VolumeAnalyzer(first_u, selection='not water and not name I and not name Na+')
+VA=va(first_u, selection='not water and not name I and not name Na+')
 fig=VA.plot_interactive_3d()
 fig.show()
 
 VA.make_mark_occupancy_gif(frame_index=0,gif_path="occupancy_build_frame0.gif",atom_stride=5,voxel_stride=2,)
 
-VA.make_volume_pipeline_gif(frame_index=0,gif_path="nanocube_volume_pipeline.gif",atom_stride=5,fps=)
+VA.make_volume_pipeline_gif(frame_index=0,gif_path="nanocube_mesh_t.gif",atom_stride=10,voxel_stride=10,fps=5)
 
 target_vol, cavity_vol, inside, cavities=VA.compute_frame(0,return_masks=True)
 cmv=AllChem.ComputeMolVolume(first_sel.convert_to('RDKIT'))
