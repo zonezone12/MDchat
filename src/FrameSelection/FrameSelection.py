@@ -282,7 +282,7 @@ class FrameSelection:
         
         total_score = 0.0
         
-        # 1) Guest Entry/Exit Scoring
+        # 1) Guest Entry/Exit Scoring (more granular, continuous scoring)
         guest_score = 0.0
         if guest_stats is not None:
             n_entries = guest_stats.get('n_entries', 0)
@@ -292,53 +292,59 @@ class FrameSelection:
             first_entry_frame = guest_stats.get('first_entry_frame')
             
             if n_entries > 0:
-                # Guest entered - base score
-                guest_score += 0.4
+                # Guest entered - base score (continuous, not binary)
+                # Use sigmoid-like function: more entries = higher score, but with diminishing returns
+                entry_base = 0.3 + 0.2 * (1 - np.exp(-0.3 * n_entries))  # 0.3-0.5 range
+                guest_score += entry_base
                 score_details['reasons'].append(f"Guest entered host ({n_entries} entry events)")
                 
-                # Bonus for multiple entries (indicates dynamic behavior)
+                # Multiple entries bonus (continuous, exponential decay)
                 if n_entries > 1:
-                    guest_score += min(0.2, (n_entries - 1) * 0.05)
+                    multi_entry_bonus = 0.15 * (1 - np.exp(-0.2 * (n_entries - 1)))
+                    guest_score += multi_entry_bonus
                     score_details['reasons'].append(f"Multiple entry events indicate dynamic behavior")
                 
-                # Bonus if more entries than exits (guest staying inside)
-                if n_entries > n_exits:
-                    entry_exit_diff = n_entries - n_exits
-                    guest_score += min(0.3, 0.15 + entry_exit_diff * 0.05)
+                # Entry/exit balance scoring (continuous function)
+                if n_entries > 0:
+                    entry_exit_ratio = n_entries / (n_entries + n_exits) if (n_entries + n_exits) > 0 else 0.5
+                    # Prefer more entries than exits, but reward balance too
+                    if n_entries > n_exits:
+                        balance_score = 0.25 * (1 + (n_entries - n_exits) / max(n_entries, 1)) * entry_exit_ratio
+                    elif n_entries == n_exits:
+                        balance_score = 0.15 * entry_exit_ratio
+                    else:
+                        balance_score = 0.05 * entry_exit_ratio
+                    guest_score += balance_score
                     score_details['reasons'].append(
-                        f"More entries than exits ({n_entries} entries, {n_exits} exits) - guest staying inside"
-                    )
-                elif n_entries == n_exits and n_entries > 0:
-                    # Balanced entries/exits
-                    guest_score += 0.1
-                    score_details['reasons'].append(
-                        f"Balanced entry/exit events ({n_entries} entries, {n_exits} exits)"
-                    )
-                elif n_exits > n_entries:
-                    # More exits than entries (guest leaving more)
-                    score_details['warnings'].append(
-                        f"More exits than entries ({n_entries} entries, {n_exits} exits) - guest may not be stable inside"
+                        f"Entry/exit balance: {n_entries} entries, {n_exits} exits"
                     )
                 
-                # Residence time scoring
+                # Residence time scoring (continuous, magnitude-aware)
                 if total_time_inside > 0:
-                    # Calculate residence fraction
                     total_time = total_time_inside + total_time_outside
                     if total_time > 0:
                         residence_fraction = total_time_inside / total_time
-                        guest_score += 0.2 * residence_fraction
+                        # Use power function to emphasize higher residence fractions
+                        residence_score = 0.25 * (residence_fraction ** 0.7)  # Non-linear scaling
+                        guest_score += residence_score
                         score_details['reasons'].append(
                             f"Guest residence fraction: {residence_fraction:.2%}"
                         )
                     
-                    # Check minimum residence time if specified
+                    # Minimum residence time check (continuous scoring)
                     if min_guest_residence_time is not None:
                         if total_time_inside >= min_guest_residence_time:
-                            guest_score += 0.2
+                            # Bonus increases with excess time
+                            excess_ratio = total_time_inside / min_guest_residence_time
+                            time_bonus = 0.15 * min(1.0, np.log(1 + excess_ratio) / np.log(2))
+                            guest_score += time_bonus
                             score_details['reasons'].append(
                                 f"Guest residence time ({total_time_inside:.1f} ps) exceeds minimum"
                             )
                         else:
+                            # Partial credit for approaching minimum
+                            partial_credit = 0.1 * (total_time_inside / min_guest_residence_time) ** 0.5
+                            guest_score += partial_credit
                             score_details['warnings'].append(
                                 f"Guest residence time ({total_time_inside:.1f} ps) below minimum "
                                 f"({min_guest_residence_time:.1f} ps)"
@@ -356,7 +362,7 @@ class FrameSelection:
         score_details['guest_entry_score'] = min(1.0, guest_score)
         total_score += weights['guest_entry'] * score_details['guest_entry_score']
         
-        # 2) Volume Dynamics Scoring
+        # 2) Volume Dynamics Scoring (continuous, magnitude-aware)
         volume_score = 0.0
         if volume is not None and len(volume) > 0:
             valid_volume = volume[~np.isnan(volume)]
@@ -372,16 +378,21 @@ class FrameSelection:
                     vol_change_pct = (vol_range / vol_mean) * 100.0
                     
                     # Base score for having volume data
-                    volume_score += 0.3
+                    volume_score += 0.2
                     
-                    # Score based on volume variation
+                    # Continuous scoring based on volume variation magnitude
+                    # Use sigmoid-like function for smooth transition
+                    # Normalize to [0, 1] range with min_volume_change_pct as reference
+                    normalized_change = vol_change_pct / max(min_volume_change_pct, 1.0)
+                    # Use tanh for smooth S-curve: 0.5 at threshold, approaches 1.0 for high values
+                    variation_score = 0.5 * (1 + np.tanh(2 * (normalized_change - 0.5)))
+                    volume_score += 0.4 * variation_score
+                    
                     if vol_change_pct >= min_volume_change_pct:
-                        volume_score += 0.4
                         score_details['reasons'].append(
                             f"Significant volume dynamics ({vol_change_pct:.1f}% change)"
                         )
                     elif vol_change_pct >= min_volume_change_pct * 0.5:
-                        volume_score += 0.2
                         score_details['reasons'].append(
                             f"Moderate volume dynamics ({vol_change_pct:.1f}% change)"
                         )
@@ -391,13 +402,20 @@ class FrameSelection:
                             f"threshold: {min_volume_change_pct}%)"
                         )
                     
-                    # Bonus for volume stability (low std relative to mean)
+                    # Volume stability scoring (continuous, not binary)
                     cv = vol_std / vol_mean if vol_mean > 0 else np.inf
-                    if cv < 0.1:  # Coefficient of variation < 10%
-                        volume_score += 0.3
-                        score_details['reasons'].append("Stable volume (low variation)")
-                    elif cv > 0.3:
-                        score_details['warnings'].append(f"High volume variation (CV={cv:.2f})")
+                    if cv < np.inf:
+                        # Optimal CV is around 0.05-0.15 (some variation but not too chaotic)
+                        # Score peaks at CV=0.1, decreases for both very low and very high CV
+                        optimal_cv = 0.1
+                        stability_score = 0.4 * np.exp(-((cv - optimal_cv) / 0.15) ** 2)
+                        volume_score += stability_score
+                        if cv < 0.1:
+                            score_details['reasons'].append(f"Stable volume (CV={cv:.3f})")
+                        elif cv > 0.3:
+                            score_details['warnings'].append(f"High volume variation (CV={cv:.3f})")
+                        else:
+                            score_details['reasons'].append(f"Moderate volume variation (CV={cv:.3f})")
                 else:
                     score_details['warnings'].append("Invalid volume data (mean <= 0)")
             else:
@@ -408,7 +426,7 @@ class FrameSelection:
         score_details['volume_dynamics_score'] = min(1.0, volume_score)
         total_score += weights['volume_dynamics'] * score_details['volume_dynamics_score']
         
-        # 3) Endpoint-Volume Correlation Scoring
+        # 3) Endpoint-Volume Correlation Scoring (continuous, magnitude-aware)
         correlation_score = 0.0
         if correlation_df is not None and not correlation_df.empty:
             # Check for significant correlations
@@ -418,25 +436,41 @@ class FrameSelection:
                 n_significant = (abs_correlations >= min_correlation).sum()
                 
                 # Base score for having correlation data
-                correlation_score += 0.2
+                correlation_score += 0.15
                 
-                if max_corr >= min_correlation:
-                    # Strong correlation found
-                    correlation_score += 0.5
-                    score_details['reasons'].append(
-                        f"Strong endpoint-volume correlation (max: {max_corr:.3f})"
-                    )
+                # Continuous scoring based on maximum correlation magnitude
+                # Use power function to emphasize stronger correlations
+                # Normalize: 0.5 correlation = 0.5 score, 1.0 correlation = 1.0 score
+                if max_corr > 0:
+                    # Use power function: stronger correlations get exponentially higher scores
+                    max_corr_score = 0.5 * (max_corr ** 1.5)  # Power > 1 emphasizes high values
+                    correlation_score += max_corr_score
                     
-                    # Bonus for multiple significant correlations
+                    if max_corr >= min_correlation:
+                        score_details['reasons'].append(
+                            f"Strong endpoint-volume correlation (max: {max_corr:.3f})"
+                        )
+                    else:
+                        score_details['warnings'].append(
+                            f"Weak correlations (max: {max_corr:.3f}, threshold: {min_correlation})"
+                        )
+                
+                # Multiple correlations bonus (continuous, with diminishing returns)
+                if n_significant > 0:
+                    # Use logarithmic scaling: more correlations = better, but with diminishing returns
+                    multi_corr_bonus = 0.25 * np.log(1 + n_significant) / np.log(10)  # log10 scaling
+                    correlation_score += multi_corr_bonus
                     if n_significant > 1:
-                        correlation_score += min(0.3, (n_significant - 1) * 0.1)
                         score_details['reasons'].append(
                             f"Multiple significant correlations ({n_significant} pairs)"
                         )
-                else:
-                    score_details['warnings'].append(
-                        f"Weak correlations (max: {max_corr:.3f}, threshold: {min_correlation})"
-                    )
+                
+                # Bonus for average correlation strength (not just max)
+                if len(abs_correlations) > 0:
+                    mean_corr = abs_correlations.mean()
+                    if mean_corr > 0:
+                        mean_corr_bonus = 0.1 * (mean_corr ** 1.2)
+                        correlation_score += mean_corr_bonus
             else:
                 score_details['warnings'].append("Correlation data missing 'correlation' column")
         else:
@@ -445,7 +479,7 @@ class FrameSelection:
         score_details['correlation_score'] = min(1.0, correlation_score)
         total_score += weights['correlation'] * score_details['correlation_score']
         
-        # 4) Structural Stability Scoring
+        # 4) Structural Stability Scoring (continuous, magnitude-aware)
         stability_score = 0.0
         if endpoint_metrics_df is not None and not endpoint_metrics_df.empty:
             # Check endpoint distance stability
@@ -458,23 +492,31 @@ class FrameSelection:
                     dist_mean = np.nanmean(valid_dists)
                     
                     # Base score for having endpoint data
-                    stability_score += 0.3
+                    stability_score += 0.25
                     
                     # Score based on variation: Higher variation = higher score (abnormal events are interesting)
                     if dist_mean > 0:
                         cv = dist_std / dist_mean
-                        if cv >= 0.2:  # High variation - interesting abnormal events
-                            stability_score += 0.5
+                        # Use continuous function: optimal CV around 0.15-0.25, but reward higher values too
+                        # Use a combination: base score + variation bonus
+                        if cv >= 0.2:
+                            # High variation - very interesting
+                            variation_score = 0.5 + 0.2 * min(1.0, (cv - 0.2) / 0.3)  # 0.5-0.7 range
+                            stability_score += variation_score
                             score_details['reasons'].append(
                                 f"High structural variation detected (CV={cv:.3f}) - abnormal events present"
                             )
-                        elif 0.05 < cv < 0.2:  # Moderate variation
-                            stability_score += 0.3
+                        elif 0.05 < cv < 0.2:
+                            # Moderate variation - good dynamics
+                            variation_score = 0.3 + 0.2 * ((cv - 0.05) / 0.15)  # 0.3-0.5 range
+                            stability_score += variation_score
                             score_details['reasons'].append(
                                 f"Moderate structural variation (CV={cv:.3f})"
                             )
-                        else:  # Too stable (might be stuck, less interesting)
-                            stability_score += 0.1
+                        else:
+                            # Too stable - less interesting
+                            variation_score = 0.1 + 0.2 * (cv / 0.05)  # 0.1-0.3 range
+                            stability_score += variation_score
                             score_details['warnings'].append(
                                 f"Very stable structure (CV={cv:.3f}, might be stuck or lack dynamics)"
                             )
@@ -485,23 +527,37 @@ class FrameSelection:
                 valid_edges = edges[~np.isnan(edges)]
                 if len(valid_edges) > 1:
                     edge_cv = np.nanstd(valid_edges) / np.nanmean(valid_edges)
-                    # Higher CV (more variation) = higher score
+                    # Continuous scoring: higher CV = higher score, but with smooth transitions
                     if edge_cv >= 0.2:
-                        stability_score = 0.8
+                        stability_score = 0.7 + 0.2 * min(1.0, (edge_cv - 0.2) / 0.3)  # 0.7-0.9 range
                         score_details['reasons'].append(
                             f"High structural variation from edge metrics (CV={edge_cv:.3f}) - abnormal events"
                         )
                     elif edge_cv >= 0.05:
-                        stability_score = 0.6
+                        stability_score = 0.5 + 0.2 * ((edge_cv - 0.05) / 0.15)  # 0.5-0.7 range
                         score_details['reasons'].append("Moderate structural variation from edge metrics")
                     else:
-                        stability_score = 0.4
+                        stability_score = 0.3 + 0.2 * (edge_cv / 0.05)  # 0.3-0.5 range
                         score_details['warnings'].append("Low structural variation from edge metrics")
         else:
             score_details['warnings'].append("Structural stability metrics not available")
         
         score_details['structural_stability_score'] = min(1.0, stability_score)
         total_score += weights['structural_stability'] * score_details['structural_stability_score']
+        
+        # Apply non-linear transformation to make scores more discriminative
+        # Use power function to spread out scores: higher scores get more separation
+        # This makes differences between trajectories more significant
+        if total_score > 0:
+            # Apply power transformation: score^1.2 spreads out high scores more
+            # This means a score of 0.9 becomes ~0.88, 0.8 becomes ~0.77, etc.
+            # But we need to preserve the 0-1 range, so we normalize
+            # Actually, let's use a different approach: scale to emphasize differences
+            # Use a sigmoid-like transformation that increases separation in the middle-high range
+            # For scores > 0.5, apply slight expansion: score -> score + 0.1*(score-0.5)^2
+            if total_score > 0.5:
+                expansion = 0.08 * ((total_score - 0.5) ** 1.5)
+                total_score = min(1.0, total_score + expansion)
         
         # Store results
         self.simulation_score = total_score
@@ -711,7 +767,7 @@ def load_and_compare_simulation_scores(
     
     # Sort by specified column
     if sort_by in combined_df.columns:
-        combined_df = combined_df.sort_values(by=sort_by, ascending=ascending, na_last=True)
+        combined_df = combined_df.sort_values(by=sort_by, ascending=ascending, na_position='last')
     else:
         warnings.warn(f"Column '{sort_by}' not found. Available columns: {list(combined_df.columns)}")
         warnings.warn("Sorting by 'overall_score' instead")
