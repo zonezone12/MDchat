@@ -567,3 +567,17 @@ if __name__ == '__main__':
     import sys
     sys.exit(main())
 
+## Rescore all simulations in a directory
+#python rescore_simulations.py --input_dir output/
+#
+## Save to specific output file
+#python rescore_simulations.py --input_dir output/ --output output/rescored_scores.csv
+#
+## Rescore specific files
+#python rescore_simulations.py --csv_files output/traj1_simulation_score.csv output/traj2_simulation_score.csv
+#
+## Overwrite original files with new scores
+#python rescore_simulations.py --input_dir output/ --overwrite
+#
+## Custom scoring parameters
+#python rescore_simulations.py --input_dir output/ --min_volume_change_pct 15.0 --min_correlation 0.6

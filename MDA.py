@@ -78,7 +78,7 @@ fig.show()
 
 VA.make_mark_occupancy_gif(frame_index=0,gif_path="occupancy_build_frame0.gif",atom_stride=5,voxel_stride=2,)
 
-VA.make_volume_pipeline_gif(frame_index=0,gif_path="nanocube_mesh_t.gif",atom_stride=10,voxel_stride=10,fps=5)
+VA.make_volume_pipeline_gif(frame_index=0,gif_path="BMMpM_volume.gif",atom_stride=10,voxel_stride=10,fps=5)
 
 target_vol, cavity_vol, inside, cavities=VA.compute_frame(0,return_masks=True)
 cmv=AllChem.ComputeMolVolume(first_sel.convert_to('RDKIT'))

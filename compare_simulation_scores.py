@@ -23,7 +23,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from src.FrameSelection import load_and_compare_simulation_scores
+from src.FrameSelection.FrameSelection import load_and_compare_simulation_scores
 
 
 def find_simulation_score_files(
