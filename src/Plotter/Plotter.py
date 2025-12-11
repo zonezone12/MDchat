@@ -663,6 +663,7 @@ class Plotter:
             
             # Label each endpoint with its universe index
             # highlight_atoms and mda_endpoint_indices are now aligned
+            index=0
             for rdkit_idx, universe_idx in zip(highlight_atoms, mda_endpoint_indices):
                 if rdkit_idx < len(xy):
                     x, y = xy[rdkit_idx]
@@ -673,7 +674,7 @@ class Plotter:
                     
                     # Add label with universe index
                     ax.annotate(
-                        f"{universe_idx}",
+                        f"{str(index)+':'+str(universe_idx)}",
                         xy=(x_pixel, y_pixel),
                         xytext=(8, -8),
                         textcoords='offset points',
@@ -683,7 +684,7 @@ class Plotter:
                         bbox=dict(boxstyle='round,pad=0.4', facecolor='yellow', alpha=0.8, edgecolor='blue', linewidth=2),
                         arrowprops=dict(arrowstyle='->', color='blue', lw=2, connectionstyle='arc3,rad=0.1')
                     )
-            
+                    index+=1
             # Set title
             title = f"Endpoints: {sel_str}"
             if n_residues > 1:
@@ -870,7 +871,7 @@ class Plotter:
         self,
         guest_residence_stats: dict,
         out_prefix: str,
-        show_connections: bool = True,
+        show_connections: bool = False,
         max_frames: Optional[int] = None,
     ) -> None:
         """

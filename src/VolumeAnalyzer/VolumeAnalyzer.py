@@ -108,7 +108,7 @@ class VolumeAnalyzer:
         self,
         universe: mda.Universe,
         selection: str | None = None,
-        spacing: float = 0.3,
+        spacing: float = 0.5,
         probe_radius: float = 1.4,
         margin: float | None = None,
         radii_scale: float = 1.0,
@@ -1020,6 +1020,350 @@ class VolumeAnalyzer:
             layout=layout,
         )
         return fig
+
+    def visualize_gaussian_stacking(
+        self,
+        frame_index: int = 0,
+        output_path: str = "gaussian_stacking.gif",
+        atom_stride: int = 1,
+        slice_axis: str = "z",
+        slice_index: int | None = None,
+        max_atoms: int | None = None,
+        fps: float = 5.0,
+        show_individual_blob: bool = True,
+        show_accumulated: bool = True,
+    ):
+        """
+        Visualize the process of stacking Gaussian blobs from _mark_occupancy_gaussian_step.
+        
+        This creates a GIF showing how each atom's Gaussian blob accumulates into the density grid.
+        For each atom (or every N atoms if atom_stride > 1), it shows:
+        - The density grid before adding the atom
+        - The individual Gaussian blob being added (optional)
+        - The density grid after adding the atom (accumulated)
+        
+        Parameters
+        ----------
+        frame_index : int
+            Frame index in universe.trajectory.
+        output_path : str
+            Output path for the GIF file.
+        atom_stride : int
+            Visualize every N-th atom. Must be >= 1.
+        slice_axis : {'x', 'y', 'z'}
+            Axis normal to the 2D slice for visualization.
+        slice_index : int or None
+            Index of slice along chosen axis. If None, uses middle slice.
+        max_atoms : int or None
+            Maximum number of atoms to visualize. If None, visualizes all atoms.
+        fps : float
+            Frames per second for GIF. Must be > 0.
+        show_individual_blob : bool
+            If True, show the individual Gaussian blob being added in a separate subplot.
+        show_accumulated : bool
+            If True, show the accumulated density grid after each step.
+        """
+        if imageio is None:
+            raise RuntimeError("imageio is required for GIF generation.")
+        if plt is None:
+            raise RuntimeError("matplotlib is required for GIF generation.")
+        
+        if atom_stride < 1:
+            raise ValueError("atom_stride must be >= 1")
+        if fps <= 0:
+            raise ValueError(f"fps must be > 0, got {fps}")
+        if slice_axis.lower() not in ['x', 'y', 'z']:
+            raise ValueError("slice_axis must be 'x', 'y', or 'z'")
+        
+        # Get universe for this frame
+        u = self._get_universe(frame_index)
+        
+        if frame_index < 0 or frame_index >= len(u.trajectory):
+            raise ValueError(
+                f"frame_index {frame_index} out of range "
+                f"(trajectory has {len(u.trajectory)} frames)"
+            )
+        
+        # Get atom group and coordinates
+        ag = u.select_atoms(self.selection)
+        if ag.n_atoms == 0:
+            raise ValueError(f"Selection '{self.selection}' returned no atoms.")
+        coords = ag.positions.copy()
+        
+        # Get VDW radii
+        if self.vdw_radii is None or len(self.vdw_radii) != ag.n_atoms:
+            vdw_radii = self._get_vdw_radii(ag)
+        else:
+            vdw_radii = self.vdw_radii
+        
+        # Effective radii: VDW + probe
+        radii_eff = vdw_radii * self.radii_scale + self.radii_offset + self.probe_radius
+        
+        # Build grid (same as compute_frame)
+        if self.margin is not None:
+            margin = self.margin
+        else:
+            margin = np.max(radii_eff) + self.spacing
+        
+        x_axis, y_axis, z_axis, shape, origin = self._build_grid(
+            coords, self.spacing, margin
+        )
+        
+        # Determine slice index
+        nx, ny, nz = shape
+        axis = slice_axis.lower()
+        if axis == "z":
+            if slice_index is None or slice_index < 0 or slice_index >= nz:
+                slice_index = nz // 2
+        elif axis == "y":
+            if slice_index is None or slice_index < 0 or slice_index >= ny:
+                slice_index = ny // 2
+        else:  # axis == "x"
+            if slice_index is None or slice_index < 0 or slice_index >= nx:
+                slice_index = nx // 2
+        
+        # Initialize density grid
+        density_grid = np.zeros(shape, dtype=float)
+        
+        # Determine which atoms to visualize
+        n_atoms = coords.shape[0]
+        if max_atoms is not None:
+            n_atoms = min(n_atoms, max_atoms)
+        
+        atoms_to_visualize = list(range(0, n_atoms, atom_stride))
+        if atoms_to_visualize[-1] != n_atoms - 1:
+            atoms_to_visualize.append(n_atoms - 1)  # Always include last atom
+        
+        images = []
+        
+        # Helper function to extract 2D slice from 3D grid
+        def get_slice_2d(grid_3d):
+            """Extract 2D slice based on axis and index."""
+            if axis == "z":
+                return grid_3d[:, :, slice_index]
+            elif axis == "y":
+                return grid_3d[:, slice_index, :]
+            else:  # axis == "x"
+                return grid_3d[slice_index, :, :]
+        
+        # Helper function to create a 2D Gaussian blob visualization
+        def create_blob_slice(coord, radius_eff, sigma_factor=None):
+            """Create a 2D slice through the Gaussian blob at the atom position."""
+            if sigma_factor is None:
+                sigma_factor = self.sigma_factor
+            
+            spacing = self.spacing
+            ox, oy, oz = x_axis[0], y_axis[0], z_axis[0]
+            
+            cx, cy, cz = coord
+            r_grid = radius_eff / spacing
+            sigma = r_grid * sigma_factor
+            
+            if sigma <= 0:
+                # Return appropriate shape based on axis
+                if axis == "z":
+                    return np.zeros((nx, ny), dtype=float)
+                elif axis == "y":
+                    return np.zeros((nx, nz), dtype=float)
+                else:  # axis == "x"
+                    return np.zeros((ny, nz), dtype=float)
+            
+            # Create a temporary 3D blob
+            size = int(self.GAUSSIAN_SIZE_MULTIPLIER * sigma) + 1
+            if size <= 0:
+                # Return appropriate shape based on axis
+                if axis == "z":
+                    return np.zeros((nx, ny), dtype=float)
+                elif axis == "y":
+                    return np.zeros((nx, nz), dtype=float)
+                else:  # axis == "x"
+                    return np.zeros((ny, nz), dtype=float)
+            
+            # Local coordinates for 3D blob
+            xx, yy, zz = np.meshgrid(
+                np.arange(-size, size + 1),
+                np.arange(-size, size + 1),
+                np.arange(-size, size + 1),
+                indexing='ij'
+            )
+            gauss_3d = np.exp(-(xx**2 + yy**2 + zz**2) / (2 * sigma**2))
+            
+            # Convert atom center to grid indices
+            ix_c = (cx - ox) / spacing
+            iy_c = (cy - oy) / spacing
+            iz_c = (cz - oz) / spacing
+            
+            # Create a temporary 3D grid for this blob
+            blob_3d = np.zeros(shape, dtype=float)
+            i0 = int(ix_c - size)
+            i1 = int(ix_c + size + 1)
+            j0 = int(iy_c - size)
+            j1 = int(iy_c + size + 1)
+            k0 = int(iz_c - size)
+            k1 = int(iz_c + size + 1)
+            
+            gi0, gi1 = max(i0, 0), min(i1, nx)
+            gj0, gj1 = max(j0, 0), min(j1, ny)
+            gk0, gk1 = max(k0, 0), min(k1, nz)
+            
+            if gi0 < gi1 and gj0 < gj1 and gk0 < gk1:
+                li0, li1 = gi0 - i0, gi1 - i0
+                lj0, lj1 = gj0 - j0, gj1 - j0
+                lk0, lk1 = gk0 - k0, gk1 - k0
+                blob_3d[gi0:gi1, gj0:gj1, gk0:gk1] = gauss_3d[li0:li1, lj0:lj1, lk0:lk1]
+            
+            return get_slice_2d(blob_3d)
+        
+        # Initial state: empty grid
+        if show_accumulated:
+            fig, axes = plt.subplots(1, 2 if show_individual_blob else 1, figsize=(12, 5) if show_individual_blob else (6, 5))
+            if not show_individual_blob:
+                axes = [axes]
+            
+            slice_accumulated = get_slice_2d(density_grid)
+            im1 = axes[0].imshow(slice_accumulated, origin='lower', cmap='viridis', 
+                                vmin=0, vmax=1, interpolation='bilinear')
+            axes[0].set_title(f'Accumulated Density (atom 0/{n_atoms})')
+            if axis == "z":
+                axes[0].set_xlabel('X grid index')
+                axes[0].set_ylabel('Y grid index')
+            elif axis == "y":
+                axes[0].set_xlabel('X grid index')
+                axes[0].set_ylabel('Z grid index')
+            else:  # axis == "x"
+                axes[0].set_xlabel('Y grid index')
+                axes[0].set_ylabel('Z grid index')
+            plt.colorbar(im1, ax=axes[0], label='Density')
+            
+            if show_individual_blob:
+                axes[1].text(0.5, 0.5, 'No atom added yet', 
+                           ha='center', va='center', transform=axes[1].transAxes)
+                axes[1].set_title('Individual Gaussian Blob')
+                if axis == "z":
+                    axes[1].set_xlabel('X grid index')
+                    axes[1].set_ylabel('Y grid index')
+                elif axis == "y":
+                    axes[1].set_xlabel('X grid index')
+                    axes[1].set_ylabel('Z grid index')
+                else:  # axis == "x"
+                    axes[1].set_xlabel('Y grid index')
+                    axes[1].set_ylabel('Z grid index')
+            
+            plt.suptitle(f'Gaussian Stacking Process - Frame {frame_index}\n'
+                        f'Slice along {slice_axis}-axis at index {slice_index}', fontsize=10)
+            plt.tight_layout()
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=150)
+            plt.close(fig)
+            buf.seek(0)
+            img = imageio.imread(buf)
+            images.append(img)
+        
+        # Process each atom
+        for atom_idx in atoms_to_visualize:
+            # Get density before adding this atom
+            density_before = density_grid.copy()
+            
+            # Add this atom's Gaussian blob
+            self._mark_occupancy_gaussian_step(
+                density_grid, x_axis, y_axis, z_axis,
+                coords[atom_idx], radii_eff[atom_idx]
+            )
+            
+            # Get density after adding this atom
+            density_after = density_grid.copy()
+            
+            # Create visualization
+            if show_individual_blob and show_accumulated:
+                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            elif show_individual_blob or show_accumulated:
+                fig, axes = plt.subplots(1, 1, figsize=(6, 5))
+                axes = [axes]
+            else:
+                continue  # Skip if both are False
+            
+            plot_idx = 0
+            
+            # Plot accumulated density
+            if show_accumulated:
+                slice_after = get_slice_2d(density_after)
+                vmax = max(1.0, density_after.max())  # Dynamic scaling
+                im1 = axes[plot_idx].imshow(slice_after, origin='lower', cmap='viridis',
+                                           vmin=0, vmax=vmax, interpolation='bilinear')
+                axes[plot_idx].set_title(f'Accumulated Density (atom {atom_idx+1}/{n_atoms})')
+                if axis == "z":
+                    axes[plot_idx].set_xlabel('X grid index')
+                    axes[plot_idx].set_ylabel('Y grid index')
+                elif axis == "y":
+                    axes[plot_idx].set_xlabel('X grid index')
+                    axes[plot_idx].set_ylabel('Z grid index')
+                else:  # axis == "x"
+                    axes[plot_idx].set_xlabel('Y grid index')
+                    axes[plot_idx].set_ylabel('Z grid index')
+                plt.colorbar(im1, ax=axes[plot_idx], label='Density')
+                plot_idx += 1
+            
+            # Plot individual blob
+            if show_individual_blob:
+                blob_slice = create_blob_slice(coords[atom_idx], radii_eff[atom_idx])
+                vmax_blob = max(0.1, blob_slice.max()) if blob_slice.max() > 0 else 1.0
+                im2 = axes[plot_idx].imshow(blob_slice, origin='lower', cmap='hot',
+                                           vmin=0, vmax=vmax_blob, interpolation='bilinear')
+                axes[plot_idx].set_title(f'Individual Blob (atom {atom_idx+1})')
+                plt.colorbar(im2, ax=axes[plot_idx], label='Gaussian Value')
+                
+                # Mark atom position on the blob plot
+                cx, cy, cz = coords[atom_idx]
+                ox, oy, oz = x_axis[0], y_axis[0], z_axis[0]
+                if axis == "z":
+                    atom_x_idx = (cx - ox) / self.spacing
+                    atom_y_idx = (cy - oy) / self.spacing
+                    xlabel = 'X grid index'
+                    ylabel = 'Y grid index'
+                elif axis == "y":
+                    atom_x_idx = (cx - ox) / self.spacing
+                    atom_y_idx = (cz - oz) / self.spacing
+                    xlabel = 'X grid index'
+                    ylabel = 'Z grid index'
+                else:  # axis == "x"
+                    atom_x_idx = (cy - oy) / self.spacing
+                    atom_y_idx = (cz - oz) / self.spacing
+                    xlabel = 'Y grid index'
+                    ylabel = 'Z grid index'
+                
+                axes[plot_idx].plot(atom_x_idx, atom_y_idx, 'b*', markersize=10, 
+                                   label='Atom center')
+                axes[plot_idx].set_xlabel(xlabel)
+                axes[plot_idx].set_ylabel(ylabel)
+                axes[plot_idx].legend()
+            
+            # Calculate statistics
+            max_density = density_after.max()
+            mean_density = density_after[density_after > 0].mean() if (density_after > 0).any() else 0
+            threshold_mask = density_after > self.density_threshold
+            volume_estimate = threshold_mask.sum() * (self.spacing ** 3)
+            
+            plt.suptitle(
+                f'Gaussian Stacking - Frame {frame_index}, Atom {atom_idx+1}/{n_atoms}\n'
+                f'Slice {slice_axis}={slice_index} | '
+                f'Max density: {max_density:.2f} | '
+                f'Volume (threshold={self.density_threshold}): {volume_estimate:.0f} Å³',
+                fontsize=9
+            )
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=150)
+            plt.close(fig)
+            buf.seek(0)
+            img = imageio.imread(buf)
+            images.append(img)
+        
+        if not images:
+            raise RuntimeError("No frames collected for GIF.")
+        
+        imageio.mimsave(output_path, images, duration=1.0 / fps)
+        return output_path
 
     def make_volume_pipeline_gif(
         self,

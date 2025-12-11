@@ -239,6 +239,72 @@ class GSAnalyzer:
                 faces.append('resid ' + " ".join(group_resids))
         self.face_selections = faces
         return faces
+    
+    def get_longest_duration_guest_indices(self) -> Optional[Dict]:
+        """
+        Get the guest indices for the longest duration_inside stay.
+        
+        Returns:
+            Dictionary with:
+            - duration: The longest duration (ps)
+            - guest_indices: List of guest atom indices for this stay
+            - entry_frame: Frame when guest entered
+            - entry_time: Time (ps) when guest entered
+            - exit_frame: Frame when guest exited
+            - exit_time: Time (ps) when guest exited
+            - duration_index: Index in durations_inside list
+            None if no guest residence stats available or no entries
+        """
+        if self.guest_residence_stats is None:
+            return None
+        
+        durations_inside = self.guest_residence_stats.get('durations_inside', [])
+        if not durations_inside:
+            return None
+        
+        # Find index of longest duration
+        max_duration_idx = np.argmax(durations_inside)
+        max_duration = durations_inside[max_duration_idx]
+        
+        # Get corresponding guest indices and entry/exit info
+        entry_guest_indices = self.guest_residence_stats.get('entry_guest_indices', [])
+        entry_frames = self.guest_residence_stats.get('entry_frames', [])
+        entry_times = self.guest_residence_stats.get('entry_times', [])
+        exit_frames = self.guest_residence_stats.get('exit_frames', [])
+        exit_times = self.guest_residence_stats.get('exit_times', [])
+        
+        return {
+            'duration': max_duration,
+            'guest_indices': entry_guest_indices[max_duration_idx] if max_duration_idx < len(entry_guest_indices) else [],
+            'entry_frame': entry_frames[max_duration_idx] if max_duration_idx < len(entry_frames) else None,
+            'entry_time': entry_times[max_duration_idx] if max_duration_idx < len(entry_times) else None,
+            'exit_frame': exit_frames[max_duration_idx] if max_duration_idx < len(exit_frames) else None,
+            'exit_time': exit_times[max_duration_idx] if max_duration_idx < len(exit_times) else None,
+            'duration_index': max_duration_idx,
+        }
+    
+    def print_longest_duration_guest_indices(self) -> None:
+        """
+        Print information about the guest indices for the longest duration_inside stay.
+        """
+        result = self.get_longest_duration_guest_indices()
+        if result is None:
+            print("No guest residence statistics available or no entries found.")
+            return
+        
+        print(f"\n{'='*60}")
+        print("Longest Duration Inside - Guest Indices")
+        print(f"{'='*60}")
+        print(f"Duration: {result['duration']:.2f} ps")
+        print(f"Guest indices: {result['guest_indices']}")
+        print(f"Entry frame: {result['entry_frame']}")
+        if result['entry_time'] is not None:
+            print(f"Entry time: {result['entry_time']:.2f} ps")
+        print(f"Exit frame: {result['exit_frame']}")
+        if result['exit_time'] is not None:
+            print(f"Exit time: {result['exit_time']:.2f} ps")
+        print(f"Duration index: {result['duration_index']}")
+        print(f"{'='*60}\n")
 
 
 class GSAnalyzerObserver(FrameObserver):
@@ -722,6 +788,34 @@ class GSAnalyzerObserver(FrameObserver):
             'first_entry_frame': first_entry_frame,
             'first_entry_time': self.entry_events[0]['time'] if self.entry_events else None,
         }
+    
+    def get_longest_duration_guest_indices(self) -> Optional[Dict]:
+        """
+        Get the guest indices for the longest duration_inside stay.
+        
+        Returns:
+            Dictionary with:
+            - duration: The longest duration (ps)
+            - guest_indices: List of guest atom indices for this stay
+            - entry_frame: Frame when guest entered
+            - entry_time: Time (ps) when guest entered
+            - exit_frame: Frame when guest exited
+            - exit_time: Time (ps) when guest exited
+            - duration_index: Index in durations_inside list
+            None if no guest residence stats available or no entries
+        """
+        if self._analyzer.guest_residence_stats is None:
+            return None
+        return self._analyzer.get_longest_duration_guest_indices()
+    
+    def print_longest_duration_guest_indices(self) -> None:
+        """
+        Print information about the guest indices for the longest duration_inside stay.
+        """
+        if self._analyzer.guest_residence_stats is None:
+            print("No guest residence statistics available or no entries found.")
+            return
+        self._analyzer.print_longest_duration_guest_indices()
     
     def merge_results(self, other: 'GSAnalyzerObserver') -> None:
         """

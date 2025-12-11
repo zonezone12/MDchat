@@ -218,15 +218,41 @@ def load_data_for_rescoring(score_csv_path: str, score_row: pd.Series) -> Dict[s
     if related_files['guest_stats'] and os.path.exists(related_files['guest_stats']):
         try:
             guest_df = pd.read_csv(related_files['guest_stats'])
-            # Convert DataFrame to dict (assuming single row or aggregate stats)
+            # Handle metric-value format (columns: metric, value)
             if len(guest_df) > 0:
-                data['guest_stats'] = guest_df.iloc[0].to_dict()
+                if 'metric' in guest_df.columns and 'value' in guest_df.columns:
+                    # Convert metric-value format to dictionary
+                    data['guest_stats'] = {}
+                    for _, row in guest_df.iterrows():
+                        metric = row['metric']
+                        value = row['value']
+                        # Convert to appropriate type
+                        if pd.isna(value):
+                            data['guest_stats'][metric] = None
+                        elif metric in ['first_entry_frame']:
+                            data['guest_stats'][metric] = int(value) if not pd.isna(value) else None
+                        elif metric in ['first_entry_time', 'total_time_inside', 'total_time_outside',
+                                       'avg_stay_duration', 'max_stay_duration', 'min_stay_duration']:
+                            data['guest_stats'][metric] = float(value) if not pd.isna(value) else None
+                        elif metric in ['n_entries', 'n_exits']:
+                            data['guest_stats'][metric] = int(value) if not pd.isna(value) else 0
+                        else:
+                            data['guest_stats'][metric] = value
+                else:
+                    # Assume direct dictionary format (single row with keys as columns)
+                    data['guest_stats'] = guest_df.iloc[0].to_dict()
         except Exception as e:
             warnings.warn(f"Failed to load guest stats from {related_files['guest_stats']}: {e}")
     
     # If guest stats file not found, reconstruct from CSV row
     if data['guest_stats'] is None:
         data['guest_stats'] = reconstruct_guest_stats(score_row)
+    
+    # Debug: Print guest_stats if available (for troubleshooting)
+    if data['guest_stats'] is not None:
+        n_entries = data['guest_stats'].get('n_entries', 'missing')
+        if isinstance(n_entries, (int, float)) and n_entries == 0:
+            warnings.warn(f"Warning: n_entries is 0 for {score_row.get('trajectory_id', 'unknown')} - guest_entry_score will be 0")
     
     # Load correlation dataframe
     if related_files['correlation'] and os.path.exists(related_files['correlation']):

@@ -360,6 +360,9 @@ def main():
                     print(f"Average stay duration: {np.mean(guest_stats['durations_inside']):.2f} ps")
                     print(f"Longest stay duration: {np.max(guest_stats['durations_inside']):.2f} ps")
                     print(f"Shortest stay duration: {np.min(guest_stats['durations_inside']):.2f} ps")
+                
+                # Show longest duration guest indices
+                volume_observer.print_longest_duration_guest_indices()
             else:
                 print("Guest never entered the host.")
             
@@ -583,4 +586,4 @@ if __name__ == '__main__':
     main()
 
 # Example usage:
-# python run_volume_endpoint_guest_analysis.py --top topology.prmtop --traj trajectory.mdcrd --out_prefix output/test --align_sel "resid 1-6" --endpoint_residues "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6" --cube_faces "resid 1" "resid 2" "resid 3" "resid 4" "resid 5" "resid 6"   --guest_sel "resname IOD" --guest_tracking_method distance --plot_top_correlations 10
+# python run_volume_endpoint_guest_analysis.py --top C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop --traj C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_test.pdb --out_prefix output/test --align_sel "resid 1-6" --guest_sel "name I" --guest_tracking_method distance --plot_top_correlations 2

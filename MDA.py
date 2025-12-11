@@ -15,6 +15,9 @@ prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
 crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
 first_u= mda.Universe(prmtop, crd,format="TRJ")
 
+from src.Plotter import Plotter
+Plotter().plot_residue_endpoints(first_u, 'resid 1', 'BMMpM_endpoints.png')
+
 from src.utils.guest_in import guest_entering
 # For lightweight distance calculations, sequential processing is typically fastest
 # Dask overhead (Universe recreation, pickling, task submission) outweighs benefits

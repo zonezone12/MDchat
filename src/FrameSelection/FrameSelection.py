@@ -305,7 +305,7 @@ class FrameSelection:
                     score_details['reasons'].append(f"Multiple entry events indicate dynamic behavior")
                 
                 # Entry/exit balance scoring (continuous function)
-                if n_entries > 0:
+                if n_exits > 0:
                     entry_exit_ratio = n_entries / (n_entries + n_exits) if (n_entries + n_exits) > 0 else 0.5
                     # Prefer more entries than exits, but reward balance too
                     if n_entries > n_exits:
