@@ -9,10 +9,12 @@ the need to store coordinates in memory since MDAnalysis already provides them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Tuple
 import warnings
 import pickle
 import os
+import threading
+import hashlib
 
 try:
     import MDAnalysis as mda
@@ -38,6 +40,76 @@ try:
 except ImportError:
     MULTIPROCESSING_AVAILABLE = False
     mp = None
+
+# Worker-local storage for Universe instances (to avoid recreation overhead)
+# This is a module-level dictionary that will be keyed by (worker_id, file_hash)
+# For multiprocessing: use process name
+# For Dask: use worker address
+_universe_cache: Dict[Tuple[str, str], Any] = {}
+_cache_lock = threading.Lock()
+
+
+def _get_worker_id() -> str:
+    """Get unique identifier for current worker process."""
+    try:
+        # Try Dask worker first
+        if DASK_AVAILABLE:
+            try:
+                from dask.distributed import get_worker
+                worker = get_worker()
+                if worker is not None:
+                    return f"dask_{worker.address}"
+            except (ImportError, ValueError, RuntimeError):
+                pass
+    except:
+        pass
+    
+    # Fallback to multiprocessing process name
+    if MULTIPROCESSING_AVAILABLE:
+        try:
+            return f"mp_{mp.current_process().name}_{os.getpid()}"
+        except:
+            pass
+    
+    # Last resort: use thread ID
+    return f"thread_{threading.current_thread().ident}"
+
+
+def _get_file_hash(top_file: str, traj_file: str) -> str:
+    """Generate hash for file paths to use as cache key."""
+    combined = f"{top_file}|{traj_file}"
+    return hashlib.md5(combined.encode()).hexdigest()[:16]
+
+
+def _get_cached_universe(top_file: str, traj_file: str, traj_format: Optional[str]) -> Optional[Any]:
+    """Get cached Universe instance for current worker, or None if not cached."""
+    worker_id = _get_worker_id()
+    file_hash = _get_file_hash(top_file, traj_file)
+    cache_key = (worker_id, file_hash)
+    
+    with _cache_lock:
+        return _universe_cache.get(cache_key)
+
+
+def _cache_universe(universe: Any, top_file: str, traj_file: str) -> None:
+    """Cache Universe instance for current worker."""
+    worker_id = _get_worker_id()
+    file_hash = _get_file_hash(top_file, traj_file)
+    cache_key = (worker_id, file_hash)
+    
+    with _cache_lock:
+        _universe_cache[cache_key] = universe
+
+
+def _clear_worker_cache(worker_id: Optional[str] = None) -> None:
+    """Clear Universe cache for a specific worker or all workers."""
+    with _cache_lock:
+        if worker_id is None:
+            _universe_cache.clear()
+        else:
+            keys_to_remove = [k for k in _universe_cache.keys() if k[0] == worker_id]
+            for key in keys_to_remove:
+                del _universe_cache[key]
 
 
 class FrameObserver(ABC):
@@ -159,7 +231,9 @@ class TrajectoryIterator:
     
     def iterate(self, start: Optional[int] = None, stop: Optional[int] = None, 
                 step: Optional[int] = None, n_jobs: Optional[int] = None,
-                dask_client: Optional[Client] = None) -> None:
+                dask_client: Optional[Client] = None,
+                preload_coordinates: bool = False,
+                max_workers_for_io: Optional[int] = None) -> None:
         """
         Iterate through trajectory once and notify all observers.
         
@@ -175,6 +249,11 @@ class TrajectoryIterator:
                         If provided, uses this client instead of creating a local one.
                         If None and use_dask=True, creates a local Dask cluster.
                         Example: Client("tcp://scheduler:8786") for HPC cluster.
+            preload_coordinates: If True, pre-load all coordinates into memory.
+                                Only use if you have sufficient RAM. Default: False.
+            max_workers_for_io: Maximum number of workers for I/O-bound operations.
+                               If None, automatically limits to 4 for I/O-bound tasks.
+                               Set to a higher value if using fast storage (e.g., SSD arrays).
         """
         if self._iterated:
             warnings.warn(
@@ -184,15 +263,31 @@ class TrajectoryIterator:
         
         # Determine number of jobs
         if n_jobs is None or n_jobs == 1:
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
         else:
+            # Limit workers for I/O-bound operations
+            if max_workers_for_io is None:
+                max_workers_for_io = 8  # Default limit for I/O-bound tasks
+            
+            if n_jobs == -1:
+                n_jobs = os.cpu_count() or 2
+            
+            # Apply I/O worker limit
+            if n_jobs > max_workers_for_io:
+                original_n_jobs = n_jobs
+                n_jobs = max_workers_for_io
+                warnings.warn(
+                    f"Limiting workers from {original_n_jobs} to {n_jobs} to avoid I/O contention. "
+                    f"Set max_workers_for_io to override this limit."
+                )
+            
             # Use provided client or determine parallel backend
             if dask_client is not None:
                 self._dask_client = dask_client
                 self._dask_client_managed = False
-                self._iterate_parallel_dask(start, stop, step, n_jobs, dask_client)
+                self._iterate_parallel_dask(start, stop, step, n_jobs, dask_client, preload_coordinates)
             elif self.use_dask:
-                self._iterate_parallel_dask(start, stop, step, n_jobs, None)
+                self._iterate_parallel_dask(start, stop, step, n_jobs, None, preload_coordinates)
             else:
                 # Fallback to multiprocessing
                 if not MULTIPROCESSING_AVAILABLE:
@@ -200,11 +295,9 @@ class TrajectoryIterator:
                         "Neither Dask nor multiprocessing available. "
                         "Falling back to sequential processing."
                     )
-                    self._iterate_sequential(start, stop, step)
+                    self._iterate_sequential(start, stop, step, preload_coordinates)
                 else:
-                    if n_jobs == -1:
-                        n_jobs = mp.cpu_count()
-                    self._iterate_parallel_multiprocessing(start, stop, step, n_jobs)
+                    self._iterate_parallel_multiprocessing(start, stop, step, n_jobs, preload_coordinates)
         
         # Clean up managed Dask client if we created it
         if self._dask_client_managed and self._dask_client is not None:
@@ -219,7 +312,8 @@ class TrajectoryIterator:
     
     def _iterate_sequential(self, start: Optional[int] = None, 
                            stop: Optional[int] = None, 
-                           step: Optional[int] = None) -> None:
+                           step: Optional[int] = None,
+                           preload_coordinates: bool = False) -> None:
         """Sequential iteration (original implementation)."""
         # Notify observers that iteration is starting
         for observer in self.observers:
@@ -255,14 +349,32 @@ class TrajectoryIterator:
                                stop: Optional[int] = None,
                                step: Optional[int] = None,
                                n_jobs: Optional[int] = None,
-                               client: Optional[Client] = None) -> None:
+                               client: Optional[Client] = None,
+                               preload_coordinates: bool = False) -> None:
         """Parallel iteration using Dask Distributed."""
         if not DASK_AVAILABLE:
             warnings.warn(
                 "Dask not available. Falling back to sequential processing."
             )
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
+        
+        # Pre-load coordinates if requested (only for sequential-like processing)
+        preloaded_coords = None
+        if preload_coordinates:
+            try:
+                print("Pre-loading coordinates into memory...")
+                traj = self.universe.trajectory
+                s = slice(start, stop, step)
+                indices = list(range(len(traj)))[s]
+                preloaded_coords = {}
+                for idx in indices:
+                    traj[idx]
+                    preloaded_coords[idx] = traj.ts.copy()
+                print(f"Pre-loaded {len(preloaded_coords)} frames into memory")
+            except Exception as e:
+                warnings.warn(f"Failed to pre-load coordinates: {e}. Continuing without pre-loading.")
+                preloaded_coords = None
         
         # Get trajectory file paths and format for creating new Universe instances
         try:
@@ -294,7 +406,21 @@ class TrajectoryIterator:
         s = slice(start, stop, step)
         indices = list(range(n_frames))[s]
         frame_indices_to_process = indices
-        times_to_process = [traj[i].time for i in indices]
+
+        # Derive times without reading every frame (assumes evenly spaced frames)
+        times_to_process: List[float] = []
+        if frame_indices_to_process:
+            dt = getattr(traj, "dt", None)
+            first_idx = frame_indices_to_process[0]
+            try:
+                traj[first_idx]  # single seek to get starting time
+                t0 = traj.ts.time
+            except Exception:
+                dt = None
+                t0 = None
+
+            if dt is not None and t0 is not None:
+                times_to_process = [t0 + (idx - first_idx) * dt for idx in frame_indices_to_process]
 
         if len(frame_indices_to_process) == 0:
             return
@@ -325,15 +451,28 @@ class TrajectoryIterator:
             if hasattr(client, 'dashboard_link'):
                 print(f"Dask dashboard: {client.dashboard_link}")
         
-        # Calculate batch size based on number of workers
-        # Use much larger batches to minimize overhead (especially for lightweight computations)
-        # For lightweight work, fewer larger batches are better than many small batches
+        # Calculate batch size based on number of workers and overhead estimation
+        # Account for Universe creation overhead: ~0.1-1 second per Universe creation
+        # Use larger batches to amortize this overhead
         n_workers = len(client.scheduler_info()['workers'])
-        # Use only 1-2 batches per worker to minimize overhead
-        target_batches_per_worker = 1.5  # Very few batches to reduce overhead
+        
+        # Estimate Universe creation overhead (conservative: 0.5 seconds)
+        # This means we want batches large enough that Universe creation is < 5% of total time
+        universe_overhead_seconds = 0.5
+        min_frames_per_universe = 100  # Minimum frames to process per Universe creation
+        
+        # Calculate optimal batch size accounting for overhead
+        # Target: 1-2 batches per worker to minimize scheduling overhead
+        target_batches_per_worker = 1.2  # Slightly fewer batches per worker
         target_total_batches = max(1, int(n_workers * target_batches_per_worker))
-        # Much larger minimum batch size to reduce Universe recreation overhead
-        min_batch_size = 500  # Increased from 100 to significantly reduce overhead
+        
+        # Minimum batch size: ensure Universe creation overhead is minimal
+        # For small trajectories, use larger minimum to avoid overhead
+        if n_frames_to_process < 1000:
+            min_batch_size = max(100, n_frames_to_process // max(2, n_workers))
+        else:
+            min_batch_size = max(min_frames_per_universe, n_frames_to_process // (n_workers * 4))
+        
         batch_size = max(min_batch_size, n_frames_to_process // target_total_batches)
         
         # Warn if we still have too many batches (indicates lightweight computation)
@@ -365,7 +504,8 @@ class TrajectoryIterator:
                     traj_format,
                     batch_frames,
                     batch_start_idx,
-                    self.observers
+                    self.observers,
+                    preloaded_coords
                 )
                 futures.append(future)
             
@@ -395,7 +535,7 @@ class TrajectoryIterator:
                 f"Dask parallel processing failed: {e}. "
                 "Falling back to sequential processing."
             )
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
         # Merge results from all batches
@@ -423,14 +563,33 @@ class TrajectoryIterator:
     def _iterate_parallel_multiprocessing(self, start: Optional[int] = None,
                                          stop: Optional[int] = None,
                                          step: Optional[int] = None,
-                                         n_jobs: int = 2) -> None:
+                                         n_jobs: int = 2,
+                                         preload_coordinates: bool = False) -> None:
         """Parallel iteration using multiprocessing (fallback)."""
         if not MULTIPROCESSING_AVAILABLE:
             warnings.warn(
                 "Multiprocessing not available. Falling back to sequential processing."
             )
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
+        
+        # Pre-load coordinates if requested
+        preloaded_coords = None
+        if preload_coordinates:
+            try:
+                print("Pre-loading coordinates into memory...")
+                traj = self.universe.trajectory
+                s = slice(start, stop, step)
+                indices = list(range(len(traj)))[s]
+                preloaded_coords = {}
+                for idx in indices:
+                    traj[idx]
+                    preloaded_coords[idx] = traj.ts.copy()
+                print(f"Pre-loaded {len(preloaded_coords)} frames into memory")
+            except Exception as e:
+                warnings.warn(f"Failed to pre-load coordinates: {e}. Continuing without pre-loading.")
+                preloaded_coords = None
+        
         # Get trajectory file paths and format for creating new Universe instances
         try:
             top_file = self.universe.filename
@@ -454,7 +613,7 @@ class TrajectoryIterator:
                 f"Cannot get file paths from Universe for parallel processing: {e}. "
                 "Falling back to sequential processing."
             )
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
         # Collect all frame indices to process efficiently
@@ -464,7 +623,21 @@ class TrajectoryIterator:
         s = slice(start, stop, step)
         indices = list(range(n_frames))[s]
         frame_indices_to_process = indices
-        times_to_process = [traj[i].time for i in indices]
+
+        # Derive times without reading every frame (assumes evenly spaced frames)
+        times_to_process: List[float] = []
+        if frame_indices_to_process:
+            dt = getattr(traj, "dt", None)
+            first_idx = frame_indices_to_process[0]
+            try:
+                traj[first_idx]  # single seek to get starting time
+                t0 = traj.ts.time
+            except Exception:
+                dt = None
+                t0 = None
+
+            if dt is not None and t0 is not None:
+                times_to_process = [t0 + (idx - first_idx) * dt for idx in frame_indices_to_process]
 
         if len(frame_indices_to_process) == 0:
             return
@@ -474,8 +647,22 @@ class TrajectoryIterator:
             observer.on_frame_start(self)
         
         # Split frames into batches for parallel processing
+        # Improved batch size calculation accounting for Universe creation overhead
         n_frames = len(frame_indices_to_process)
-        batch_size = max(1, n_frames // n_jobs)
+        
+        # Estimate Universe creation overhead and calculate optimal batch size
+        # Target: minimize Universe recreations while keeping batches balanced
+        # For small trajectories, use larger minimum batch size
+        if n_frames < 1000:
+            min_batch_size = max(100, n_frames // max(2, n_jobs))
+        else:
+            # For larger trajectories, ensure each worker gets substantial work
+            # to amortize Universe creation overhead
+            min_batch_size = max(200, n_frames // (n_jobs * 2))
+        
+        # Calculate batch size: ensure we don't create too many small batches
+        batch_size = max(min_batch_size, n_frames // n_jobs)
+        
         batches = []
         
         for i in range(0, n_frames, batch_size):
@@ -488,13 +675,13 @@ class TrajectoryIterator:
                 results = pool.starmap(
                     _process_frame_batch,
                     [(top_file, traj_file, traj_format, batch_frames, batch_start_idx, 
-                      self.observers) for batch_start_idx, batch_end_idx, batch_frames in batches]
+                      self.observers, preloaded_coords) for batch_start_idx, batch_end_idx, batch_frames in batches]
                 )
         except Exception as e:
             warnings.warn(
                 f"Parallel processing failed: {e}. Falling back to sequential processing."
             )
-            self._iterate_sequential(start, stop, step)
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
         # Merge results from all batches
@@ -587,7 +774,8 @@ class TrajectoryIterator:
 
 def _process_frame_batch(top_file: str, traj_file: str, traj_format: Optional[str],
                          frame_indices: List[int], batch_start_idx: int, 
-                         observers: List[FrameObserver]) -> List[Any]:
+                         observers: List[FrameObserver],
+                         preloaded_coords: Optional[Dict[int, Any]] = None) -> List[Any]:
     """
     Process a batch of frames in a worker process.
     
@@ -598,37 +786,45 @@ def _process_frame_batch(top_file: str, traj_file: str, traj_format: Optional[st
         frame_indices: List of frame indices to process
         batch_start_idx: Starting index for this batch (for frame_idx parameter)
         observers: List of observer instances (will be pickled and recreated)
+        preloaded_coords: Optional dictionary of pre-loaded coordinates (frame_idx -> Timestep)
     
     Returns:
         List of observer results (one per observer)
     """
     try:
-        # Create new Universe in worker process with explicit format
-        # If format is provided, use it; otherwise let MDAnalysis try to auto-detect
-        try:
-            if traj_format:
-                u = mda.Universe(top_file, traj_file, format=traj_format)
-            else:
-                u = mda.Universe(top_file, traj_file)
-        except (ValueError, OSError) as e:
-            # If format detection fails, try common formats for the file
-            # This is a fallback for cases where format wasn't properly detected
-            if 'format' in str(e).lower() or 'reader' in str(e).lower():
-                # Try to infer format from filename extension or common patterns
-                traj_lower = str(traj_file).lower()
-                if 'mdcrd' in traj_lower or traj_lower.endswith('.mdcrd'):
-                    u = mda.Universe(top_file, traj_file, format='MDCRD')
-                elif traj_lower.endswith('.xtc'):
-                    u = mda.Universe(top_file, traj_file, format='XTC')
-                elif traj_lower.endswith('.trr'):
-                    u = mda.Universe(top_file, traj_file, format='TRR')
-                elif traj_lower.endswith('.dcd'):
-                    u = mda.Universe(top_file, traj_file, format='DCD')
+        # Try to get cached Universe first (reuse across batches in same worker)
+        u = _get_cached_universe(top_file, traj_file, traj_format)
+        
+        if u is None:
+            # Create new Universe in worker process with explicit format
+            # If format is provided, use it; otherwise let MDAnalysis try to auto-detect
+            try:
+                if traj_format:
+                    u = mda.Universe(top_file, traj_file, format=traj_format)
                 else:
-                    # Re-raise the original error if we can't infer format
+                    u = mda.Universe(top_file, traj_file)
+            except (ValueError, OSError) as e:
+                # If format detection fails, try common formats for the file
+                # This is a fallback for cases where format wasn't properly detected
+                if 'format' in str(e).lower() or 'reader' in str(e).lower():
+                    # Try to infer format from filename extension or common patterns
+                    traj_lower = str(traj_file).lower()
+                    if 'mdcrd' in traj_lower or traj_lower.endswith('.mdcrd'):
+                        u = mda.Universe(top_file, traj_file, format='MDCRD')
+                    elif traj_lower.endswith('.xtc'):
+                        u = mda.Universe(top_file, traj_file, format='XTC')
+                    elif traj_lower.endswith('.trr'):
+                        u = mda.Universe(top_file, traj_file, format='TRR')
+                    elif traj_lower.endswith('.dcd'):
+                        u = mda.Universe(top_file, traj_file, format='DCD')
+                    else:
+                        # Re-raise the original error if we can't infer format
+                        raise
+                else:
                     raise
-            else:
-                raise
+            
+            # Cache the Universe for reuse in subsequent batches
+            _cache_universe(u, top_file, traj_file)
         
         # Recreate observers in worker process (they need to be pickle-able)
         worker_observers = []
@@ -651,8 +847,15 @@ def _process_frame_batch(top_file: str, traj_file: str, traj_format: Optional[st
         # Process each frame in the batch
         for local_idx, frame_num in enumerate(frame_indices):
             global_idx = batch_start_idx + local_idx
-            u.trajectory[frame_num]  # Seek to frame
-            ts = u.trajectory.ts
+            
+            # Use preloaded coordinates if available, otherwise seek to frame
+            if preloaded_coords is not None and frame_num in preloaded_coords:
+                ts = preloaded_coords[frame_num]
+                # Still need to position Universe for observers that use it
+                u.trajectory[frame_num]
+            else:
+                u.trajectory[frame_num]  # Seek to frame
+                ts = u.trajectory.ts
             
             # Notify all observers
             for worker_observer in worker_observers:

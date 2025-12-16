@@ -34,10 +34,14 @@ except ImportError:
     warnings.warn("matplotlib not available. Plotting will be disabled.")
 
 try:
+    from rdkit import Chem
     from rdkit.Chem import AllChem, Draw
+    from rdkit.Chem import rdDistGeom
 except ImportError:
+    Chem = None
     AllChem = None
     Draw = None
+    rdDistGeom = None
     warnings.warn("rdkit not available. Some features will be disabled.")
 
 try:
@@ -1024,6 +1028,7 @@ class VolumeAnalyzer:
     def visualize_gaussian_stacking(
         self,
         frame_index: int = 0,
+        smiles: str | None = None,
         output_path: str = "gaussian_stacking.gif",
         atom_stride: int = 1,
         slice_axis: str = "z",
@@ -1045,7 +1050,10 @@ class VolumeAnalyzer:
         Parameters
         ----------
         frame_index : int
-            Frame index in universe.trajectory.
+            Frame index in universe.trajectory. Ignored if smiles is provided.
+        smiles : str or None
+            SMILES string to visualize. If provided, uses RDKit to generate 3D structure
+            and ignores frame_index. If None, uses the trajectory frame.
         output_path : str
             Output path for the GIF file.
         atom_stride : int
@@ -1095,6 +1103,9 @@ class VolumeAnalyzer:
             vdw_radii = self._get_vdw_radii(ag)
         else:
             vdw_radii = self.vdw_radii
+        
+        # Update title to use frame_index
+        title_frame_info = f"Frame {frame_index}"
         
         # Effective radii: VDW + probe
         radii_eff = vdw_radii * self.radii_scale + self.radii_offset + self.probe_radius
@@ -1249,7 +1260,7 @@ class VolumeAnalyzer:
                     axes[1].set_xlabel('Y grid index')
                     axes[1].set_ylabel('Z grid index')
             
-            plt.suptitle(f'Gaussian Stacking Process - Frame {frame_index}\n'
+            plt.suptitle(f'Gaussian Stacking Process - {title_frame_info}\n'
                         f'Slice along {slice_axis}-axis at index {slice_index}', fontsize=10)
             plt.tight_layout()
             buf = io.BytesIO()
@@ -1344,7 +1355,7 @@ class VolumeAnalyzer:
             volume_estimate = threshold_mask.sum() * (self.spacing ** 3)
             
             plt.suptitle(
-                f'Gaussian Stacking - Frame {frame_index}, Atom {atom_idx+1}/{n_atoms}\n'
+                f'Gaussian Stacking - {title_frame_info}, Atom {atom_idx+1}/{n_atoms}\n'
                 f'Slice {slice_axis}={slice_index} | '
                 f'Max density: {max_density:.2f} | '
                 f'Volume (threshold={self.density_threshold}): {volume_estimate:.0f} Å³',

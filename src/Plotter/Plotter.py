@@ -33,11 +33,13 @@ except ImportError:
 try:
     import matplotlib.pyplot as plt  # type: ignore
     from matplotlib.animation import FuncAnimation  # type: ignore
+    from matplotlib.colors import ListedColormap
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
     plt = None  # type: ignore
     FuncAnimation = None  # type: ignore
+    ListedColormap = None  # type: ignore
     warnings.warn("matplotlib not available. Plotting will be disabled.")
 
 # Optional GIF support
@@ -51,7 +53,57 @@ except ImportError:
 
 # Endpoint finder (now in EndpointAnalyzer module)
 from src.EndpointAnalyzer import EndpointsFinder, EndpointAnalyzer  # type: ignore
-from src.EndpointAnalyzer import EndpointAnalyzerObserver  # type: ignore   
+from src.EndpointAnalyzer import EndpointAnalyzerObserver  # type: ignore
+
+# Optional plotly for 3D visualization
+try:
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+    go = None  # type: ignore
+    warnings.warn("plotly not available. Interactive 3D visualization will be disabled.")
+
+# Optional scipy for image processing
+try:
+    from scipy import ndimage
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    ndimage = None  # type: ignore
+    warnings.warn("scipy not available. Some volume visualization features will be disabled.")
+
+# Optional scikit-image for mesh volume computation
+try:
+    from skimage import measure
+    HAS_SKIMAGE = True
+except ImportError:
+    HAS_SKIMAGE = False
+    measure = None  # type: ignore
+    warnings.warn("scikit-image not available. Mesh volume computation will be disabled.")
+
+# Import plotly_molecule with fallback for different import contexts
+try:
+    from MD_analysis.plotly_molecule import make_molecule_components
+except ImportError:
+    try:
+        from ..plotly_molecule import make_molecule_components
+    except ImportError:
+        try:
+            from plotly_molecule import make_molecule_components
+        except ImportError:
+            make_molecule_components = None
+            warnings.warn("plotly_molecule not available. Interactive 3D visualization will be limited.")
+
+# Import rdkit utils for SMILES support
+try:
+    from src.utils.rdkit_utils import get_3d_coordinates_from_smiles
+except ImportError:
+    try:
+        from utils.rdkit_utils import get_3d_coordinates_from_smiles
+    except ImportError:
+        get_3d_coordinates_from_smiles = None
+        warnings.warn("rdkit_utils not available. SMILES input will be disabled.")   
 
 
 def _generate_timeline_frame(
@@ -1374,5 +1426,251 @@ class Plotter:
         self.output_prefix = out_prefix
         self.plots_generated.append(gif_path)
         print(f"Guest entry/exit timeline GIF saved to {gif_path}")
+
+    # ========== Volume plotting methods (moved from VolumeAnalyzer) ==========
+    
+    @staticmethod
+    def plot_cavity_slice(
+        inside: np.ndarray,
+        cavities: np.ndarray,
+        axis: str = "z",
+        index: int | None = None,
+        outfile: str = "cavity_slice.png",
+    ):
+        """
+        Plot a 2D slice through the 3D grid for sanity checking.
+
+        Parameters
+        ----------
+        inside : 3D bool array
+            True = target.
+        cavities : 3D bool array
+            True = cavity voxels.
+        axis : {'x', 'y', 'z'}
+            Axis normal to the slice.
+        index : int or None
+            Slice index along chosen axis. If None, use middle slice.
+        outfile : str
+            Output PNG filename.
+        """
+        if not HAS_MATPLOTLIB or plt is None or ListedColormap is None:
+            warnings.warn("matplotlib not available. Cannot plot cavity slice.")
+            return
+
+        nx, ny, nz = inside.shape
+        axis = axis.lower()
+
+        if axis == "z":
+            if index is None or index < 0 or index >= nz:
+                index = nz // 2
+            prot2d = inside[:, :, index]
+            cav2d = cavities[:, :, index]
+        elif axis == "y":
+            if index is None or index < 0 or index >= ny:
+                index = ny // 2
+            prot2d = inside[:, index, :]
+            cav2d = cavities[:, index, :]
+        elif axis == "x":
+            if index is None or index < 0 or index >= nx:
+                index = nx // 2
+            prot2d = inside[index, :, :]
+            cav2d = cavities[index, :, :]
+        else:
+            raise ValueError("axis must be 'x', 'y', or 'z'")
+
+        arr = np.zeros_like(prot2d, dtype=int)
+        arr[prot2d] = 1   # target
+        arr[cav2d] = 2    # cavity
+
+        cmap = ListedColormap(["white", "black", "red"])
+
+        plt.figure(figsize=(5, 5))
+        im = plt.imshow(arr.T, origin="lower", cmap=cmap, interpolation="nearest")
+        plt.title(f"Cavity slice (axis={axis}, index={index})")
+        plt.xlabel("grid index")
+        plt.ylabel("grid index")
+        cbar = plt.colorbar(im, ticks=[0, 1, 2])
+        cbar.ax.set_yticklabels(["Outside", "target", "Cavity"])
+        plt.tight_layout()
+        plt.savefig(outfile, dpi=300)
+        plt.close()
+
+    def plot_interactive_3d(
+        self,
+        volume_analyzer,  # VolumeAnalyzer instance
+        frame_index: int = 0,
+        voxel_stride: int = 1,
+    ):
+        """
+        Interactive 3D visualization of:
+        - molecule/target (atoms + bonds, with annotation menu)
+        - target volume (inside mask) as a Volume isosurface
+        - cavity volume (cavities mask) as a Volume isosurface
+        
+        Parameters
+        ----------
+        volume_analyzer : VolumeAnalyzer
+            VolumeAnalyzer instance to use for computation.
+        frame_index : int
+            Frame index in universe.trajectory.
+        voxel_stride : int
+            Subsampling step for the grid in each dimension (>=1).
+            1 = full grid; 2 = take every 2nd voxel, etc.
+            
+        Returns
+        -------
+        fig : go.Figure
+        """
+        if not HAS_PLOTLY or go is None or make_molecule_components is None:
+            raise RuntimeError("plotly and plotly_molecule are required for interactive 3D visualization.")
+
+        # Get universe for this frame
+        u = volume_analyzer._get_universe(frame_index)
+        
+        # --- 1. Compute volumes & masks on the same grid used in compute_frame ---
+        target_vol, cavity_vol, inside, cavities = volume_analyzer.compute_frame(
+            frame_index, return_masks=True, universe=u
+        )
+        
+        if volume_analyzer._last_grid_axes is None:
+            raise RuntimeError(
+                "Grid axes not stored; make sure compute_frame sets _last_grid_axes."
+            )
+        x_axis, y_axis, z_axis = volume_analyzer._last_grid_axes
+        
+        # Optional grid subsampling for rendering speed
+        if voxel_stride > 1:
+            inside_sub = inside[::voxel_stride, ::voxel_stride, ::voxel_stride]
+            cavities_sub = cavities[::voxel_stride, ::voxel_stride, ::voxel_stride]
+            x_sub = x_axis[::voxel_stride]
+            y_sub = y_axis[::voxel_stride]
+            z_sub = z_axis[::voxel_stride]
+        else:
+            inside_sub = inside
+            cavities_sub = cavities
+            x_sub, y_sub, z_sub = x_axis, y_axis, z_axis
+            
+        # Build grid of voxel centers
+        X, Y, Z = np.meshgrid(x_sub, y_sub, z_sub, indexing="ij")
+        
+        # Scalar fields for Volume plots (0/1 occupancy)
+        values_target = inside_sub.astype(float)
+        values_cavity = cavities_sub.astype(float)
+        
+        # Flatten for Plotly Volume
+        Xr = X.ravel()
+        Yr = Y.ravel()
+        Zr = Z.ravel()
+        Vr_target = values_target.ravel()
+        Vr_cavity = values_cavity.ravel()
+        
+        # --- 2. Molecule representation from helper (atoms + bonds + menus) ---
+        # Get coords/elements from universe (already at frame_index)
+        ag = u.select_atoms(volume_analyzer.selection)
+        coords = ag.positions.copy()
+        elements = [volume_analyzer._get_element(atom) or "C" for atom in ag.atoms]
+        
+        atom_trace, bond_trace, annotations_id, annotations_length, updatemenus = \
+            make_molecule_components(coords, elements)
+        
+        # --- 3. Volume traces for target & cavities ---
+        # target volume: semi-transparent gray shell
+        vol_target = go.Volume(
+            x=Xr,
+            y=Yr,
+            z=Zr,
+            value=Vr_target,
+            isomin=0.5,   # "inside" voxels are 1; surface at ~0.5
+            isomax=1.5,
+            opacity=0.1,  # overall opacity of the volume
+            surface_count=20,
+            name="target volume",
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "grey"]],
+            showscale=False,
+            showlegend=True,
+        )
+        
+        # Cavity volume: more opaque red shell
+        vol_cavity = go.Volume(
+            x=Xr,
+            y=Yr,
+            z=Zr,
+            value=Vr_cavity,
+            isomin=0.5,
+            isomax=1.5,
+            opacity=0.3,
+            surface_count=20,
+            name="Cavity volume",
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "red"]],
+            showscale=False,
+            showlegend=True,
+        )
+        
+        # --- 4. Layout (same axis style as your molecule plot) ---
+        axis_params = dict(
+            showgrid=True,
+            showbackground=True,
+            showticklabels=True,
+            zeroline=False,
+            tickfont=dict(color='black'),
+        )
+        
+        # existing annotation menu from make_molecule_components
+        annotation_menus = updatemenus
+        # Trace order: 0: atoms, 1: bonds, 2: target volume, 3: cavity volume
+        volume_menu = dict(
+            type="buttons",
+            direction="right",
+            x=0.5,
+            y=1.08,
+            xanchor="center",
+            yanchor="bottom",
+            buttons=[
+                dict(
+                    label="Show both vols",
+                    method="update",
+                    args=[{"visible": [True, True, True, True]}],
+                ),
+                dict(
+                    label="Hide vols",
+                    method="update",
+                    args=[{"visible": [True, True, False, False]}],
+                ),
+                dict(
+                   label="Only target vol",
+                    method="update",
+                    args=[{"visible": [True, True, True, False]}],
+                ),
+                dict(
+                    label="Only cavity vol",
+                    method="update",
+                    args=[{"visible": [True, True, False, True]}],
+                ),
+            ],
+        )        
+        
+        layout = dict(
+            scene=dict(
+                xaxis=axis_params,
+                yaxis=axis_params,
+                zaxis=axis_params,
+                annotations=annotations_id,
+                aspectmode="data",
+            ),
+            margin=dict(r=100, l=100, b=100, t=100),
+            showlegend=True,
+            updatemenus=updatemenus+[volume_menu],
+            title=(
+                f"Frame {frame_index} — "
+                f"V_target ≈ {target_vol:.0f} Å³, "
+                f"V_cavity ≈ {cavity_vol:.0f} Å³"
+            ),
+        )
+        
+        fig = go.Figure(
+            data=[atom_trace, bond_trace, vol_target, vol_cavity],
+            layout=layout,
+        )
+        return fig
 
 
