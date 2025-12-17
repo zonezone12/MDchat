@@ -28,10 +28,39 @@ except ImportError:
 try:
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
+    HAS_MATPLOTLIB = True
 except ImportError:
     plt = None
     ListedColormap = None
-    warnings.warn("matplotlib not available. Plotting will be disabled.")
+    HAS_MATPLOTLIB = False
+    warnings.warn("matplotlib not available. Some plotting features will be disabled.")
+
+# Datashader for high-performance 2D plotting
+try:
+    import datashader as ds
+    from datashader import transfer_functions as tf
+    from datashader.colors import viridis, inferno
+    import pandas as pd
+    HAS_DATASHADER = True
+except ImportError:
+    ds = None
+    tf = None
+    viridis = None
+    inferno = None
+    pd = None
+    HAS_DATASHADER = False
+    warnings.warn("datashader not available. Will fall back to matplotlib if available.")
+
+# PIL for image composition and text overlays
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+    HAS_PIL = False
+    warnings.warn("PIL/Pillow not available. Text overlays on datashader plots will be limited.")
 
 try:
     from rdkit import Chem
@@ -183,30 +212,8 @@ class VolumeAnalyzer:
         if sigma_factor <= 0:
             raise ValueError(f"sigma_factor must be > 0, got {sigma_factor}")
         
-        # Store file paths instead of Universe to avoid pickling full trajectory
-        # Universe will be created on-demand in compute_frame
-        try:
-            self.top_file = universe.filename
-            self.traj_file = universe.trajectory.filename
-            # Get trajectory format
-            if hasattr(universe.trajectory, 'format'):
-                self.traj_format = universe.trajectory.format[0] if isinstance(universe.trajectory.format, (list, tuple)) else universe.trajectory.format
-            else:
-                self.traj_format = None
-            # Handle multiple trajectory files
-            if isinstance(self.traj_file, (list, tuple)):
-                if len(self.traj_file) > 1:
-                    warnings.warn(f"Multiple trajectory files detected. Using first file: {self.traj_file[0]}")
-                self.traj_file = self.traj_file[0]
-            self._universe = None  # Will be created on-demand
-            self._use_file_paths = True
-        except (AttributeError, TypeError):
-            # Fallback: store universe reference if file paths not available
-            self._universe = universe
-            self.top_file = None
-            self.traj_file = None
-            self.traj_format = None
-            self._use_file_paths = False
+        # Store universe reference
+        self._universe = universe
         
         self.vdw_radii_table = self.DEFAULT_VDW_RADII.copy()
         # Update with custom VDW radii
@@ -228,28 +235,11 @@ class VolumeAnalyzer:
         
         # Get atom group from universe to precompute VDW radii
         # This is done once to cache the radii, but we'll recreate ag in compute_frame
-        if self._use_file_paths:
-            # Create temporary universe to get atom group for VDW radii
-            try:
-                if self.traj_format:
-                    temp_u = mda.Universe(self.top_file, self.traj_file, format=self.traj_format)
-                else:
-                    temp_u = mda.Universe(self.top_file, self.traj_file)
-                temp_ag = temp_u.select_atoms(self.selection)
-                if temp_ag.n_atoms == 0:
-                    raise ValueError(f"Selection '{self.selection}' returned no atoms.")
-                # Precompute VDW radii for the selected atoms (fixed over trajectory)
-                self.vdw_radii = self._get_vdw_radii(temp_ag)
-                del temp_u, temp_ag  # Clean up
-            except Exception as e:
-                warnings.warn(f"Failed to precompute VDW radii from file paths: {e}. Will compute on-demand.")
-                self.vdw_radii = None
-        else:
-            ag = self._universe.select_atoms(self.selection)
-            if ag.n_atoms == 0:
-                raise ValueError(f"Selection '{self.selection}' returned no atoms.")
-            # Precompute VDW radii for the selected atoms (fixed over trajectory)
-            self.vdw_radii = self._get_vdw_radii(ag)
+        ag = self._universe.select_atoms(self.selection)
+        if ag.n_atoms == 0:
+            raise ValueError(f"Selection '{self.selection}' returned no atoms.")
+        # Precompute VDW radii for the selected atoms (fixed over trajectory)
+        self.vdw_radii = self._get_vdw_radii(ag)
         
         # Will store grid axes of the last computed frame for visualization
         self._last_grid_axes = None  # (x, y, z)
@@ -549,25 +539,12 @@ class VolumeAnalyzer:
         return r + self.probe_radius
     
     def _get_universe(self, frame_index: Optional[int] = None) -> mda.Universe:
-        """Get Universe, creating on-demand if using file paths."""
-        if self._use_file_paths:
-            # Create Universe on-demand (lightweight, doesn't load full trajectory)
-            try:
-                if self.traj_format:
-                    u = mda.Universe(self.top_file, self.traj_file, format=self.traj_format)
-                else:
-                    u = mda.Universe(self.top_file, self.traj_file)
-                if frame_index is not None:
-                    u.trajectory[frame_index]
-                return u
-            except Exception as e:
-                raise RuntimeError(f"Failed to create Universe from file paths: {e}")
-        else:
-            if self._universe is None:
-                raise RuntimeError("Universe not available")
-            if frame_index is not None:
-                self._universe.trajectory[frame_index]
-            return self._universe
+        """Get Universe."""
+        if self._universe is None:
+            raise RuntimeError("Universe not available")
+        if frame_index is not None:
+            self._universe.trajectory[frame_index]
+        return self._universe
     
     def compute_frame(
         self,
@@ -589,7 +566,7 @@ class VolumeAnalyzer:
             If True, use marching cubes mesh volume (more accurate).
         universe : Optional[mda.Universe]
             Optional Universe already positioned at frame_index. If provided, uses this
-            instead of creating/loading from file paths. Useful when Universe is already
+            instead of the stored universe. Useful when Universe is already
             available (e.g., from TrajectoryIterator).
 
         Returns
@@ -610,7 +587,7 @@ class VolumeAnalyzer:
                 )
             u.trajectory[frame_index]
         else:
-            # Get universe (creates on-demand if using file paths)
+            # Get universe
             u = self._get_universe(frame_index)
             # Verify frame_index is valid
             if frame_index < 0 or frame_index >= len(u.trajectory):
@@ -807,8 +784,12 @@ class VolumeAnalyzer:
         outfile : str
             Output PNG filename.
         """
-        if plt is None or ListedColormap is None:
-            warnings.warn("matplotlib not available. Cannot plot cavity slice.")
+        if not HAS_DATASHADER or not HAS_PIL:
+            # Fall back to matplotlib
+            if plt is None or ListedColormap is None:
+                warnings.warn("Neither datashader/PIL nor matplotlib available. Cannot plot cavity slice.")
+                return
+            VolumeAnalyzer._plot_cavity_slice_matplotlib(inside, cavities, axis, index, outfile)
             return
 
         nx, ny, nz = inside.shape
@@ -835,6 +816,123 @@ class VolumeAnalyzer:
         arr = np.zeros_like(prot2d, dtype=int)
         arr[prot2d] = 1   # target
         arr[cav2d] = 2    # cavity
+
+        # Create image using PIL
+        height, width = arr.T.shape  # Transpose to match imshow behavior
+        img_array = arr.T
+        
+        # Create RGB image
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        # Map values to colors: 0=white, 1=black, 2=red
+        rgb_image[img_array == 0] = [255, 255, 255]  # white - outside
+        rgb_image[img_array == 1] = [0, 0, 0]        # black - target
+        rgb_image[img_array == 2] = [255, 0, 0]      # red - cavity
+        
+        # Scale up for visibility
+        scale_factor = max(1, 300 // max(height, width))
+        new_height = height * scale_factor
+        new_width = width * scale_factor
+        
+        pil_img = Image.fromarray(rgb_image, mode='RGB')
+        pil_img = pil_img.resize((new_width, new_height), Image.NEAREST)
+        
+        # Add margins for annotations
+        margin = {'top': 40, 'bottom': 50, 'left': 60, 'right': 100}
+        full_width = new_width + margin['left'] + margin['right']
+        full_height = new_height + margin['top'] + margin['bottom']
+        
+        final_img = Image.new('RGB', (full_width, full_height), (255, 255, 255))
+        final_img.paste(pil_img, (margin['left'], margin['top']))
+        
+        draw = ImageDraw.Draw(final_img)
+        
+        # Try to get fonts
+        try:
+            font_title = ImageFont.truetype("arial.ttf", 14)
+            font_label = ImageFont.truetype("arial.ttf", 12)
+            font_tick = ImageFont.truetype("arial.ttf", 10)
+        except (OSError, IOError):
+            try:
+                font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+                font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+                font_tick = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+            except (OSError, IOError):
+                font_title = ImageFont.load_default()
+                font_label = font_title
+                font_tick = font_title
+        
+        # Add title
+        title = f"Cavity slice (axis={axis}, index={index})"
+        title_bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_x = margin['left'] + (new_width - (title_bbox[2] - title_bbox[0])) // 2
+        draw.text((title_x, 10), title, fill='black', font=font_title)
+        
+        # Add axis labels
+        draw.text((margin['left'] + new_width // 2 - 30, full_height - 25), "grid index", fill='black', font=font_label)
+        
+        # Y-axis label (rotated)
+        ylabel_img = Image.new('RGB', (100, 15), (255, 255, 255))
+        ylabel_draw = ImageDraw.Draw(ylabel_img)
+        ylabel_draw.text((0, 0), "grid index", fill='black', font=font_label)
+        ylabel_img = ylabel_img.rotate(90, expand=True)
+        final_img.paste(ylabel_img, (5, margin['top'] + (new_height - ylabel_img.size[1]) // 2))
+        
+        # Add colorbar legend
+        legend_x = margin['left'] + new_width + 10
+        legend_y = margin['top'] + 20
+        legend_items = [
+            ("Outside", (255, 255, 255)),
+            ("Target", (0, 0, 0)),
+            ("Cavity", (255, 0, 0)),
+        ]
+        for idx, (label, color) in enumerate(legend_items):
+            # Draw color box
+            draw.rectangle(
+                [legend_x, legend_y + idx * 25, legend_x + 20, legend_y + idx * 25 + 15],
+                fill=color, outline='black'
+            )
+            draw.text((legend_x + 25, legend_y + idx * 25), label, fill='black', font=font_tick)
+        
+        # Save image
+        final_img.save(outfile)
+    
+    @staticmethod
+    def _plot_cavity_slice_matplotlib(
+        inside: np.ndarray,
+        cavities: np.ndarray,
+        axis: str = "z",
+        index: int | None = None,
+        outfile: str = "cavity_slice.png",
+    ):
+        """Matplotlib fallback for cavity slice plot."""
+        if plt is None or ListedColormap is None:
+            return
+
+        nx, ny, nz = inside.shape
+        axis = axis.lower()
+
+        if axis == "z":
+            if index is None or index < 0 or index >= nz:
+                index = nz // 2
+            prot2d = inside[:, :, index]
+            cav2d = cavities[:, :, index]
+        elif axis == "y":
+            if index is None or index < 0 or index >= ny:
+                index = ny // 2
+            prot2d = inside[:, index, :]
+            cav2d = cavities[:, index, :]
+        elif axis == "x":
+            if index is None or index < 0 or index >= nx:
+                index = nx // 2
+            prot2d = inside[index, :, :]
+            cav2d = cavities[index, :, :]
+        else:
+            return
+
+        arr = np.zeros_like(prot2d, dtype=int)
+        arr[prot2d] = 1
+        arr[cav2d] = 2
 
         cmap = ListedColormap(["white", "black", "red"])
 
@@ -1074,7 +1172,8 @@ class VolumeAnalyzer:
         if imageio is None:
             raise RuntimeError("imageio is required for GIF generation.")
         if plt is None:
-            raise RuntimeError("matplotlib is required for GIF generation.")
+            raise RuntimeError("matplotlib is required for Gaussian stacking visualization GIF generation. "
+                             "Note: This function uses matplotlib for complex density visualizations.")
         
         if atom_stride < 1:
             raise ValueError("atom_stride must be >= 1")

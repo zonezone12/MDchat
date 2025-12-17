@@ -2,7 +2,7 @@ import psutil
 import os
 import datetime
 import warnings
-
+import MDAnalysis as mda
 
 def log_memory(label=""):
     """Log current memory usage (RSS and VMS) if psutil is available."""

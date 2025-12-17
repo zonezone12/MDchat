@@ -234,7 +234,29 @@ def main():
         cube_metrics_df = volume_observer.get_metrics_df()
         volume = volume_observer.get_volume()
         
-        if volume is not None and len(volume) > 0:
+        # Diagnostic information
+        if volume is None or len(volume) == 0:
+            print(f"\nWarning: Volume array is empty!")
+            print(f"  Metrics DataFrame shape: {cube_metrics_df.shape if cube_metrics_df is not None else 'None'}")
+            print(f"  Metrics DataFrame columns: {list(cube_metrics_df.columns) if cube_metrics_df is not None and len(cube_metrics_df) > 0 else 'None'}")
+            # Get diagnostic information from observer
+            if hasattr(volume_observer, 'get_diagnostic_info'):
+                diag_info = volume_observer.get_diagnostic_info()
+                print(f"  Observer diagnostic information:")
+                for key, value in diag_info.items():
+                    print(f"    {key}: {value}")
+            else:
+                # Fallback to checking attributes directly
+                if hasattr(volume_observer, '_initialized'):
+                    print(f"  Observer initialized: {volume_observer._initialized}")
+                if hasattr(volume_observer, 'rows'):
+                    print(f"  Number of rows collected: {len(volume_observer.rows)}")
+            warnings.warn(
+                f"Volume array is empty. This may indicate that the volume observer "
+                f"did not process any frames. Check that the observer was properly "
+                f"subscribed and that frame processing completed without errors."
+            )
+        elif volume is not None and len(volume) > 0:
             print(f"\nCube volume computed successfully.")
             print(f"  Mean volume: {np.nanmean(volume):.2f} Å³")
             print(f"  Std volume: {np.nanstd(volume):.2f} Å³")
@@ -309,9 +331,18 @@ def main():
         print("Computing correlations between endpoint distances and cube volume...")
         print(f"{'='*60}")
         
-        if len(volume) != len(u.trajectory):
-            warnings.warn(f"Volume array length ({len(volume)}) doesn't match trajectory length ({len(u.trajectory)}).")
-        else:
+        if len(volume) == 0:
+            warnings.warn(
+                f"Volume array is empty (length 0). Cannot compute correlations. "
+                f"This may indicate that the volume observer did not process any frames. "
+                f"Check that the observer was properly subscribed and that frame processing completed without errors."
+            )
+        elif len(volume) != len(u.trajectory):
+            warnings.warn(
+                f"Volume array length ({len(volume)}) doesn't match trajectory length ({len(u.trajectory)}). "
+                f"Skipping correlation analysis."
+            )
+            
             try:
                 correlation_df = endpoint_analyzer.compute_endpoint_volume_correlation(
                     endpoint_dists_array, volume, args.endpoint_residues

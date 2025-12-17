@@ -352,6 +352,8 @@ class GSAnalyzerObserver(FrameObserver):
         self.rows: List[dict] = []
         self.volume_analyzer: Optional[VolumeAnalyzer] = None
         self._initialized = False
+        self._frame_call_count = 0  # Debug: track how many times on_frame is called
+        self._frame_exception_count = 0  # Debug: track exceptions in on_frame
         
         # Reference to analyzer for utility methods
         self._analyzer = GSAnalyzer()
@@ -460,6 +462,23 @@ class GSAnalyzerObserver(FrameObserver):
         """Initialize data structures before iteration."""
         u = iterator.universe
         
+        # Validate face selections before proceeding
+        u.trajectory[0]  # Go to first frame for validation
+        invalid_faces = []
+        for i, face_sel in enumerate(self.face_sel_list):
+            try:
+                ag = u.select_atoms(face_sel)
+                if len(ag) == 0:
+                    invalid_faces.append(f"Face {i+1} ({face_sel}): empty selection")
+            except Exception as e:
+                invalid_faces.append(f"Face {i+1} ({face_sel}): {e}")
+        
+        if invalid_faces:
+            warnings.warn(
+                f"Some face selections are invalid:\n  " + "\n  ".join(invalid_faces) +
+                "\nThis may cause volume computation to fail."
+            )
+        
         # Initialize VolumeAnalyzer for volume computation if available
         combined_sel = " or ".join([f"({s})" for s in self.face_sel_list])
         try:
@@ -520,6 +539,8 @@ class GSAnalyzerObserver(FrameObserver):
         
         self.rows = []
         self._initialized = True
+        self._frame_call_count = 0  # Reset debug counters
+        self._frame_exception_count = 0
         
         # Reset guest tracking state
         self._inside_guest_indices = set()
@@ -533,7 +554,9 @@ class GSAnalyzerObserver(FrameObserver):
     def on_frame(self, ts: mda.coordinates.base.Timestep, frame_idx: int,
                  universe: mda.Universe) -> None:
         """Process a single frame during iteration."""
+        self._frame_call_count += 1  # Debug: track calls
         if not self._initialized:
+            warnings.warn(f"GSAnalyzerObserver.on_frame called but observer not initialized (frame {ts.frame})")
             return
         
         # Get face centers (universe is already at current frame)
@@ -638,34 +661,55 @@ class GSAnalyzerObserver(FrameObserver):
                 warnings.warn(f"Guest tracking failed at frame {ts.frame}: {e}")
         
         # Compute volume - reuse if already computed during guest tracking
-        if volume_from_guest_tracking is not None:
-            volume = volume_from_guest_tracking
-        elif self.volume_analyzer is not None:
-            try:
-                # Pass universe to avoid creating new Universe in compute_frame
-                target_volume, cavity_volume = self.volume_analyzer.compute_frame(
-                    ts.frame, return_masks=False, universe=universe
-                )
-                volume = target_volume + cavity_volume
-            except Exception as e:
-                warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
+        try:
+            if volume_from_guest_tracking is not None:
+                volume = volume_from_guest_tracking
+            elif self.volume_analyzer is not None:
+                try:
+                    # Pass universe to avoid creating new Universe in compute_frame
+                    target_volume, cavity_volume = self.volume_analyzer.compute_frame(
+                        ts.frame, return_masks=False, universe=universe
+                    )
+                    volume = target_volume + cavity_volume
+                except Exception as e:
+                    warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
+                    volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
+            else:
                 volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
-        else:
-            volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
-        
-        self.rows.append({
-            'frame': ts.frame,
-            'edge_mean': edge_mean,
-            'edge_min': float(np.nanmin(edge_len)) if len(edge_len) else np.nan,
-            'edge_max': float(np.nanmax(edge_len)) if len(edge_len) else np.nan,
-            'volume': volume,
-            'planarity_mean': float(np.nanmean(planar_rms_list)),
-            'planarity_max': float(np.nanmax(planar_rms_list)),
-            'guest_min_center_dist': guest_min,
-            'guest_is_inside': guest_is_inside,
-            'guest_inside_count': guest_inside_count,
-            **face_angle_dict,
-        })
+            
+            # Always add a row, even if some values are NaN
+            self.rows.append({
+                'frame': ts.frame,
+                'edge_mean': edge_mean,
+                'edge_min': float(np.nanmin(edge_len)) if len(edge_len) else np.nan,
+                'edge_max': float(np.nanmax(edge_len)) if len(edge_len) else np.nan,
+                'volume': volume,
+                'planarity_mean': float(np.nanmean(planar_rms_list)),
+                'planarity_max': float(np.nanmax(planar_rms_list)),
+                'guest_min_center_dist': guest_min,
+                'guest_is_inside': guest_is_inside,
+                'guest_inside_count': guest_inside_count,
+                **face_angle_dict,
+            })
+        except Exception as e:
+            # If there's an exception, still try to add a minimal row with frame info
+            self._frame_exception_count += 1  # Debug: track exceptions
+            warnings.warn(f"Failed to process frame {ts.frame} in GSAnalyzerObserver: {e}")
+            import traceback
+            traceback.print_exc()
+            # Add a minimal row with frame number and NaN values
+            self.rows.append({
+                'frame': ts.frame,
+                'edge_mean': np.nan,
+                'edge_min': np.nan,
+                'edge_max': np.nan,
+                'volume': np.nan,
+                'planarity_mean': np.nan,
+                'planarity_max': np.nan,
+                'guest_min_center_dist': np.nan,
+                'guest_is_inside': False,
+                'guest_inside_count': 0,
+            })
     
     def on_frame_end(self, iterator: TrajectoryIterator) -> None:
         """Finalize results after iteration."""
@@ -698,12 +742,26 @@ class GSAnalyzerObserver(FrameObserver):
     def get_volume(self) -> np.ndarray:
         """Get volume array from computed metrics."""
         df = self.get_metrics_df()
+        if df is None or len(df) == 0:
+            return np.array([])
         if 'volume' in df.columns:
             return df['volume'].values
         elif 'edge_mean' in df.columns:
             return df['edge_mean'].values ** 3
         else:
             return np.array([])
+    
+    def get_diagnostic_info(self) -> Dict:
+        """Get diagnostic information about the observer state."""
+        return {
+            'initialized': getattr(self, '_initialized', False),
+            'n_rows': len(self.rows) if hasattr(self, 'rows') else 0,
+            'has_volume_analyzer': self.volume_analyzer is not None,
+            'has_guest_volume_analyzer': self._guest_volume_analyzer is not None,
+            'metrics_df_shape': self.get_metrics_df().shape if hasattr(self, 'rows') and len(self.rows) > 0 else (0, 0),
+            'frame_call_count': getattr(self, '_frame_call_count', 0),
+            'frame_exception_count': getattr(self, '_frame_exception_count', 0),
+        }
     
     def get_guest_residence_stats(self) -> Dict:
         """
@@ -828,8 +886,17 @@ class GSAnalyzerObserver(FrameObserver):
             return
         
         # Merge rows
+        n_rows_before = len(self.rows)
         self.rows.extend(other.rows)
         self.rows.sort(key=lambda x: x.get('frame', 0))
+        
+        # Update debug counters
+        self._frame_call_count += getattr(other, '_frame_call_count', 0)
+        self._frame_exception_count += getattr(other, '_frame_exception_count', 0)
+        
+        # Debug output
+        if len(other.rows) > 0:
+            print(f"GSAnalyzerObserver: Merged {len(other.rows)} rows from worker (total: {len(self.rows)})")
         
         # Merge guest tracking events
         self.entry_events.extend(other.entry_events)

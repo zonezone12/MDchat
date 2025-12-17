@@ -267,7 +267,7 @@ class TrajectoryIterator:
         else:
             # Limit workers for I/O-bound operations
             if max_workers_for_io is None:
-                max_workers_for_io = 8  # Default limit for I/O-bound tasks
+                max_workers_for_io = 16  # Default limit for I/O-bound tasks
             
             if n_jobs == -1:
                 n_jobs = os.cpu_count() or 2
