@@ -604,7 +604,8 @@ class EndpointAnalyzerObserver(FrameObserver):
         
         # Find endpoint indices once on the initial frame
         u = iterator.universe
-        u.trajectory[0]  # Go to initial frame
+        #seems not needed to be at the initial frame in the iterator also save the time
+        #u.trajectory[0]  # Go to initial frame 
         
         self.stored_ep_indices = []
         for idx, sel_str in enumerate(self.residue_sel_list):
