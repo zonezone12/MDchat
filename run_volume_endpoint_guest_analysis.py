@@ -342,7 +342,7 @@ def main():
                 f"Volume array length ({len(volume)}) doesn't match trajectory length ({len(u.trajectory)}). "
                 f"Skipping correlation analysis."
             )
-            
+        else:
             try:
                 correlation_df = endpoint_analyzer.compute_endpoint_volume_correlation(
                     endpoint_dists_array, volume, args.endpoint_residues
