@@ -16,6 +16,8 @@ import os
 import threading
 import hashlib
 
+import numpy as np
+
 try:
     import MDAnalysis as mda
 except ImportError:
@@ -46,6 +48,36 @@ except ImportError:
 # For multiprocessing: use process name
 # For Dask: use worker address
 _universe_cache: Dict[Tuple[str, str], Any] = {}
+
+# Global storage for fork-based sharing (Linux copy-on-write optimization)
+# When using fork(), child processes inherit parent's memory space
+# If they only READ the data, it's shared via copy-on-write (no memory duplication)
+_shared_universe: Optional[mda.Universe] = None
+_shared_frame_indices: Optional[List[int]] = None
+_shared_observers: Optional[List[Any]] = None
+
+def _can_use_fork() -> bool:
+    """Check if we can use fork-based multiprocessing (Linux COW optimization)."""
+    import sys
+    import platform
+    
+    # Fork is efficient on Linux, available but less efficient on macOS
+    # Not available on Windows
+    if platform.system() == 'Windows':
+        return False
+    
+    # Check current start method
+    if MULTIPROCESSING_AVAILABLE:
+        try:
+            current_method = mp.get_start_method(allow_none=True)
+            if current_method is None:
+                # Not set yet - on Linux default is fork
+                return platform.system() == 'Linux'
+            return current_method == 'fork'
+        except Exception:
+            return False
+    return False
+
 _cache_lock = threading.Lock()
 
 
@@ -359,70 +391,64 @@ class TrajectoryIterator:
             self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
-        # Pre-load coordinates if requested (only for sequential-like processing)
-        preloaded_coords = None
-        if preload_coordinates:
-            try:
-                print("Pre-loading coordinates into memory...")
-                traj = self.universe.trajectory
-                s = slice(start, stop, step)
-                indices = list(range(len(traj)))[s]
-                preloaded_coords = {}
-                for idx in indices:
-                    traj[idx]
-                    preloaded_coords[idx] = traj.ts.copy()
-                print(f"Pre-loaded {len(preloaded_coords)} frames into memory")
-            except Exception as e:
-                warnings.warn(f"Failed to pre-load coordinates: {e}. Continuing without pre-loading.")
-                preloaded_coords = None
-        
-        # Get trajectory file paths and format for creating new Universe instances
+        # Get topology file path (only need topology, not trajectory file)
         try:
             top_file = self.universe.filename
-            traj_file = self.universe.trajectory.filename
-            
-            # Get trajectory format to preserve it in worker processes
-            traj_format = self._get_trajectory_format()
-            
-            # Handle multiple trajectory files
-            if isinstance(traj_file, (list, tuple)):
-                if len(traj_file) > 1:
-                    warnings.warn(
-                        f"Multiple trajectory files detected. Using first file for parallel processing: {traj_file[0]}"
-                    )
-                traj_file = traj_file[0]
-                
         except (AttributeError, TypeError) as e:
             warnings.warn(
-                f"Cannot get file paths from Universe for parallel processing: {e}. "
+                f"Cannot get topology file path from Universe for parallel processing: {e}. "
                 "Falling back to sequential processing."
             )
             self._iterate_sequential(start, stop, step)
             return
         
-        # Collect all frame indices to process efficiently
+        # Collect all frame indices to process
         traj = self.universe.trajectory
         n_frames = len(traj)
         s = slice(start, stop, step)
         indices = list(range(n_frames))[s]
         frame_indices_to_process = indices
 
-        # Derive times without reading every frame (assumes evenly spaced frames)
-        times_to_process: List[float] = []
-        if frame_indices_to_process:
-            dt = getattr(traj, "dt", None)
-            first_idx = frame_indices_to_process[0]
-            try:
-                traj[first_idx]  # single seek to get starting time
-                t0 = traj.ts.time
-            except Exception:
-                dt = None
-                t0 = None
-
-            if dt is not None and t0 is not None:
-                times_to_process = [t0 + (idx - first_idx) * dt for idx in frame_indices_to_process]
-
         if len(frame_indices_to_process) == 0:
+            return
+        
+        # Extract coordinates and times from trajectory in main process
+        # This avoids workers having to re-open trajectory files
+        print("Extracting coordinates from trajectory (main process)...")
+        all_coords = {}  # {frame_idx: positions_array}
+        all_times = {}   # {frame_idx: time}
+        all_frame_nums = {}  # {frame_idx: frame_number}
+        dimensions = None
+        
+        for frame_idx in frame_indices_to_process:
+            traj[frame_idx]
+            ts = traj.ts
+            # Copy positions as C-contiguous array to ensure proper serialization
+            all_coords[frame_idx] = np.ascontiguousarray(ts.positions.copy(), dtype=np.float64)
+            all_times[frame_idx] = ts.time
+            all_frame_nums[frame_idx] = ts.frame
+            if dimensions is None and ts.dimensions is not None:
+                dimensions = ts.dimensions.copy()
+        
+        times_to_process = [all_times[idx] for idx in frame_indices_to_process]
+        print(f"Extracted coordinates for {len(all_coords)} frames")
+        
+        # Validate that all observers can be pickled before starting parallel processing
+        unpickleable_observers = []
+        for observer in self.observers:
+            try:
+                pickled = pickle.dumps(observer)
+                pickle.loads(pickled)
+            except Exception as e:
+                unpickleable_observers.append((type(observer).__name__, str(e)))
+        
+        if unpickleable_observers:
+            warnings.warn(
+                f"The following observers cannot be pickled and will not work with parallel processing:\n" +
+                "\n".join([f"  - {name}: {error}" for name, error in unpickleable_observers]) +
+                "\nFalling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
         # Notify observers that iteration is starting
@@ -451,44 +477,24 @@ class TrajectoryIterator:
             if hasattr(client, 'dashboard_link'):
                 print(f"Dask dashboard: {client.dashboard_link}")
         
-        # Calculate batch size based on number of workers and overhead estimation
-        # Account for Universe creation overhead: ~0.1-1 second per Universe creation
-        # Use larger batches to amortize this overhead
         n_workers = len(client.scheduler_info()['workers'])
         
-        # Estimate Universe creation overhead (conservative: 0.5 seconds)
-        # This means we want batches large enough that Universe creation is < 5% of total time
-        universe_overhead_seconds = 0.5
-        min_frames_per_universe = 100  # Minimum frames to process per Universe creation
-        
-        # Calculate optimal batch size accounting for overhead
-        # Target: 1-2 batches per worker to minimize scheduling overhead
-        target_batches_per_worker = 1.2  # Slightly fewer batches per worker
+        # Calculate batch size - simpler now since we're not recreating Universes
+        target_batches_per_worker = 1.5
         target_total_batches = max(1, int(n_workers * target_batches_per_worker))
-        
-        # Minimum batch size: ensure Universe creation overhead is minimal
-        # For small trajectories, use larger minimum to avoid overhead
-        if n_frames_to_process < 1000:
-            min_batch_size = max(100, n_frames_to_process // max(2, n_workers))
-        else:
-            min_batch_size = max(min_frames_per_universe, n_frames_to_process // (n_workers * 4))
-        
-        batch_size = max(min_batch_size, n_frames_to_process // target_total_batches)
-        
-        # Warn if we still have too many batches (indicates lightweight computation)
-        estimated_batches = (n_frames_to_process + batch_size - 1) // batch_size
-        if estimated_batches > n_workers * 3 and n_frames_to_process > 1000:
-            warnings.warn(
-                f"Estimated {estimated_batches} batches for {n_frames_to_process} frames with {n_workers} workers. "
-                f"Dask overhead may outweigh benefits for lightweight computations. "
-                "Consider using sequential processing (n_jobs=1) or multiprocessing (use_dask=False) instead."
-            )
+        batch_size = max(1, n_frames_to_process // target_total_batches)
         
         batches = []
-        
         for i in range(0, n_frames_to_process, batch_size):
             batch_end = min(i + batch_size, n_frames_to_process)
-            batches.append((i, batch_end, frame_indices_to_process[i:batch_end]))
+            batch_frame_indices = frame_indices_to_process[i:batch_end]
+            
+            # Extract coords/times for this batch
+            batch_coords = {idx: all_coords[idx] for idx in batch_frame_indices}
+            batch_times = {idx: all_times[idx] for idx in batch_frame_indices}
+            batch_frames = {local_i: all_frame_nums[idx] for local_i, idx in enumerate(batch_frame_indices)}
+            
+            batches.append((i, batch_end, batch_coords, batch_times, batch_frames))
         
         print(f"Processing {n_frames_to_process} frames in {len(batches)} batches "
               f"(~{batch_size} frames per batch, {n_workers} workers)")
@@ -496,16 +502,16 @@ class TrajectoryIterator:
         # Submit batches to Dask cluster
         try:
             futures = []
-            for batch_start_idx, batch_end_idx, batch_frames in batches:
+            for batch_start_idx, batch_end_idx, batch_coords, batch_times, batch_frames in batches:
                 future = client.submit(
-                    _process_frame_batch,
+                    _process_frame_batch_with_coords,
                     top_file,
-                    traj_file,
-                    traj_format,
+                    batch_coords,
+                    batch_times,
                     batch_frames,
                     batch_start_idx,
                     self.observers,
-                    preloaded_coords
+                    dimensions
                 )
                 futures.append(future)
             
@@ -573,122 +579,103 @@ class TrajectoryIterator:
             self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
-        # Pre-load coordinates if requested
-        preloaded_coords = None
-        if preload_coordinates:
-            try:
-                print("Pre-loading coordinates into memory...")
-                traj = self.universe.trajectory
-                s = slice(start, stop, step)
-                indices = list(range(len(traj)))[s]
-                preloaded_coords = {}
-                for idx in indices:
-                    traj[idx]
-                    preloaded_coords[idx] = traj.ts.copy()
-                print(f"Pre-loaded {len(preloaded_coords)} frames into memory")
-            except Exception as e:
-                warnings.warn(f"Failed to pre-load coordinates: {e}. Continuing without pre-loading.")
-                preloaded_coords = None
+        # Check if we can use fork-based copy-on-write (Linux optimization)
+        use_fork = _can_use_fork()
         
-        # Get trajectory file paths and format for creating new Universe instances
-        try:
-            top_file = self.universe.filename
-            traj_file = self.universe.trajectory.filename
-            
-            # Get trajectory format to preserve it in worker processes
-            traj_format = self._get_trajectory_format()
-                
-            # Handle multiple trajectory files (convert to list if needed)
-            if isinstance(traj_file, (list, tuple)):
-                # For multiple files, we'll need to pass them all
-                # For now, use the first file and warn
-                if len(traj_file) > 1:
-                    warnings.warn(
-                        f"Multiple trajectory files detected. Using first file for parallel processing: {traj_file[0]}"
-                    )
-                traj_file = traj_file[0]
-                
-        except (AttributeError, TypeError) as e:
-            warnings.warn(
-                f"Cannot get file paths from Universe for parallel processing: {e}. "
-                "Falling back to sequential processing."
-            )
-            self._iterate_sequential(start, stop, step, preload_coordinates)
+        if use_fork:
+            self._iterate_parallel_fork(start, stop, step, n_jobs)
+        else:
+            self._iterate_parallel_coords(start, stop, step, n_jobs, preload_coordinates)
+    
+    def _iterate_parallel_fork(self, start: Optional[int] = None,
+                               stop: Optional[int] = None,
+                               step: Optional[int] = None,
+                               n_jobs: int = 2) -> None:
+        """
+        Parallel iteration using fork-based copy-on-write (Linux only).
+        
+        This is the most efficient approach on Linux:
+        - Parent process loads trajectory (once)
+        - Child processes share memory via copy-on-write
+        - No data copying if children only READ the trajectory
+        """
+        global _shared_universe, _shared_observers
+        
+        print("Using fork-based parallel processing (Linux copy-on-write optimization)")
+        
+        # Collect frame indices
+        traj = self.universe.trajectory
+        n_frames_total = len(traj)
+        s = slice(start, stop, step)
+        frame_indices_to_process = list(range(n_frames_total))[s]
+        
+        if len(frame_indices_to_process) == 0:
             return
         
-        # Collect all frame indices to process efficiently
-        traj = self.universe.trajectory
-        n_frames = len(traj)
-        # handle None for start/stop/step as slice does
-        s = slice(start, stop, step)
-        indices = list(range(n_frames))[s]
-        frame_indices_to_process = indices
-
-        # Derive times without reading every frame (assumes evenly spaced frames)
-        times_to_process: List[float] = []
-        if frame_indices_to_process:
-            dt = getattr(traj, "dt", None)
-            first_idx = frame_indices_to_process[0]
+        # Store times for later
+        times_to_process = []
+        for idx in frame_indices_to_process:
+            traj[idx]
+            times_to_process.append(traj.ts.time)
+        
+        # Validate observers can be pickled (still needed for their state)
+        unpickleable_observers = []
+        for observer in self.observers:
             try:
-                traj[first_idx]  # single seek to get starting time
-                t0 = traj.ts.time
-            except Exception:
-                dt = None
-                t0 = None
-
-            if dt is not None and t0 is not None:
-                times_to_process = [t0 + (idx - first_idx) * dt for idx in frame_indices_to_process]
-
-        if len(frame_indices_to_process) == 0:
+                pickled = pickle.dumps(observer)
+                pickle.loads(pickled)
+            except Exception as e:
+                unpickleable_observers.append((type(observer).__name__, str(e)))
+        
+        if unpickleable_observers:
+            warnings.warn(
+                f"The following observers cannot be pickled:\n" +
+                "\n".join([f"  - {name}: {error}" for name, error in unpickleable_observers]) +
+                "\nFalling back to coordinate-based parallel processing."
+            )
+            self._iterate_parallel_coords(start, stop, step, n_jobs, False)
             return
         
         # Notify observers that iteration is starting
         for observer in self.observers:
             observer.on_frame_start(self)
         
-        # Split frames into batches for parallel processing
-        # Improved batch size calculation accounting for Universe creation overhead
+        # Set up shared state for fork
+        _shared_universe = self.universe
+        _shared_observers = self.observers
+        
+        # Split frames into batches
         n_frames = len(frame_indices_to_process)
-        
-        # Estimate Universe creation overhead and calculate optimal batch size
-        # Target: minimize Universe recreations while keeping batches balanced
-        # For small trajectories, use larger minimum batch size
-        if n_frames < 1000:
-            min_batch_size = max(100, n_frames // max(2, n_jobs))
-        else:
-            # For larger trajectories, ensure each worker gets substantial work
-            # to amortize Universe creation overhead
-            min_batch_size = max(200, n_frames // (n_jobs * 2))
-        
-        # Calculate batch size: ensure we don't create too many small batches
-        batch_size = max(min_batch_size, n_frames // n_jobs)
+        batch_size = max(1, n_frames // n_jobs)
         
         batches = []
-        
         for i in range(0, n_frames, batch_size):
             batch_end = min(i + batch_size, n_frames)
-            batches.append((i, batch_end, frame_indices_to_process[i:batch_end]))
+            batch_frame_indices = frame_indices_to_process[i:batch_end]
+            batches.append((batch_frame_indices, i))  # (frame_indices, batch_start_idx)
         
-        # Process batches in parallel
+        print(f"Processing {n_frames} frames in {len(batches)} batches (~{batch_size} per batch, {n_jobs} workers)")
+        print("Workers will share trajectory memory via copy-on-write (no memory duplication)")
+        
+        # Process batches in parallel using fork
         try:
             with mp.Pool(processes=n_jobs) as pool:
-                results = pool.starmap(
-                    _process_frame_batch,
-                    [(top_file, traj_file, traj_format, batch_frames, batch_start_idx, 
-                      self.observers, preloaded_coords) for batch_start_idx, batch_end_idx, batch_frames in batches]
-                )
+                results = pool.starmap(_process_frame_batch_fork, batches)
         except Exception as e:
-            warnings.warn(
-                f"Parallel processing failed: {e}. Falling back to sequential processing."
-            )
-            self._iterate_sequential(start, stop, step, preload_coordinates)
+            warnings.warn(f"Fork-based parallel processing failed: {e}. Falling back to sequential.")
+            _shared_universe = None
+            _shared_observers = None
+            self._iterate_sequential(start, stop, step, False)
             return
+        finally:
+            # Clean up shared state
+            _shared_universe = None
+            _shared_observers = None
         
-        # Merge results from all batches
+        # Merge results
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
-        # Merge observer results from parallel workers
         for batch_results in results:
             if batch_results is None:
                 continue
@@ -697,30 +684,186 @@ class TrajectoryIterator:
                     try:
                         self.observers[observer_idx].merge_results(observer_result)
                     except Exception as e:
-                        warnings.warn(
-                            f"Failed to merge results for observer "
-                            f"{type(self.observers[observer_idx]).__name__}: {e}"
-                        )
+                        warnings.warn(f"Failed to merge results: {e}")
         
         # Notify observers that iteration is complete
+        for observer in self.observers:
+            observer.on_frame_end(self)
+    
+    def _iterate_parallel_coords(self, start: Optional[int] = None,
+                                 stop: Optional[int] = None,
+                                 step: Optional[int] = None,
+                                 n_jobs: int = 2,
+                                 preload_coordinates: bool = False) -> None:
+        """
+        Parallel iteration by extracting coordinates (Windows/macOS or fallback).
+        
+        Extracts coordinates in main process and sends to workers.
+        Less efficient than fork but works on all platforms.
+        """
+        # Get topology file path
+        try:
+            top_file = self.universe.filename
+        except (AttributeError, TypeError) as e:
+            warnings.warn(f"Cannot get topology file path: {e}. Falling back to sequential.")
+            self._iterate_sequential(start, stop, step, preload_coordinates)
+            return
+        
+        # Collect frame indices
+        traj = self.universe.trajectory
+        n_frames_total = len(traj)
+        s = slice(start, stop, step)
+        frame_indices_to_process = list(range(n_frames_total))[s]
+
+        if len(frame_indices_to_process) == 0:
+            return
+        
+        # Extract coordinates in main process
+        print("Extracting coordinates from trajectory (main process)...")
+        all_coords = {}
+        all_times = {}
+        all_frame_nums = {}
+        dimensions = None
+        
+        for frame_idx in frame_indices_to_process:
+            traj[frame_idx]
+            ts = traj.ts
+            all_coords[frame_idx] = np.ascontiguousarray(ts.positions.copy(), dtype=np.float64)
+            all_times[frame_idx] = ts.time
+            all_frame_nums[frame_idx] = ts.frame
+            if dimensions is None and ts.dimensions is not None:
+                dimensions = ts.dimensions.copy()
+        
+        times_to_process = [all_times[idx] for idx in frame_indices_to_process]
+        print(f"Extracted coordinates for {len(all_coords)} frames")
+        
+        # Validate observers
+        unpickleable_observers = []
+        for observer in self.observers:
+            try:
+                pickle.dumps(observer)
+                pickle.loads(pickle.dumps(observer))
+            except Exception as e:
+                unpickleable_observers.append((type(observer).__name__, str(e)))
+        
+        if unpickleable_observers:
+            warnings.warn(
+                f"Observers cannot be pickled:\n" +
+                "\n".join([f"  - {name}: {error}" for name, error in unpickleable_observers]) +
+                "\nFalling back to sequential processing."
+            )
+            self._iterate_sequential(start, stop, step, preload_coordinates)
+            return
+        
+        # Notify observers
+        for observer in self.observers:
+            observer.on_frame_start(self)
+        
+        # Split into batches
+        n_frames = len(frame_indices_to_process)
+        batch_size = max(1, n_frames // n_jobs)
+        
+        batches = []
+        for i in range(0, n_frames, batch_size):
+            batch_end = min(i + batch_size, n_frames)
+            batch_frame_indices = frame_indices_to_process[i:batch_end]
+            batch_coords = {idx: all_coords[idx] for idx in batch_frame_indices}
+            batch_times = {idx: all_times[idx] for idx in batch_frame_indices}
+            batch_frames = {local_i: all_frame_nums[idx] for local_i, idx in enumerate(batch_frame_indices)}
+            batches.append((i, batch_end, batch_coords, batch_times, batch_frames))
+        
+        print(f"Processing {n_frames} frames in {len(batches)} batches (~{batch_size} per batch, {n_jobs} workers)")
+        
+        # Process in parallel
+        try:
+            with mp.Pool(processes=n_jobs) as pool:
+                results = pool.starmap(
+                    _process_frame_batch_with_coords,
+                    [(top_file, batch_coords, batch_times, batch_frames, batch_start_idx, 
+                      self.observers, dimensions) 
+                     for batch_start_idx, _, batch_coords, batch_times, batch_frames in batches]
+                )
+        except Exception as e:
+            warnings.warn(f"Parallel processing failed: {e}. Falling back to sequential.")
+            self._iterate_sequential(start, stop, step, preload_coordinates)
+            return
+        
+        # Merge results
+        self.frame_indices = frame_indices_to_process
+        self.times = times_to_process
+        
+        for batch_results in results:
+            if batch_results is None:
+                continue
+            for observer_idx, observer_result in enumerate(batch_results):
+                if observer_idx < len(self.observers) and observer_result is not None:
+                    try:
+                        self.observers[observer_idx].merge_results(observer_result)
+                    except Exception as e:
+                        warnings.warn(f"Failed to merge results: {e}")
+        
         for observer in self.observers:
             observer.on_frame_end(self)
     
     def _get_trajectory_format(self) -> Optional[str]:
         """Extract trajectory format from Universe."""
         traj_format = None
+        
+        # First, try to get format from trajectory object
         if hasattr(self.universe.trajectory, 'format'):
-            traj_format = self.universe.trajectory.format[0]
-        elif hasattr(self.universe.trajectory, '__class__'):
-            # Try to infer from class name (e.g., MDCRDReader -> MDCRD)
-            class_name = self.universe.trajectory.__class__.__name__
-            # Remove 'Reader' suffix if present
-            if class_name.endswith('Reader'):
-                traj_format = class_name[:-6]
+            format_attr = self.universe.trajectory.format
+            if isinstance(format_attr, (list, tuple)):
+                traj_format = format_attr[0] if format_attr else None
+            elif isinstance(format_attr, str):
+                traj_format = format_attr
+            else:
+                traj_format = str(format_attr)
+        
+        # If format is a single character or seems wrong, try class name
+        if not traj_format or len(traj_format) == 1:
+            if hasattr(self.universe.trajectory, '__class__'):
+                # Try to infer from class name (e.g., MDCRDReader -> MDCRD)
+                class_name = self.universe.trajectory.__class__.__name__
+                # Remove 'Reader' suffix if present
+                if class_name.endswith('Reader'):
+                    traj_format = class_name[:-6]
+                elif 'MDCRD' in class_name.upper():
+                    traj_format = 'MDCRD'
+                elif 'XTC' in class_name.upper():
+                    traj_format = 'XTC'
+                elif 'TRR' in class_name.upper():
+                    traj_format = 'TRR'
+                elif 'DCD' in class_name.upper():
+                    traj_format = 'DCD'
         
         # Handle empty string format
-        if traj_format == '':
+        if traj_format == '' or (traj_format and len(traj_format) == 1):
             traj_format = None
+        
+        # If format is still None or seems wrong, try to infer from filename
+        if not traj_format or len(traj_format) <= 2:
+            try:
+                traj_file = self.universe.trajectory.filename
+                if isinstance(traj_file, (list, tuple)):
+                    traj_file = traj_file[0]
+                traj_file_lower = str(traj_file).lower()
+                # Check filename for format hints
+                if 'mdcrd' in traj_file_lower:
+                    traj_format = 'MDCRD'
+                elif traj_file_lower.endswith('.xtc'):
+                    traj_format = 'XTC'
+                elif traj_file_lower.endswith('.trr'):
+                    traj_format = 'TRR'
+                elif traj_file_lower.endswith('.dcd'):
+                    traj_format = 'DCD'
+                elif traj_file_lower.endswith('.pdb'):
+                    # PDB files might actually be MDCRD if filename contains 'mdcrd'
+                    if 'mdcrd' in traj_file_lower:
+                        traj_format = 'MDCRD'
+                    else:
+                        traj_format = 'PDB'
+            except Exception:
+                pass  # If we can't infer, return None and let MDAnalysis try
         
         return traj_format
     
@@ -772,106 +915,196 @@ class TrajectoryIterator:
         return None
 
 
-def _process_frame_batch(top_file: str, traj_file: str, traj_format: Optional[str],
-                         frame_indices: List[int], batch_start_idx: int, 
-                         observers: List[FrameObserver],
-                         preloaded_coords: Optional[Dict[int, Any]] = None) -> List[Any]:
+def _process_frame_batch_with_coords(
+    top_file: str,
+    batch_coords: Dict[int, np.ndarray],  # {frame_idx: positions_array}
+    batch_times: Dict[int, float],  # {frame_idx: time}
+    batch_frames: Dict[int, int],  # {local_idx: frame_number}
+    batch_start_idx: int,
+    observers: List[FrameObserver],
+    dimensions: Optional[np.ndarray] = None,  # Box dimensions
+) -> List[Any]:
     """
-    Process a batch of frames in a worker process.
+    Process a batch of frames in a worker process using pre-extracted coordinates.
+    
+    This approach avoids re-opening trajectory files in workers. The main process
+    extracts coordinates once and passes them to workers as numpy arrays.
     
     Args:
-        top_file: Topology file path
-        traj_file: Trajectory file path
-        traj_format: Trajectory format (e.g., 'MDCRD', 'XTC', 'TRR', etc.)
-        frame_indices: List of frame indices to process
+        top_file: Topology file path (only topology, no trajectory needed)
+        batch_coords: Dictionary mapping frame indices to position arrays
+        batch_times: Dictionary mapping frame indices to simulation times
+        batch_frames: Dictionary mapping local indices to frame numbers
         batch_start_idx: Starting index for this batch (for frame_idx parameter)
         observers: List of observer instances (will be pickled and recreated)
-        preloaded_coords: Optional dictionary of pre-loaded coordinates (frame_idx -> Timestep)
+        dimensions: Optional box dimensions array
     
     Returns:
         List of observer results (one per observer)
     """
+    import numpy as np
+    
     try:
-        # Try to get cached Universe first (reuse across batches in same worker)
-        u = _get_cached_universe(top_file, traj_file, traj_format)
+        # Get or create cached Universe from topology only
+        worker_id = _get_worker_id()
+        cache_key = (worker_id, top_file)
+        
+        with _cache_lock:
+            u = _universe_cache.get(cache_key)
         
         if u is None:
-            # Create new Universe in worker process with explicit format
-            # If format is provided, use it; otherwise let MDAnalysis try to auto-detect
-            try:
-                if traj_format:
-                    u = mda.Universe(top_file, traj_file, format=traj_format)
-                else:
-                    u = mda.Universe(top_file, traj_file)
-            except (ValueError, OSError) as e:
-                # If format detection fails, try common formats for the file
-                # This is a fallback for cases where format wasn't properly detected
-                if 'format' in str(e).lower() or 'reader' in str(e).lower():
-                    # Try to infer format from filename extension or common patterns
-                    traj_lower = str(traj_file).lower()
-                    if 'mdcrd' in traj_lower or traj_lower.endswith('.mdcrd'):
-                        u = mda.Universe(top_file, traj_file, format='MDCRD')
-                    elif traj_lower.endswith('.xtc'):
-                        u = mda.Universe(top_file, traj_file, format='XTC')
-                    elif traj_lower.endswith('.trr'):
-                        u = mda.Universe(top_file, traj_file, format='TRR')
-                    elif traj_lower.endswith('.dcd'):
-                        u = mda.Universe(top_file, traj_file, format='DCD')
-                    else:
-                        # Re-raise the original error if we can't infer format
-                        raise
-                else:
-                    raise
-            
-            # Cache the Universe for reuse in subsequent batches
-            _cache_universe(u, top_file, traj_file)
+            # Create Universe from topology file only (no trajectory)
+            u = mda.Universe(top_file)
+            with _cache_lock:
+                _universe_cache[cache_key] = u
         
         # Recreate observers in worker process (they need to be pickle-able)
         worker_observers = []
         for observer in observers:
             try:
-                # Try to pickle and unpickle the observer
+                pickled = pickle.dumps(observer)
+                worker_observer = pickle.loads(pickled)
+                worker_observers.append(worker_observer)
+                if worker_observer is None:
+                    warnings.warn(
+                        f"Observer {type(observer).__name__} unpickled to None in worker process"
+                    )
+            except Exception as e:
+                warnings.warn(
+                    f"Observer {type(observer).__name__} is not pickle-able in worker: {e}"
+                )
+                worker_observers.append(None)
+        
+        if all(obs is None for obs in worker_observers):
+            warnings.warn("All observers failed to unpickle. This batch will return None.")
+            return [None] * len(observers)
+        
+        # Create a minimal Timestep-like object to pass to observers
+        class MinimalTimestep:
+            """Minimal timestep object for passing frame info to observers."""
+            def __init__(self, frame_num, time_val, positions, dims):
+                self.frame = frame_num
+                self.time = time_val
+                self._pos = positions
+                self.dimensions = dims
+            
+            @property
+            def positions(self):
+                return self._pos
+        
+        # Process each frame in the batch
+        frame_indices = sorted(batch_coords.keys())
+        for local_idx, frame_idx in enumerate(frame_indices):
+            global_idx = batch_start_idx + local_idx
+            frame_num = batch_frames.get(local_idx, frame_idx)
+            
+            try:
+                # Get coordinates for this frame
+                positions = batch_coords[frame_idx]
+                time_val = batch_times.get(frame_idx, 0.0)
+                
+                # Set positions on the Universe's atoms
+                u.atoms.positions = positions
+                
+                # Create timestep object
+                ts = MinimalTimestep(frame_num, time_val, positions, dimensions)
+                
+                # Notify all observers
+                for worker_observer in worker_observers:
+                    if worker_observer is not None:
+                        try:
+                            worker_observer.on_frame(ts, global_idx, u)
+                        except Exception as e:
+                            warnings.warn(
+                                f"Observer {type(worker_observer).__name__} raised exception "
+                                f"on frame {global_idx}: {e}"
+                            )
+                            import traceback
+                            traceback.print_exc()
+            except Exception as e:
+                warnings.warn(f"Failed to process frame {frame_idx} (global_idx {global_idx}): {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        return worker_observers
+        
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        warnings.warn(f"Error in worker process: {e}\nTraceback:\n{error_traceback}")
+        return [None] * len(observers)
+
+
+def _process_frame_batch_fork(
+    frame_indices: List[int],
+    batch_start_idx: int,
+) -> List[Any]:
+    """
+    Process a batch of frames using fork-based copy-on-write sharing (Linux only).
+    
+    This function accesses the shared Universe directly from the parent process
+    via Linux's copy-on-write memory sharing. Workers only READ the trajectory
+    data, so no memory is actually copied - it's shared.
+    
+    Args:
+        frame_indices: List of frame indices to process in this batch
+        batch_start_idx: Starting index for this batch (for frame_idx parameter)
+    
+    Returns:
+        List of observer results (one per observer)
+    """
+    global _shared_universe, _shared_observers
+    
+    try:
+        # Access shared Universe directly (copy-on-write - no memory copy if read-only)
+        u = _shared_universe
+        if u is None:
+            warnings.warn("Shared universe is None in worker. Fork sharing may have failed.")
+            return [None] * len(_shared_observers) if _shared_observers else []
+        
+        # Recreate observers (they need their own state for results)
+        worker_observers = []
+        for observer in _shared_observers:
+            try:
                 pickled = pickle.dumps(observer)
                 worker_observer = pickle.loads(pickled)
                 worker_observers.append(worker_observer)
             except Exception as e:
-                warnings.warn(
-                    f"Observer {type(observer).__name__} is not pickle-able, "
-                    f"skipping parallel processing: {e}"
-                )
+                warnings.warn(f"Observer {type(observer).__name__} is not pickle-able: {e}")
                 worker_observers.append(None)
         
-        # Note: on_frame_start and on_frame_end are called in the main process,
-        # not in worker processes. Workers only process frames.
+        if all(obs is None for obs in worker_observers):
+            return [None] * len(_shared_observers)
         
-        # Process each frame in the batch
-        for local_idx, frame_num in enumerate(frame_indices):
+        # Process each frame - READ trajectory directly (copy-on-write efficient)
+        for local_idx, frame_idx in enumerate(frame_indices):
             global_idx = batch_start_idx + local_idx
             
-            # Use preloaded coordinates if available, otherwise seek to frame
-            if preloaded_coords is not None and frame_num in preloaded_coords:
-                ts = preloaded_coords[frame_num]
-                # Still need to position Universe for observers that use it
-                u.trajectory[frame_num]
-            else:
-                u.trajectory[frame_num]  # Seek to frame
+            try:
+                # Seek to frame - this only reads data, doesn't modify the trajectory
+                # Copy-on-write means this read is from shared memory
+                u.trajectory[frame_idx]
                 ts = u.trajectory.ts
-            
-            # Notify all observers
-            for worker_observer in worker_observers:
-                if worker_observer is not None:
-                    try:
-                        worker_observer.on_frame(ts, global_idx, u)
-                    except Exception as e:
-                        warnings.warn(
-                            f"Observer {type(worker_observer).__name__} raised exception "
-                            f"on frame {global_idx}: {e}"
-                        )
+                
+                # Notify all observers
+                for worker_observer in worker_observers:
+                    if worker_observer is not None:
+                        try:
+                            worker_observer.on_frame(ts, global_idx, u)
+                        except Exception as e:
+                            warnings.warn(
+                                f"Observer {type(worker_observer).__name__} raised exception "
+                                f"on frame {global_idx}: {e}"
+                            )
+            except Exception as e:
+                warnings.warn(f"Failed to process frame {frame_idx}: {e}")
+                continue
         
-        # Return observer instances (they contain the results)
         return worker_observers
         
     except Exception as e:
-        warnings.warn(f"Error in worker process: {e}")
-        return [None] * len(observers)
+        import traceback
+        warnings.warn(f"Error in fork worker: {e}\n{traceback.format_exc()}")
+        return [None] * len(_shared_observers) if _shared_observers else []
 

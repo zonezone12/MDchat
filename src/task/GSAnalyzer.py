@@ -368,6 +368,20 @@ class GSAnalyzerObserver(FrameObserver):
         self._last_frame: Optional[int] = None
         self._last_time: Optional[float] = None
     
+    def __getstate__(self):
+        """Custom pickling: exclude VolumeAnalyzer instances (they contain Universe references)."""
+        state = self.__dict__.copy()
+        # Remove VolumeAnalyzer instances - they'll be reinitialized in on_frame_start
+        state['volume_analyzer'] = None
+        state['_guest_volume_analyzer'] = None
+        # Reset initialized flag since VolumeAnalyzers will be recreated
+        state['_initialized'] = False
+        return state
+    
+    def __setstate__(self, state):
+        """Custom unpickling: restore state (VolumeAnalyzers will be reinitialized in on_frame_start)."""
+        self.__dict__.update(state)
+    
     def get_selections_needed(self) -> List[str]:
         """Return list of selection strings needed by this observer."""
         selections = list(self.face_sel_list)
@@ -407,6 +421,10 @@ class GSAnalyzerObserver(FrameObserver):
     def _is_guest_inside_volume(self, universe: mda.Universe, frame_idx: int) -> Tuple[bool, List[int], Optional[float]]:
         """Check if guest is inside host using VolumeAnalyzer.
         
+        Args:
+            universe: MDAnalysis Universe (already positioned at current frame)
+            frame_idx: Zero-based frame index (not frame number)
+        
         Returns:
             tuple: (is_inside, guest_indices, volume) where:
                 - is_inside: True if any guest atom is inside host volume
@@ -419,6 +437,7 @@ class GSAnalyzerObserver(FrameObserver):
         try:
             # Get host volume mask (using combined face selection)
             # Pass universe to avoid creating new Universe in compute_frame
+            # Use frame_idx (0-based index) for consistency with in_memory trajectories
             target_vol, cavity_vol, inside_mask, cavities = self._guest_volume_analyzer.compute_frame(
                 frame_idx, return_masks=True, universe=universe
             )
@@ -553,11 +572,93 @@ class GSAnalyzerObserver(FrameObserver):
     
     def on_frame(self, ts: mda.coordinates.base.Timestep, frame_idx: int,
                  universe: mda.Universe) -> None:
-        """Process a single frame during iteration."""
+        """
+        Process a single frame during iteration.
+        
+        Note: Use frame_idx (0-based index) for trajectory access, not ts.frame (frame number).
+        This is especially important when using in_memory=True, where frame numbers might
+        not match indices correctly.
+        """
         self._frame_call_count += 1  # Debug: track calls
+        
+        # Lazy initialization for worker processes (VolumeAnalyzer was excluded from pickling)
+        # This happens when the observer is unpickled in a worker process
         if not self._initialized:
-            warnings.warn(f"GSAnalyzerObserver.on_frame called but observer not initialized (frame {ts.frame})")
-            return
+            try:
+                # Initialize VolumeAnalyzer if needed (for worker processes after unpickling)
+                if self.volume_analyzer is None:
+                    combined_sel = " or ".join([f"({s})" for s in self.face_sel_list])
+                    try:
+                        # Ensure universe is at a valid frame before initializing
+                        if len(universe.trajectory) > 0:
+                            universe.trajectory[0]
+                        # Validate selection before creating VolumeAnalyzer
+                        test_ag = universe.select_atoms(combined_sel)
+                        if len(test_ag) == 0:
+                            warnings.warn(f"Selection '{combined_sel}' returned no atoms. VolumeAnalyzer will use edge-based volume.")
+                            self.volume_analyzer = None
+                        else:
+                            # Ensure coordinates are properly formatted
+                            coords = test_ag.positions
+                            if not isinstance(coords, np.ndarray):
+                                coords = np.asarray(coords, dtype=np.float64, order='C')
+                            elif not coords.flags['C_CONTIGUOUS']:
+                                coords = np.ascontiguousarray(coords, dtype=np.float64)
+                            
+                            self.volume_analyzer = VolumeAnalyzer(
+                                universe=universe,
+                                selection=combined_sel,
+                                spacing=1.0,
+                                probe_radius=1.4
+                            )
+                    except Exception as e:
+                        warnings.warn(f"Failed to initialize VolumeAnalyzer in worker: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        self.volume_analyzer = None
+                
+                # Initialize guest volume analyzer if needed
+                if self.guest_sel and self.guest_tracking_method == "volume" and self._guest_volume_analyzer is None:
+                    combined_sel = " or ".join([f"({s})" for s in self.face_sel_list])
+                    try:
+                        self._guest_volume_analyzer = VolumeAnalyzer(
+                            universe=universe,
+                            selection=combined_sel,
+                            spacing=0.5,
+                            probe_radius=1.4
+                        )
+                    except Exception as e:
+                        warnings.warn(f"Failed to initialize guest VolumeAnalyzer in worker: {e}")
+                        self.guest_tracking_method = "distance"
+                        self._guest_volume_analyzer = None
+                
+                # Calculate distance threshold if needed
+                if self.guest_sel and self.guest_distance_threshold is None and self.guest_tracking_method == "distance":
+                    try:
+                        combined_sel = " or ".join([f"({s})" for s in self.face_sel_list])
+                        host = universe.select_atoms(combined_sel)
+                        if len(host) > 0:
+                            host_coords = host.positions
+                            host_com = host.center_of_geometry()
+                            max_dist = np.max(np.linalg.norm(host_coords - host_com, axis=1))
+                            self.guest_distance_threshold = max_dist * 0.8
+                        else:
+                            self.guest_distance_threshold = 10.0
+                    except Exception as e:
+                        warnings.warn(f"Failed to calculate distance threshold in worker: {e}")
+                        self.guest_distance_threshold = 10.0
+                
+                # Initialize rows if not already done
+                if not hasattr(self, 'rows') or self.rows is None:
+                    self.rows = []
+                
+                self._initialized = True
+            except Exception as e:
+                # Even if initialization partially fails, mark as initialized to avoid infinite retries
+                warnings.warn(f"Error during lazy initialization in worker: {e}. Continuing with partial initialization.")
+                if not hasattr(self, 'rows') or self.rows is None:
+                    self.rows = []
+                self._initialized = True
         
         # Get face centers (universe is already at current frame)
         fcent = []
@@ -624,7 +725,8 @@ class GSAnalyzerObserver(FrameObserver):
                     
                     # Track guest entry/exit events
                     if self.guest_tracking_method == "volume" and self._guest_volume_analyzer is not None:
-                        guest_is_inside, current_guest_indices, volume_from_guest_tracking = self._is_guest_inside_volume(universe, ts.frame)
+                        # Use frame_idx (0-based index) instead of ts.frame for consistency with in_memory trajectories
+                        guest_is_inside, current_guest_indices, volume_from_guest_tracking = self._is_guest_inside_volume(universe, frame_idx)
                     else:
                         guest_is_inside, current_guest_indices = self._is_guest_inside_distance(universe, cube_center)
                     
@@ -666,13 +768,15 @@ class GSAnalyzerObserver(FrameObserver):
                 volume = volume_from_guest_tracking
             elif self.volume_analyzer is not None:
                 try:
-                    # Pass universe to avoid creating new Universe in compute_frame
+                    # Use frame_idx (0-based index) instead of ts.frame (frame number)
+                    # This is important for in_memory trajectories where frame numbers
+                    # might not match indices correctly
                     target_volume, cavity_volume = self.volume_analyzer.compute_frame(
-                        ts.frame, return_masks=False, universe=universe
+                        frame_idx, return_masks=False, universe=universe
                     )
                     volume = target_volume + cavity_volume
                 except Exception as e:
-                    warnings.warn(f"VolumeAnalyzer failed for frame {ts.frame}: {e}. Using edge-based volume.")
+                    warnings.warn(f"VolumeAnalyzer failed for frame {frame_idx} (frame number {ts.frame}): {e}. Using edge-based volume.")
                     volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
             else:
                 volume = edge_mean ** 3 if not np.isnan(edge_mean) else np.nan
