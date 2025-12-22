@@ -579,13 +579,9 @@ class VolumeAnalyzer:
         # Use provided universe if available (more efficient)
         if universe is not None:
             u = universe
-            # Verify frame_index is valid
-            if frame_index < 0 or frame_index >= len(u.trajectory):
-                raise ValueError(
-                    f"frame_index {frame_index} out of range "
-                    f"(trajectory has {len(u.trajectory)} frames)"
-                )
-            u.trajectory[frame_index]
+            # When universe is provided externally (e.g., from TrajectoryIterator worker),
+            # the positions are already set correctly - don't seek by frame_index
+            # as the in-memory trajectory may only have 1 frame
         else:
             # Get universe
             u = self._get_universe(frame_index)
