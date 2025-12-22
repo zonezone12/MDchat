@@ -221,7 +221,7 @@ class TrajectoryIterator:
         >>> iterator.iterate(dask_client=client)  # Use cluster
     """
     
-    def __init__(self, universe: mda.Universe, use_dask: bool = True):
+    def __init__(self, universe: mda.Universe, use_dask: bool = False):
         """
         Initialize TrajectoryIterator.
         
@@ -955,6 +955,14 @@ def _process_frame_batch_with_coords(
         if u is None:
             # Create Universe from topology file only (no trajectory)
             u = mda.Universe(top_file)
+            
+            # Load an in-memory trajectory so we can set positions
+            # Use the first frame's coordinates to initialize
+            first_frame_idx = min(batch_coords.keys())
+            first_coords = batch_coords[first_frame_idx]
+            # Create a single-frame in-memory trajectory
+            u.load_new(first_coords[np.newaxis, :, :], format='MEMORY')
+            
             with _cache_lock:
                 _universe_cache[cache_key] = u
         
@@ -1107,4 +1115,3 @@ def _process_frame_batch_fork(
         import traceback
         warnings.warn(f"Error in fork worker: {e}\n{traceback.format_exc()}")
         return [None] * len(_shared_observers) if _shared_observers else []
-
