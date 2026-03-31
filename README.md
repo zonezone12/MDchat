@@ -552,3 +552,12 @@ See `ngl_traj_plot.ipynb` for interactive trajectory visualization examples. The
 - Loading and visualizing trajectories
 - Endpoint visualization
 - Volume analysis integration
+
+
+## MDchat
+
+git clone https://github.com/zonezone/MD_analysis
+cd MD_analysis
+pip install -e ".[chat]"       # installs MDChat + analysis deps
+cp .env.example .env           # paste API key
+mdchat                         # run from terminal
