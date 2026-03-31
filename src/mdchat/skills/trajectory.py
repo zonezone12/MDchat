@@ -60,11 +60,31 @@ class LoadTrajectorySkill(Skill):
                     summary=f"Cannot load trajectory — file not found: {f}",
                 )
 
-        u = mda.Universe(topology, trajectory)
+        try:
+            u = mda.Universe(topology, trajectory)
+        except Exception as exc:
+            return SkillResult(
+                success=False,
+                error=f"MDAnalysis could not read the files: {exc}",
+                summary=(
+                    f"Failed to load trajectory. MDAnalysis error: {exc}. "
+                    "Check that the topology and trajectory formats are compatible."
+                ),
+            )
 
         if do_align:
-            aligned = AlignedTrajectory(u, align_sel=align_sel)
-            u = aligned.get_aligned_universe()
+            try:
+                aligned = AlignedTrajectory(u, align_sel=align_sel)
+                u = aligned.get_aligned_universe()
+            except Exception as exc:
+                return SkillResult(
+                    success=False,
+                    error=f"Alignment failed: {exc}",
+                    summary=(
+                        f"Trajectory loaded but alignment failed: {exc}. "
+                        f"Try a different align_selection or set align=false."
+                    ),
+                )
 
         context.set("universe", u)
         context.set("topology_path", topology)

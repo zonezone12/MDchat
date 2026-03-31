@@ -118,7 +118,16 @@ class ChatEngine:
         self.callback.on_skill_start(tool_name, tool_input)
         logger.info("Executing skill '%s' with params: %s", tool_name, tool_input)
 
-        result: SkillResult = skill.execute(self.context, **tool_input)
+        try:
+            result: SkillResult = skill.execute(self.context, **tool_input)
+        except Exception as exc:
+            logger.exception("Skill '%s' raised an unhandled exception", tool_name)
+            result = SkillResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                summary=f"Skill '{tool_name}' failed with an unexpected error: {exc}",
+            )
+
         self.context.record_execution(tool_name)
 
         if result.artifacts:
