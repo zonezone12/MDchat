@@ -15,6 +15,7 @@ except ImportError:
 
 from .endpoints_finder import EndpointsFinder  # type: ignore
 from ..TrajectoryIterator import FrameObserver, TrajectoryIterator  # type: ignore
+from ..Aggregator import ResultsGroup  # type: ignore
 
 if TYPE_CHECKING:
     from ..FrameGatherer import FrameGatherer  # type: ignore
@@ -566,6 +567,9 @@ class EndpointAnalyzerObserver(FrameObserver):
     
     Processes endpoint distances during trajectory iteration without storing
     coordinates in memory.
+    
+    Uses ResultsGroup for declarative result aggregation in parallel processing.
+    Results are stored in self.results['all_pairs'].
     """
     
     def __init__(
@@ -580,18 +584,30 @@ class EndpointAnalyzerObserver(FrameObserver):
             residue_sel_list: List of residue selection strings
             endpoints_finder: Optional EndpointsFinder instance
         """
+        super().__init__()  # Initialize results dict from FrameObserver
+        
         self.residue_sel_list = residue_sel_list
         self.endpoints_finder = endpoints_finder or EndpointsFinder()
         
-        # Storage for results
+        # Storage for results (using self.results for ResultsGroup pattern)
         self.stored_ep_indices: List[List[int]] = []
-        self.all_pairs: dict = {}
+        self.results['all_pairs'] = {}  # Store in results dict for aggregation
         self.n_res: int = 0
         self.n_frames: int = 0
         self._initialized = False
         
         # Reference to analyzer for utility methods
         self._analyzer = EndpointAnalyzer()
+    
+    @property
+    def all_pairs(self) -> dict:
+        """Property to access all_pairs from results dict for backward compatibility."""
+        return self.results.get('all_pairs', {})
+    
+    @all_pairs.setter
+    def all_pairs(self, value: dict) -> None:
+        """Setter for all_pairs to store in results dict."""
+        self.results['all_pairs'] = value
     
     def get_selections_needed(self) -> List[str]:
         """Return list of selection strings needed by this observer."""
@@ -698,8 +714,19 @@ class EndpointAnalyzerObserver(FrameObserver):
     
     def on_frame_end(self, iterator: TrajectoryIterator) -> None:
         """Finalize results after iteration."""
-        # Results are already stored in self.all_pairs
+        # Results are already stored in self.results['all_pairs']
         pass
+    
+    def _get_aggregator(self) -> ResultsGroup:
+        """
+        Return ResultsGroup for declarative result aggregation.
+        
+        Uses dict_merge_nonnan for all_pairs to merge non-NaN values
+        from worker results.
+        """
+        return ResultsGroup(lookup={
+            'all_pairs': ResultsGroup.dict_merge_nonnan,
+        })
     
     def merge_results(self, other: 'EndpointAnalyzerObserver') -> None:
         """

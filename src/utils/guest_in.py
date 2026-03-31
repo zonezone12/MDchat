@@ -20,12 +20,16 @@ try:
 except ImportError:
     Client = None  # type: ignore
 
-from src.TrajectoryIterator import TrajectoryIterator, FrameObserver
+from src.TrajectoryIterator import TrajectoryIterator, FrameObserver, ResultsGroup
 
 
 class GuestEnteringObserver(FrameObserver):
     """
     Observer to track when a guest enters a host during trajectory iteration.
+    
+    Uses ResultsGroup for declarative result aggregation in parallel processing.
+    Results are stored in self.results dict with keys: 'entry_events', 'exit_events',
+    'entry_frame', 'first_frame', 'first_time', 'last_frame', 'last_time'.
     """
     
     def __init__(self, host_sel: str, guest_sel: str, 
@@ -44,14 +48,15 @@ class GuestEnteringObserver(FrameObserver):
             distance_threshold: Distance threshold in Angstrom (if None, auto-calculate)
             use_volume_analyzer: If True, use VolumeAnalyzer for more accurate detection
         """
+        super().__init__()  # Initialize results dict from FrameObserver
+        
         self.host_sel = host_sel
         self.guest_sel = guest_sel
         self.method = method
         self.distance_threshold = distance_threshold
         self.use_volume_analyzer = use_volume_analyzer
         
-        # State tracking
-        self.entry_frame: Optional[int] = None  # First entry frame (for backward compatibility)
+        # State tracking (non-result state)
         self._was_inside = False
         self._volume_analyzer = None
         self._initialized = False
@@ -59,15 +64,109 @@ class GuestEnteringObserver(FrameObserver):
         # Track which guest atom indices are currently inside
         self._inside_guest_indices: set = set()
         
-        # Detailed tracking for in/out durations
-        self.entry_events: List[Dict] = []  # List of entry events: {frame, time, guest_indices}
-        self.exit_events: List[Dict] = []   # List of exit events: {frame, time, guest_indices}
+        # Detailed tracking for in/out durations (using self.results for ResultsGroup pattern)
+        self.results['entry_events'] = []  # List of entry events: {frame, time, guest_indices}
+        self.results['exit_events'] = []   # List of exit events: {frame, time, guest_indices}
+        self.results['entry_frame'] = None  # First entry frame (for backward compatibility)
+        self.results['first_frame'] = None
+        self.results['first_time'] = None
+        self.results['last_frame'] = None
+        self.results['last_time'] = None
+        
         self._current_entry_frame: Optional[int] = None
         self._current_entry_time: Optional[float] = None
-        self._first_frame: Optional[int] = None
-        self._first_time: Optional[float] = None
-        self._last_frame: Optional[int] = None
-        self._last_time: Optional[float] = None
+    
+    # ===== Properties for backward compatibility =====
+    
+    @property
+    def entry_frame(self) -> Optional[int]:
+        """Property to access entry_frame from results dict for backward compatibility."""
+        return self.results.get('entry_frame')
+    
+    @entry_frame.setter
+    def entry_frame(self, value: Optional[int]) -> None:
+        """Setter for entry_frame to store in results dict."""
+        self.results['entry_frame'] = value
+    
+    @property
+    def entry_events(self) -> List[Dict]:
+        """Property to access entry_events from results dict for backward compatibility."""
+        return self.results.get('entry_events', [])
+    
+    @entry_events.setter
+    def entry_events(self, value: List[Dict]) -> None:
+        """Setter for entry_events to store in results dict."""
+        self.results['entry_events'] = value
+    
+    @property
+    def exit_events(self) -> List[Dict]:
+        """Property to access exit_events from results dict for backward compatibility."""
+        return self.results.get('exit_events', [])
+    
+    @exit_events.setter
+    def exit_events(self, value: List[Dict]) -> None:
+        """Setter for exit_events to store in results dict."""
+        self.results['exit_events'] = value
+    
+    @property
+    def _first_frame(self) -> Optional[int]:
+        """Property to access _first_frame from results dict for backward compatibility."""
+        return self.results.get('first_frame')
+    
+    @_first_frame.setter
+    def _first_frame(self, value: Optional[int]) -> None:
+        """Setter for _first_frame to store in results dict."""
+        self.results['first_frame'] = value
+    
+    @property
+    def _first_time(self) -> Optional[float]:
+        """Property to access _first_time from results dict for backward compatibility."""
+        return self.results.get('first_time')
+    
+    @_first_time.setter
+    def _first_time(self, value: Optional[float]) -> None:
+        """Setter for _first_time to store in results dict."""
+        self.results['first_time'] = value
+    
+    @property
+    def _last_frame(self) -> Optional[int]:
+        """Property to access _last_frame from results dict for backward compatibility."""
+        return self.results.get('last_frame')
+    
+    @_last_frame.setter
+    def _last_frame(self, value: Optional[int]) -> None:
+        """Setter for _last_frame to store in results dict."""
+        self.results['last_frame'] = value
+    
+    @property
+    def _last_time(self) -> Optional[float]:
+        """Property to access _last_time from results dict for backward compatibility."""
+        return self.results.get('last_time')
+    
+    @_last_time.setter
+    def _last_time(self, value: Optional[float]) -> None:
+        """Setter for _last_time to store in results dict."""
+        self.results['last_time'] = value
+    
+    def _get_aggregator(self) -> ResultsGroup:
+        """
+        Return ResultsGroup for declarative result aggregation.
+        
+        Defines how results from parallel workers should be merged:
+        - entry_events/exit_events: Extend and sort by frame
+        - entry_frame: Take minimum (first entry)
+        - first_frame/first_time: Take minimum
+        - last_frame/last_time: Take maximum
+        """
+        return ResultsGroup(lookup={
+            'entry_events': ResultsGroup.list_extend_sorted('frame'),
+            'exit_events': ResultsGroup.list_extend_sorted('frame'),
+            'entry_frame': ResultsGroup.min_value,
+            'first_frame': ResultsGroup.min_value,
+            'first_time': ResultsGroup.min_value,
+            'last_frame': ResultsGroup.max_value,
+            'last_time': ResultsGroup.max_value,
+        })
     
     def get_selections_needed(self) -> list[str]:
         """Return list of selection strings needed by this observer."""
@@ -286,35 +385,20 @@ class GuestEnteringObserver(FrameObserver):
         """
         Merge results from another observer instance (used in parallel processing).
         
+        This is the legacy merge method. Prefer using _get_aggregator() for new code.
+        When _get_aggregator() is defined, the TrajectoryIterator will use it instead.
+        This method is kept for backward compatibility.
+        
         Args:
             other: Another GuestEnteringObserver instance with results to merge
         """
         if other is None:
             return
         
-        # Merge entry events (sorted by frame)
-        self.entry_events.extend(other.entry_events)
-        self.entry_events.sort(key=lambda x: x['frame'])
-        
-        # Merge exit events (sorted by frame)
-        self.exit_events.extend(other.exit_events)
-        self.exit_events.sort(key=lambda x: x['frame'])
-        
-        # Update first entry frame if needed
-        if other.entry_frame is not None:
-            if self.entry_frame is None or other.entry_frame < self.entry_frame:
-                self.entry_frame = other.entry_frame
-        
-        # Update first/last frame and time
-        if other._first_frame is not None:
-            if self._first_frame is None or other._first_frame < self._first_frame:
-                self._first_frame = other._first_frame
-                self._first_time = other._first_time
-        
-        if other._last_frame is not None:
-            if self._last_frame is None or other._last_frame > self._last_frame:
-                self._last_frame = other._last_frame
-                self._last_time = other._last_time
+        # Use the aggregator to merge results if other has results dict
+        if hasattr(other, 'results'):
+            aggregator = self._get_aggregator()
+            aggregator.merge(self.results, other.results)
     
     def get_residence_stats(self) -> Dict:
         """

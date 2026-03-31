@@ -15,6 +15,19 @@ prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
 crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
 first_u= mda.Universe(prmtop, crd,format="TRJ")
 
+
+sel=first_u.select_atoms('resid 6')
+mol = sel.convert_to("RDKIT")
+from src.utils import RingCenterCalculator
+calc = RingCenterCalculator()
+rings = calc.find_all_rings(mol)
+print(rings)
+substructures = calc.find_and_map_substructures(mol, sel)
+print(substructures)
+sub_centers = calc.calculate_substructure_center(sel.positions, [sub.rdkit_indices for sub in substructures])
+print(sub_centers)
+
+
 from src.Plotter import Plotter
 Plotter().plot_residue_endpoints(first_u, 'resid 1', 'BMMpM_endpoints.png')
 

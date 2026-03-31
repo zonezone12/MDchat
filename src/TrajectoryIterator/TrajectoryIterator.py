@@ -25,9 +25,11 @@ except ImportError:
     sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
     raise
 
+# Import ResultsGroup from separate Aggregator module
+from ..Aggregator import ResultsGroup
+
 # Try to import Dask Distributed (preferred)
 try:
-    import dask
     from dask.distributed import Client, as_completed
     DASK_AVAILABLE = True
 except ImportError:
@@ -144,8 +146,19 @@ def _clear_worker_cache(worker_id: Optional[str] = None) -> None:
                 del _universe_cache[key]
 
 
+
 class FrameObserver(ABC):
-    """Abstract base class for frame observers in the Observer Pattern."""
+    """
+    Abstract base class for frame observers in the Observer Pattern.
+    
+    Observers can store results in the `results` dict and define aggregation
+    strategies via `_get_aggregator()` for parallel processing. Alternatively,
+    they can override `merge_results()` for custom merge logic.
+    """
+    
+    def __init__(self):
+        """Initialize observer with empty results dictionary."""
+        self.results: Dict[str, Any] = {}
     
     @abstractmethod
     def on_frame_start(self, iterator: 'TrajectoryIterator') -> None:
@@ -177,17 +190,43 @@ class FrameObserver(ABC):
         """
         return []
     
+    def _get_aggregator(self) -> Optional[ResultsGroup]:
+        """
+        Return a ResultsGroup defining how to merge results from parallel workers.
+        
+        Override this method to define declarative aggregation strategies for
+        the results stored in self.results. If None is returned, the legacy
+        merge_results() method will be used instead.
+        
+        Example:
+            def _get_aggregator(self):
+                return ResultsGroup(lookup={
+                    'rows': ResultsGroup.list_extend_sorted('frame'),
+                    'frame_count': ResultsGroup.sum_values,
+                })
+        
+        Returns:
+            ResultsGroup instance with aggregation lookup, or None for legacy behavior
+        """
+        return None
+    
     def merge_results(self, other: 'FrameObserver') -> None:
         """
         Merge results from another observer instance (used in parallel processing).
         
-        By default, this does nothing. Subclasses should override this method
-        if they need to merge state from parallel workers.
+        This method is called when _get_aggregator() returns None. If an aggregator
+        is defined, it will be used instead of this method.
+        
+        By default, this uses the aggregator if available, otherwise does nothing.
+        Subclasses should either override _get_aggregator() (preferred) or this method.
         
         Args:
             other: Another observer instance with results to merge
         """
-        pass
+        # Try to use aggregator if available
+        aggregator = self._get_aggregator()
+        if aggregator is not None and hasattr(other, 'results'):
+            aggregator.merge(self.results, other.results)
 
 
 class TrajectoryIterator:
@@ -548,14 +587,21 @@ class TrajectoryIterator:
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
-        # Merge observer results from parallel workers
+        # Merge observer results from parallel workers using ResultsGroup or legacy method
         for batch_results in results:
             if batch_results is None:
                 continue
             for observer_idx, observer_result in enumerate(batch_results):
                 if observer_idx < len(self.observers) and observer_result is not None:
                     try:
-                        self.observers[observer_idx].merge_results(observer_result)
+                        observer = self.observers[observer_idx]
+                        aggregator = observer._get_aggregator()
+                        if aggregator is not None and hasattr(observer_result, 'results'):
+                            # Use declarative ResultsGroup aggregation
+                            aggregator.merge(observer.results, observer_result.results)
+                        else:
+                            # Fall back to legacy merge_results method
+                            observer.merge_results(observer_result)
                     except Exception as e:
                         warnings.warn(
                             f"Failed to merge results for observer "
@@ -672,7 +718,7 @@ class TrajectoryIterator:
             _shared_universe = None
             _shared_observers = None
         
-        # Merge results
+        # Merge results using ResultsGroup or legacy method
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
@@ -682,7 +728,14 @@ class TrajectoryIterator:
             for observer_idx, observer_result in enumerate(batch_results):
                 if observer_idx < len(self.observers) and observer_result is not None:
                     try:
-                        self.observers[observer_idx].merge_results(observer_result)
+                        observer = self.observers[observer_idx]
+                        aggregator = observer._get_aggregator()
+                        if aggregator is not None and hasattr(observer_result, 'results'):
+                            # Use declarative ResultsGroup aggregation
+                            aggregator.merge(observer.results, observer_result.results)
+                        else:
+                            # Fall back to legacy merge_results method
+                            observer.merge_results(observer_result)
                     except Exception as e:
                         warnings.warn(f"Failed to merge results: {e}")
         
@@ -788,7 +841,7 @@ class TrajectoryIterator:
             self._iterate_sequential(start, stop, step, preload_coordinates)
             return
         
-        # Merge results
+        # Merge results using ResultsGroup or legacy method
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
@@ -798,7 +851,14 @@ class TrajectoryIterator:
             for observer_idx, observer_result in enumerate(batch_results):
                 if observer_idx < len(self.observers) and observer_result is not None:
                     try:
-                        self.observers[observer_idx].merge_results(observer_result)
+                        observer = self.observers[observer_idx]
+                        aggregator = observer._get_aggregator()
+                        if aggregator is not None and hasattr(observer_result, 'results'):
+                            # Use declarative ResultsGroup aggregation
+                            aggregator.merge(observer.results, observer_result.results)
+                        else:
+                            # Fall back to legacy merge_results method
+                            observer.merge_results(observer_result)
                     except Exception as e:
                         warnings.warn(f"Failed to merge results: {e}")
         

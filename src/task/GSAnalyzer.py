@@ -18,7 +18,7 @@ except ImportError as e:
 
 from sklearn.cluster import KMeans
 from src.VolumeAnalyzer import VolumeAnalyzer
-from src.TrajectoryIterator import FrameObserver, TrajectoryIterator
+from src.TrajectoryIterator import FrameObserver, TrajectoryIterator, ResultsGroup
 
 # Import Client for type hints (optional dependency)
 try:
@@ -314,6 +314,11 @@ class GSAnalyzerObserver(FrameObserver):
     Processes nanocube metrics during trajectory iteration without storing
     coordinates in memory. Includes integrated guest tracking functionality
     from guest_in.py for monitoring guest entry/exit events and residence times.
+    
+    Uses ResultsGroup for declarative result aggregation in parallel processing.
+    Results are stored in self.results dict with keys: 'rows', 'entry_events',
+    'exit_events', 'first_frame', 'last_frame', 'first_time', 'last_time',
+    'frame_call_count', 'frame_exception_count'.
     """
     
     def __init__(
@@ -339,6 +344,8 @@ class GSAnalyzerObserver(FrameObserver):
             guest_distance_threshold: Distance threshold in Angstrom for distance method.
                                     If None, automatically calculated from host size.
         """
+        super().__init__()  # Initialize results dict from FrameObserver
+        
         self.face_sel_list = face_sel_list
         self.corner_sel_list = corner_sel_list or []
         self.guest_sel = guest_sel
@@ -348,12 +355,19 @@ class GSAnalyzerObserver(FrameObserver):
         self.guest_tracking_method = guest_tracking_method
         self.guest_distance_threshold = guest_distance_threshold
         
-        # Storage for results
-        self.rows: List[dict] = []
+        # Storage for results (using self.results for ResultsGroup pattern)
+        self.results['rows'] = []
+        self.results['entry_events'] = []
+        self.results['exit_events'] = []
+        self.results['first_frame'] = None
+        self.results['first_time'] = None
+        self.results['last_frame'] = None
+        self.results['last_time'] = None
+        self.results['frame_call_count'] = 0
+        self.results['frame_exception_count'] = 0
+        
         self.volume_analyzer: Optional[VolumeAnalyzer] = None
         self._initialized = False
-        self._frame_call_count = 0  # Debug: track how many times on_frame is called
-        self._frame_exception_count = 0  # Debug: track exceptions in on_frame
         
         # Reference to analyzer for utility methods
         self._analyzer = GSAnalyzer()
@@ -361,12 +375,98 @@ class GSAnalyzerObserver(FrameObserver):
         # Guest tracking state (integrated from GuestEnteringObserver)
         self._guest_volume_analyzer: Optional[VolumeAnalyzer] = None
         self._inside_guest_indices: set = set()
-        self.entry_events: List[Dict] = []
-        self.exit_events: List[Dict] = []
-        self._first_frame: Optional[int] = None
-        self._first_time: Optional[float] = None
-        self._last_frame: Optional[int] = None
-        self._last_time: Optional[float] = None
+    
+    # ===== Properties for backward compatibility =====
+    
+    @property
+    def rows(self) -> List[dict]:
+        """Property to access rows from results dict for backward compatibility."""
+        return self.results.get('rows', [])
+    
+    @rows.setter
+    def rows(self, value: List[dict]) -> None:
+        """Setter for rows to store in results dict."""
+        self.results['rows'] = value
+    
+    @property
+    def entry_events(self) -> List[Dict]:
+        """Property to access entry_events from results dict for backward compatibility."""
+        return self.results.get('entry_events', [])
+    
+    @entry_events.setter
+    def entry_events(self, value: List[Dict]) -> None:
+        """Setter for entry_events to store in results dict."""
+        self.results['entry_events'] = value
+    
+    @property
+    def exit_events(self) -> List[Dict]:
+        """Property to access exit_events from results dict for backward compatibility."""
+        return self.results.get('exit_events', [])
+    
+    @exit_events.setter
+    def exit_events(self, value: List[Dict]) -> None:
+        """Setter for exit_events to store in results dict."""
+        self.results['exit_events'] = value
+    
+    @property
+    def _first_frame(self) -> Optional[int]:
+        """Property to access _first_frame from results dict for backward compatibility."""
+        return self.results.get('first_frame')
+    
+    @_first_frame.setter
+    def _first_frame(self, value: Optional[int]) -> None:
+        """Setter for _first_frame to store in results dict."""
+        self.results['first_frame'] = value
+    
+    @property
+    def _first_time(self) -> Optional[float]:
+        """Property to access _first_time from results dict for backward compatibility."""
+        return self.results.get('first_time')
+    
+    @_first_time.setter
+    def _first_time(self, value: Optional[float]) -> None:
+        """Setter for _first_time to store in results dict."""
+        self.results['first_time'] = value
+    
+    @property
+    def _last_frame(self) -> Optional[int]:
+        """Property to access _last_frame from results dict for backward compatibility."""
+        return self.results.get('last_frame')
+    
+    @_last_frame.setter
+    def _last_frame(self, value: Optional[int]) -> None:
+        """Setter for _last_frame to store in results dict."""
+        self.results['last_frame'] = value
+    
+    @property
+    def _last_time(self) -> Optional[float]:
+        """Property to access _last_time from results dict for backward compatibility."""
+        return self.results.get('last_time')
+    
+    @_last_time.setter
+    def _last_time(self, value: Optional[float]) -> None:
+        """Setter for _last_time to store in results dict."""
+        self.results['last_time'] = value
+    
+    @property
+    def _frame_call_count(self) -> int:
+        """Property to access _frame_call_count from results dict for backward compatibility."""
+        return self.results.get('frame_call_count', 0)
+    
+    @_frame_call_count.setter
+    def _frame_call_count(self, value: int) -> None:
+        """Setter for _frame_call_count to store in results dict."""
+        self.results['frame_call_count'] = value
+    
+    @property
+    def _frame_exception_count(self) -> int:
+        """Property to access _frame_exception_count from results dict for backward compatibility."""
+        return self.results.get('frame_exception_count', 0)
+    
+    @_frame_exception_count.setter
+    def _frame_exception_count(self, value: int) -> None:
+        """Setter for _frame_exception_count to store in results dict."""
+        self.results['frame_exception_count'] = value
     
     def __getstate__(self):
         """Custom pickling: exclude VolumeAnalyzer instances (they contain Universe references)."""
@@ -381,6 +481,29 @@ class GSAnalyzerObserver(FrameObserver):
     def __setstate__(self, state):
         """Custom unpickling: restore state (VolumeAnalyzers will be reinitialized in on_frame_start)."""
         self.__dict__.update(state)
+    
+    def _get_aggregator(self) -> ResultsGroup:
+        """
+        Return ResultsGroup for declarative result aggregation.
+        
+        Defines how results from parallel workers should be merged:
+        - rows: Extend and sort by frame
+        - entry_events/exit_events: Extend and sort by frame
+        - first_frame/first_time: Take minimum
+        - last_frame/last_time: Take maximum
+        - frame_call_count/frame_exception_count: Sum
+        """
+        return ResultsGroup(lookup={
+            'rows': ResultsGroup.list_extend_sorted('frame'),
+            'entry_events': ResultsGroup.list_extend_sorted('frame'),
+            'exit_events': ResultsGroup.list_extend_sorted('frame'),
+            'first_frame': ResultsGroup.min_value,
+            'first_time': ResultsGroup.min_value,
+            'last_frame': ResultsGroup.max_value,
+            'last_time': ResultsGroup.max_value,
+            'frame_call_count': ResultsGroup.sum_values,
+            'frame_exception_count': ResultsGroup.sum_values,
+        })
     
     def get_selections_needed(self) -> List[str]:
         """Return list of selection strings needed by this observer."""
@@ -983,39 +1106,22 @@ class GSAnalyzerObserver(FrameObserver):
         """
         Merge results from another observer instance (used in parallel processing).
         
+        This is the legacy merge method. Prefer using _get_aggregator() for new code.
+        When _get_aggregator() is defined, the TrajectoryIterator will use it instead.
+        This method is kept for backward compatibility.
+        
         Args:
             other: Another GSAnalyzerObserver instance with results to merge
         """
         if other is None:
             return
         
-        # Merge rows
-        n_rows_before = len(self.rows)
-        self.rows.extend(other.rows)
-        self.rows.sort(key=lambda x: x.get('frame', 0))
-        
-        # Update debug counters
-        self._frame_call_count += getattr(other, '_frame_call_count', 0)
-        self._frame_exception_count += getattr(other, '_frame_exception_count', 0)
-        
-        # Debug output
-        if len(other.rows) > 0:
-            print(f"GSAnalyzerObserver: Merged {len(other.rows)} rows from worker (total: {len(self.rows)})")
-        
-        # Merge guest tracking events
-        self.entry_events.extend(other.entry_events)
-        self.entry_events.sort(key=lambda x: x['frame'])
-        
-        self.exit_events.extend(other.exit_events)
-        self.exit_events.sort(key=lambda x: x['frame'])
-        
-        # Update first/last frame and time
-        if other._first_frame is not None:
-            if self._first_frame is None or other._first_frame < self._first_frame:
-                self._first_frame = other._first_frame
-                self._first_time = other._first_time
-        
-        if other._last_frame is not None:
-            if self._last_frame is None or other._last_frame > self._last_frame:
-                self._last_frame = other._last_frame
-                self._last_time = other._last_time
+        # Use the aggregator to merge results if other has results dict
+        if hasattr(other, 'results'):
+            aggregator = self._get_aggregator()
+            n_rows_before = len(self.rows)
+            aggregator.merge(self.results, other.results)
+            
+            # Debug output
+            if len(self.rows) > n_rows_before:
+                print(f"GSAnalyzerObserver: Merged {len(self.rows) - n_rows_before} rows from worker (total: {len(self.rows)})")
