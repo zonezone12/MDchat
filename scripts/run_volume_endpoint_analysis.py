@@ -8,22 +8,18 @@ This script focuses on:
 3. Correlation analysis between endpoint distances and volume
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import os
 import warnings
 
 import numpy as np
 import pandas as pd
+import MDAnalysis as mda
 
-try:
-    import MDAnalysis as mda
-except ImportError as e:
-    import sys
-
-    sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
-    raise
-
-# Import classes from the new modular src package
 from src.AlignedTrajectory import AlignedTrajectory
 from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver
 from src.TrajectoryIterator import TrajectoryIterator

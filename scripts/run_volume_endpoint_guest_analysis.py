@@ -9,6 +9,10 @@ This script focuses on:
 4. Guest entering/exiting analysis (integrated in GSAnalyzerObserver)
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import os
 import warnings
@@ -16,14 +20,7 @@ import datetime
 
 import numpy as np
 import pandas as pd
-
-try:
-    import MDAnalysis as mda
-except ImportError as e:
-    import sys
-
-    sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
-    raise
+import MDAnalysis as mda
 
 try:
     import psutil
@@ -31,7 +28,6 @@ except ImportError:
     psutil = None
     warnings.warn("psutil not available. Memory logging will be disabled.")
 
-# Import classes from the new modular src package
 from src.AlignedTrajectory import AlignedTrajectory
 from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver
 from src.TrajectoryIterator import TrajectoryIterator

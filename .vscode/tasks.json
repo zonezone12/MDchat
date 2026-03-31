@@ -1,0 +1,55 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Install (editable)",
+            "type": "shell",
+            "command": "pip install -e '.[all]'",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Install (chat only)",
+            "type": "shell",
+            "command": "pip install -e '.[chat]'",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Run MDChat",
+            "type": "shell",
+            "command": "python -m src.mdchat",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": true
+            },
+            "options": {
+                "env": {}
+            }
+        },
+        {
+            "label": "List Skills",
+            "type": "shell",
+            "command": "python -c \"import sys; sys.path.insert(0,'.'); from src.mdchat.registry import get_default_registry; r=get_default_registry(); r.auto_discover(); [print(f'  {s.name:30s} [{s.category}]  {s.description[:60]}') for s in r.list_skills()]\"",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        }
+    ]
+}

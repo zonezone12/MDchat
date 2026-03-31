@@ -107,18 +107,11 @@ except ImportError:
     measure = None  # type: ignore
     warnings.warn("scikit-image not available. Mesh volume computation will be disabled.")
 
-# Import plotly_molecule with fallback for different import contexts
 try:
-    from MD_analysis.plotly_molecule import make_molecule_components
+    from ..utils.plotly_molecule import make_molecule_components
 except ImportError:
-    try:
-        from ..plotly_molecule import make_molecule_components
-    except ImportError:
-        try:
-            from plotly_molecule import make_molecule_components
-        except ImportError:
-            make_molecule_components = None
-            warnings.warn("plotly_molecule not available. Interactive 3D visualization will be limited.")
+    make_molecule_components = None
+    warnings.warn("plotly_molecule not available. Interactive 3D visualization will be limited.")
 
 # Import rdkit utils for SMILES support
 try:

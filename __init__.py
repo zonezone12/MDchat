@@ -11,53 +11,16 @@ A package for molecular dynamics trajectory analysis including:
 
 __version__ = "1.0.0"
 
-# Make key classes available at package level for convenience
-try:
-    from trajectory_deformation_workflow import (
-        AlignedTrajectory,
-        TrajectoryMetrics,
-        ClusteringAnalysis,
-        FrameSelection,
-        FileIO,
-        EndpointAnalyzer,
-        Plotter,
-    )
-    from gs_analyzer import GSAnalyzer
-except ImportError:
-    # Fallback for when imported from outside
-    try:
-        from MD_analysis.trajectory_deformation_workflow import (
-            AlignedTrajectory,
-            TrajectoryMetrics,
-            ClusteringAnalysis,
-            FrameSelection,
-            FileIO,
-            EndpointAnalyzer,
-            Plotter,
-        )
-        from MD_analysis.gs_analyzer import GSAnalyzer
-    except ImportError:
-        pass
-
-try:
-    from volume_analyser import VolumeAnalyzer
-except ImportError:
-    try:
-        from MD_analysis.volume_analyser import VolumeAnalyzer
-    except ImportError:
-        VolumeAnalyzer = None
-
-try:
-    from src.EndpointAnalyzer import EndpointsFinder
-except ImportError:
-    # Fallback to old locations for backward compatibility
-    try:
-        from endpoints_finder import EndpointsFinder
-    except ImportError:
-        try:
-            from MD_analysis.endpoints_finder import EndpointsFinder
-        except ImportError:
-            EndpointsFinder = None
+from src.AlignedTrajectory import AlignedTrajectory
+from src.TrajectoryMetrics import TrajectoryMetrics
+from src.ClusteringAnalysis import ClusteringAnalysis
+from src.FrameSelection import FrameSelection
+from src.FileIO import FileIO
+from src.EndpointAnalyzer import EndpointAnalyzer
+from src.Plotter import Plotter
+from src.VolumeAnalyzer import VolumeAnalyzer
+from src.EndpointAnalyzer import EndpointsFinder
+from src.task import GSAnalyzer
 
 __all__ = [
     "GSAnalyzer",
@@ -71,4 +34,3 @@ __all__ = [
     "VolumeAnalyzer",
     "EndpointsFinder",
 ]
-

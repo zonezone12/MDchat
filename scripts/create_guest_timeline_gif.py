@@ -7,8 +7,12 @@ guest_entering_stats.csv in the same directory for metadata) and creates an anim
 of the timeline plot.
 
 Usage:
-    python create_guest_timeline_gif.py --csv_path output_guest_entering_events.csv --out_prefix output
+    python scripts/create_guest_timeline_gif.py --csv_path output_guest_entering_events.csv --out_prefix output
 """
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import warnings

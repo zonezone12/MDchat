@@ -11,3 +11,13 @@ test/
 *.log.gz
 *.err.gz
 *.out.gz
+
+# Environment / secrets
+.env
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+__pycache__/
+*.pyc

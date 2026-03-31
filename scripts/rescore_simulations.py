@@ -10,15 +10,18 @@ This script:
 5. Saves the updated scores
 
 Usage:
-    python rescore_simulations.py --input_dir output/ --output output/rescored_scores.csv
-    python rescore_simulations.py --csv_files output/traj1_simulation_score.csv output/traj2_simulation_score.csv
-    python rescore_simulations.py --input_dir output/ --overwrite
+    python scripts/rescore_simulations.py --input_dir output/ --output output/rescored_scores.csv
+    python scripts/rescore_simulations.py --csv_files output/traj1_simulation_score.csv output/traj2_simulation_score.csv
+    python scripts/rescore_simulations.py --input_dir output/ --overwrite
 """
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import os
 import glob
-from pathlib import Path
 from typing import List, Optional, Dict, Any
 import warnings
 

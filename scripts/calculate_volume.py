@@ -3,37 +3,31 @@
 Simple script to calculate volume from MD trajectory files.
 
 Usage:
-    python calculate_volume.py topology.pdb [trajectory.xtc] [options]
+    python scripts/calculate_volume.py topology.pdb [trajectory.xtc] [options]
 
 Examples:
     # Calculate volume for a single PDB file
-    python calculate_volume.py structure.pdb
+    python scripts/calculate_volume.py structure.pdb
 
     # Calculate volume for trajectory frames
-    python calculate_volume.py topology.pdb trajectory.xtc
+    python scripts/calculate_volume.py topology.pdb trajectory.xtc
 
     # Calculate volume for specific frame
-    python calculate_volume.py topology.pdb trajectory.xtc --frame 0
+    python scripts/calculate_volume.py topology.pdb trajectory.xtc --frame 0
 
     # Custom atom selection
-    python calculate_volume.py topology.pdb trajectory.xtc --selection "protein"
+    python scripts/calculate_volume.py topology.pdb trajectory.xtc --selection "protein"
 """
 
-import argparse
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import argparse
 import numpy as np
+import MDAnalysis as mda
 
-try:
-    import MDAnalysis as mda
-except ImportError:
-    print("Error: MDAnalysis is required. Install with: pip install MDAnalysis", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    from src.VolumeAnalyzer.VolumeAnalyzer import VolumeAnalyzer
-except ImportError:
-    print("Error: volume_analyser.py not found. Make sure it's in the same directory.", file=sys.stderr)
-    sys.exit(1)
+from src.VolumeAnalyzer.VolumeAnalyzer import VolumeAnalyzer
 
 try:
     import pandas as pd

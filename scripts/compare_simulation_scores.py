@@ -10,15 +10,18 @@ This script:
 5. Saves the ranked comparison to CSV
 
 Usage:
-    python compare_simulation_scores.py --input_dir output/ --output output/all_simulations_ranked.csv
-    python compare_simulation_scores.py --input_dir output/ --top_n 10 --sort_by volume_dynamics_score
-    python compare_simulation_scores.py --csv_files output/traj1_simulation_score.csv output/traj2_simulation_score.csv
+    python scripts/compare_simulation_scores.py --input_dir output/ --output output/all_simulations_ranked.csv
+    python scripts/compare_simulation_scores.py --input_dir output/ --top_n 10 --sort_by volume_dynamics_score
+    python scripts/compare_simulation_scores.py --csv_files output/traj1_simulation_score.csv output/traj2_simulation_score.csv
 """
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import os
 import glob
-from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd

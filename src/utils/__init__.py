@@ -6,6 +6,7 @@ from .rdkit_utils import (
     RingCenterCalculator,
     SubstructureCenterObserver,
 )
+from .plotly_molecule import make_molecule_components, plot_molecule
 
 __all__ = [
     "get_3d_coordinates_from_smiles",
@@ -14,5 +15,7 @@ __all__ = [
     "RingMetrics",
     "RingCenterCalculator",
     "SubstructureCenterObserver",
+    "make_molecule_components",
+    "plot_molecule",
 ]
 

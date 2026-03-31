@@ -1,0 +1,47 @@
+---
+description: Conventions for writing MDChat skills that wrap MD analysis modules
+globs: src/mdchat/skills/**/*.py
+alwaysApply: false
+---
+
+# MDChat Skill Conventions
+
+## Creating a new skill
+
+1. Create a class that inherits from `Skill` (in `src.mdchat.skill`).
+2. Set class attributes: `name`, `description`, `category`, `parameters`, `requires`, `produces`.
+3. Implement `execute(self, context, **params) -> SkillResult`.
+4. Register at module level: `get_default_registry().register(MySkill())`.
+5. Import the module in `src/mdchat/skills/__init__.py`.
+
+## Import rules
+
+- **Never** import heavy libraries (`numpy`, `MDAnalysis`, `rdkit`) at module level in skill files.
+- Import them inside `execute()` so auto-discovery works in minimal environments.
+- Use `from src.ModuleName import ClassName` for existing analysis modules.
+
+## SkillResult
+
+- Always set `summary` to a human-readable string the LLM can relay to the user.
+- Put array/DataFrame outputs in `data` keyed by the name from `produces`.
+- Put file paths (plots, CSVs) in `artifacts`.
+
+## Example
+
+```python
+class ComputeRgSkill(Skill):
+    name = "compute_rg"
+    description = "Compute radius of gyration over the trajectory."
+    category = "metrics"
+    parameters = [
+        Parameter("selection", ParamType.ATOM_SELECTION,
+                  "Atom selection string", required=False, default="protein"),
+    ]
+    requires = ["universe"]
+    produces = ["rg_array"]
+
+    def execute(self, context, **params):
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+        # ... compute and return SkillResult ...
+```

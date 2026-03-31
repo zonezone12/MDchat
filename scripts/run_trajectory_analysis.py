@@ -3,65 +3,31 @@
 Main entry point for Trajectory Deformation Analysis & Auto-Selection Pipeline
 
 This script provides the CLI interface for the trajectory analysis workflow.
-All utility functions are imported from trajectory_deformation_workflow module.
 """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import os
 import warnings
 
 import numpy as np
 import pandas as pd
+import MDAnalysis as mda
+from MDAnalysis.analysis import align  # noqa:F401
 
-try:
-    import MDAnalysis as mda
-    from MDAnalysis.analysis import align  # noqa:F401
-except ImportError as e:
-    import sys
-
-    sys.stderr.write("MDAnalysis is required. pip install MDAnalysis\n")
-    raise
-
-# Import classes from the new modular src package
 from src.AlignedTrajectory import AlignedTrajectory
 from src.ClusteringAnalysis import ClusteringAnalysis
-from src.EndpointAnalyzer import EndpointAnalyzer
+from src.EndpointAnalyzer import EndpointAnalyzer, EndpointsFinder
 from src.FileIO import FileIO
 from src.FrameGatherer import FrameGatherer
 from src.FrameProcessor import FrameProcessor
 from src.FrameSelection import FrameSelection
 from src.Plotter import Plotter
 from src.TrajectoryMetrics import TrajectoryMetrics
-
-# Import optional dependencies
-try:
-    from src.EndpointAnalyzer import EndpointsFinder
-except ImportError:
-    # Fallback to old locations for backward compatibility
-    try:
-        from endpoints_finder import EndpointsFinder
-    except ImportError:
-        from MD_analysis.endpoints_finder import EndpointsFinder
-
-try:
-    from src.VolumeAnalyzer import VolumeAnalyzer
-except ImportError:
-    try:
-        from volume_analyser import VolumeAnalyzer
-    except ImportError:
-        from MD_analysis.volume_analyser import VolumeAnalyzer
-
-try:
-    from src.task import GSAnalyzer
-except ImportError:
-    # Fallback to old locations for backward compatibility
-    try:
-        from gs_analyzer import GSAnalyzer
-    except ImportError:
-        try:
-            from MD_analysis.gs_analyzer import GSAnalyzer
-        except ImportError:
-            GSAnalyzer = None
-            warnings.warn("gs_analyzer module not found. GSAnalyzer will not be available.")
+from src.VolumeAnalyzer import VolumeAnalyzer
+from src.task import GSAnalyzer
 
 def main():
     p = argparse.ArgumentParser(description="Detect structural deformation and auto-select meaningful frames from trajectories.")
