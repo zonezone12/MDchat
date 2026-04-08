@@ -137,7 +137,7 @@ class VisualizeStructureSkill(Skill):
     def execute(self, context: AnalysisContext, **params: Any) -> SkillResult:
         import MDAnalysis as mda
 
-        u = context.get("universe")
+        u = context.universe
         selection = params.get("selection") or context.main_selection
         frame_idx = params.get("frame", 0)
         main_repr = params.get("representation", "licorice")
