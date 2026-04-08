@@ -9,9 +9,9 @@ Run with:
 
 from __future__ import annotations
 
-import os
 import sys
 import time
+from typing import Protocol
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -19,8 +19,13 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .context import AnalysisContext
-from .llm import ChatEngine
+from .llm import create_chat_engine
 from .registry import SkillRegistry, get_default_registry
+
+
+class _ChatEngine(Protocol):
+    def send_message(self, user_text: str) -> str: ...
+    def reset(self) -> None: ...
 
 console = Console()
 
@@ -45,7 +50,7 @@ HELP_TEXT = """\
 - `/quit` or `/exit` -- Exit MDChat.
 
 **Quick start:**
-1. Set your Anthropic API key in `.env` (see `.env.example`).
+1. Set your API key in `.env` — `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini). Set `MDCHAT_PROVIDER=gemini` for Gemini (see `.env.example`).
 2. Type: `/load myfile.prmtop myfile.nc`
 3. Ask: "Compute the RMSD and plot it."
 """
@@ -79,7 +84,7 @@ class _RichCallback:
 
 def _handle_slash_command(
     cmd: str,
-    engine: ChatEngine,
+    engine: _ChatEngine,
     context: AnalysisContext,
     registry: SkillRegistry,
 ) -> bool:
@@ -132,6 +137,7 @@ def _handle_slash_command(
 
 
 def run_cli(
+    provider: str = "anthropic",
     api_key: str | None = None,
     model: str | None = None,
     output_dir: str | None = None,
@@ -153,12 +159,15 @@ def run_cli(
 
     # -- engine --
     callback = _RichCallback()
-    kwargs = {}
-    if model:
-        kwargs["model"] = model
-    engine = ChatEngine(
-        registry, context, api_key=api_key, callback=callback, **kwargs
+    engine = create_chat_engine(
+        provider,
+        registry,
+        context,
+        api_key=api_key,
+        model=model,
+        callback=callback,
     )
+    console.print(f"[dim]Provider: {provider}[/dim]\n")
 
     # -- main loop --
     while True:

@@ -130,7 +130,7 @@ class Skill(ABC):
         ...
 
     def to_tool_schema(self) -> dict:
-        """Generate an Anthropic-compatible tool definition."""
+        """Generate a tool definition (Anthropic ``input_schema`` / Gemini parameters)."""
         properties: Dict[str, Any] = {}
         required: List[str] = []
 

@@ -34,8 +34,11 @@ viz = [
 rdkit = [
     "rdkit>=2022.03",
 ]
+gemini = [
+    "google-genai>=1.0.0",
+]
 all = [
-    "md-analysis[chat,viz,rdkit]",
+    "md-analysis[chat,viz,rdkit,gemini]",
 ]
 
 [project.scripts]

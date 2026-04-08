@@ -2,7 +2,7 @@
 Skill Registry for MDChat.
 
 Manages discovery, registration, and lookup of skills. Generates
-Anthropic-compatible tool definitions for the LLM.
+tool schemas for the LLM (Anthropic Messages API and Gemini declarations).
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ class SkillRegistry:
         return available
 
     def to_tool_definitions(self) -> List[dict]:
-        """Generate Anthropic tool schemas for every registered skill."""
+        """Tool schemas for every registered skill (Claude + Gemini)."""
         return [s.to_tool_schema() for s in self._skills.values()]
 
     def get_skills_summary(self) -> str:

@@ -8,7 +8,7 @@ MDChat lets chemist researchers analyze MD simulation data through natural langu
 You> I loaded a 500 ns nanocube simulation. Did the iodide enter the cage?
 
 MDChat> I'll track the guest molecule and check for entry events.
-  >> load_trajectory(topology='nanocube.prmtop', trajectory='nanocube.nc')
+  >> load_trajectory(topology='nanocube.prmtop', trajectory='nanocube',format="TRJ")
   OK load_trajectory (3.2s)
   >> score_simulation()
   OK score_simulation (1.1s)
@@ -53,7 +53,8 @@ pip install -e ".[all]"
 
 ```bash
 cp .env.example .env
-# Edit .env and paste your Anthropic API key
+# Edit .env: ANTHROPIC_API_KEY for Claude (default), or GEMINI_API_KEY / GOOGLE_API_KEY
+# with MDCHAT_PROVIDER=gemini for Google Gemini (requires pip install -e ".[gemini]")
 ```
 
 ### 3. Run
@@ -69,7 +70,7 @@ mdchat
 
 ## How It Works
 
-MDChat uses an LLM (Claude) as a **reasoning and orchestration** layer, not a code generator. Each analytical capability is wrapped as a **Skill** — a self-describing, validated unit that the LLM can discover, parameterize, and chain via structured tool use.
+MDChat uses an LLM (Claude via Anthropic, or Gemini via `google-genai`) as a **reasoning and orchestration** layer, not a code generator. Each analytical capability is wrapped as a **Skill** — a self-describing, validated unit that the LLM can discover, parameterize, and chain via structured tool use.
 
 ```
 User Question
@@ -77,7 +78,7 @@ User Question
     ▼
 ┌────────────────────┐
 │  LLM Reasoning     │  Parses intent, selects skills,
-│  (Claude)          │  resolves parameters, chains
+│  (Claude / Gemini) │  resolves parameters, chains
 └────────┬───────────┘  execution in dependency order
          │ tool_use
          ▼
@@ -144,7 +145,9 @@ MD_analysis/
 │   │   ├── skill.py             #   Skill ABC, Parameter, SkillResult
 │   │   ├── registry.py          #   Skill discovery and tool schema generation
 │   │   ├── context.py           #   Per-session analysis state
-│   │   ├── llm.py               #   Anthropic Claude tool-use engine
+│   │   ├── llm.py               #   Claude / Gemini chat engines + factory
+│   │   ├── gemini_engine.py     #   Gemini (google-genai) tool loop
+│   │   ├── engine_common.py     #   Shared system prompt + skill runner
 │   │   ├── cli.py               #   Rich terminal interface
 │   │   ├── __main__.py          #   Entry point (mdchat command)
 │   │   └── skills/              #   Skill implementations
@@ -238,14 +241,16 @@ Key conventions:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (required) | — |
-| `MDCHAT_MODEL` | Claude model override | `claude-sonnet-4-20250514` |
+| `MDCHAT_PROVIDER` | `anthropic` (Claude) or `gemini` | `anthropic` |
+| `ANTHROPIC_API_KEY` | Anthropic API key (Claude) | — |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google AI Studio key (Gemini) | — |
+| `MDCHAT_MODEL` | Model id for the active provider | Claude: `claude-sonnet-4-20250514`; Gemini: `gemini-2.0-flash` |
 | `MDCHAT_OUTPUT_DIR` | Output directory for artifacts | system temp dir |
 
 ### CLI arguments
 
 ```
-mdchat --api-key KEY --model MODEL --output-dir DIR
+mdchat [--provider anthropic|gemini] [--api-key KEY] [--model MODEL] [--output-dir DIR]
 ```
 
 CLI arguments override environment variables.
@@ -332,6 +337,7 @@ numpy, pandas, scipy, MDAnalysis, scikit-learn, matplotlib, Pillow, imageio
 | Group | Install command | Packages |
 |-------|----------------|----------|
 | `chat` | `pip install -e ".[chat]"` | anthropic, rich, python-dotenv |
+| `gemini` | `pip install -e ".[gemini]"` | google-genai |
 | `viz` | `pip install -e ".[viz]"` | datashader, plotly, scikit-image |
 | `rdkit` | `pip install -e ".[rdkit]"` | rdkit |
 | `all` | `pip install -e ".[all]"` | everything above |

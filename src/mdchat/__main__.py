@@ -38,14 +38,20 @@ def main() -> None:
         description="MDChat — LLM-powered Molecular Dynamics trajectory analysis",
     )
     parser.add_argument(
+        "--provider",
+        default=os.environ.get("MDCHAT_PROVIDER", "anthropic"),
+        choices=("anthropic", "gemini"),
+        help="LLM backend: anthropic (Claude) or gemini (set MDCHAT_PROVIDER in .env)",
+    )
+    parser.add_argument(
         "--api-key",
-        default=os.environ.get("ANTHROPIC_API_KEY"),
-        help="Anthropic API key (or set ANTHROPIC_API_KEY in .env)",
+        default=None,
+        help="API key for the selected provider (overrides env vars)",
     )
     parser.add_argument(
         "--model",
         default=os.environ.get("MDCHAT_MODEL"),
-        help="Override the default Claude model (or set MDCHAT_MODEL in .env)",
+        help="Model id (Claude or Gemini; or set MDCHAT_MODEL in .env)",
     )
     parser.add_argument(
         "--output-dir",
@@ -54,10 +60,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    provider = (args.provider or "anthropic").lower()
+    if args.api_key:
+        api_key = args.api_key
+    elif provider == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+
     from src.mdchat.cli import run_cli
 
     run_cli(
-        api_key=args.api_key,
+        provider=provider,
+        api_key=api_key,
         model=args.model,
         output_dir=args.output_dir,
     )

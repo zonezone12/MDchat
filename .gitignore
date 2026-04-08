@@ -1,4 +1,6 @@
 test/
+output/
+traj/
 *.bak
 *.gif
 *.png
