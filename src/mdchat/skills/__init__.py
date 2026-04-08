@@ -1,7 +1,20 @@
 """
 Built-in MDChat skills.
 
-Importing this package registers all pilot skills with the default registry.
+Importing this package registers all skills with the default registry.
 """
 
-from . import trajectory, metrics, endpoints, plotting, scoring  # noqa: F401
+from . import (  # noqa: F401
+    trajectory,
+    metrics,
+    endpoints,
+    plotting,
+    scoring,
+    visualization,
+    volume,
+    guest,
+    clustering,
+    fileio,
+    gsa,
+    selection,
+)

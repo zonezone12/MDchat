@@ -58,6 +58,61 @@ class AnalysisContext:
     def trajectory_path(self) -> Optional[str]:
         return self._store.get("trajectory_path")
 
+    @property
+    def main_selection(self) -> str:
+        """Session-level atom selection for the primary structure of interest.
+
+        Set automatically by ``load_trajectory`` based on system composition.
+        Skills should use this as the default when no explicit selection is
+        provided by the user.
+        """
+        return self._store.get("main_selection", "all")
+
+    @main_selection.setter
+    def main_selection(self, sel: str) -> None:
+        self._store["main_selection"] = sel
+
+    # ---- system auto-detection ----
+
+    _WATER_RESNAMES = frozenset({
+        "HOH", "WAT", "SOL", "TIP3", "TIP4", "TIP5", "SPC", "T3P", "TP3",
+        "TP4", "TP5", "OPC", "TIP",
+    })
+    _COMMON_ION_RESNAMES = frozenset({
+        "Na+", "Cl-", "K+", "Na", "CL", "Cl", "K", "MG", "CA", "ZN", "FE",
+        "NA", "SOD", "CLA", "POT", "MG2", "CAL",
+    })
+
+    def detect_main_selection(self) -> str:
+        """Infer a sensible atom selection for the primary structure.
+
+        Excludes common solvent and counter-ion residues so that analyses
+        focus on the molecule(s) of interest — works for proteins, MOFs,
+        nanocages, small-molecule systems, etc.
+        """
+        if self.universe is None:
+            return "all"
+
+        resnames = set(self.universe.residues.resnames)
+        water_present = resnames & self._WATER_RESNAMES
+        ions_present = resnames & self._COMMON_ION_RESNAMES
+
+        exclude_parts: List[str] = []
+        if water_present:
+            exclude_parts.append(
+                " ".join(sorted(water_present))
+            )
+        if ions_present:
+            exclude_parts.append(
+                " ".join(sorted(ions_present))
+            )
+
+        if exclude_parts:
+            all_exclude = " ".join(exclude_parts)
+            return f"not resname {all_exclude}"
+
+        return "all"
+
     # ---- artifacts (generated files) ----
 
     def add_artifact(self, name: str, path: str) -> None:
@@ -87,6 +142,7 @@ class AnalysisContext:
                 f"{self.trajectory_path or '?'}  "
                 f"({u.trajectory.n_frames} frames, {u.atoms.n_atoms} atoms)"
             )
+            lines.append(f"Main selection: '{self.main_selection}'")
         else:
             lines.append("No trajectory loaded yet.")
 

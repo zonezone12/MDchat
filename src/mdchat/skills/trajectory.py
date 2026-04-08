@@ -30,8 +30,10 @@ class LoadTrajectorySkill(Skill):
                   "Whether to align the trajectory to the first frame",
                   required=False, default=True),
         Parameter("align_selection", ParamType.ATOM_SELECTION,
-                  "MDAnalysis atom selection string for alignment",
-                  required=False, default="not water and not name I and not name Na+"),
+                  "MDAnalysis atom selection string for alignment "
+                  "(e.g., 'protein', 'resname GSA', 'all'). "
+                  "If omitted, auto-detected from system composition.",
+                  required=False, default=None),
     ]
     requires = []
     produces = ["universe", "topology_path", "trajectory_path",
@@ -47,10 +49,7 @@ class LoadTrajectorySkill(Skill):
         topology = params["topology"]
         trajectory = params["trajectory"]
         do_align = params.get("align", True)
-        align_sel = params.get(
-            "align_selection",
-            "not water and not name I and not name Na+",
-        )
+        align_sel = params.get("align_selection")
 
         for f in (topology, trajectory):
             if not os.path.isfile(f):
@@ -72,10 +71,18 @@ class LoadTrajectorySkill(Skill):
                 ),
             )
 
+        context.set("universe", u)
+        main_sel = context.detect_main_selection()
+        context.main_selection = main_sel
+
+        if align_sel is None:
+            align_sel = main_sel
+
         if do_align:
             try:
                 aligned = AlignedTrajectory(u, align_sel=align_sel)
                 u = aligned.get_aligned_universe()
+                context.set("universe", u)
             except Exception as exc:
                 return SkillResult(
                     success=False,
@@ -86,7 +93,6 @@ class LoadTrajectorySkill(Skill):
                     ),
                 )
 
-        context.set("universe", u)
         context.set("topology_path", topology)
         context.set("trajectory_path", trajectory)
         context.set("n_frames", u.trajectory.n_frames)
@@ -102,7 +108,8 @@ class LoadTrajectorySkill(Skill):
             f"{len(residues)} residues. "
             f"Residue types: {', '.join(sorted(resnames)[:10])}"
             f"{'...' if len(resnames) > 10 else ''}. "
-            f"{'Aligned' if do_align else 'Not aligned'} to first frame."
+            f"{'Aligned' if do_align else 'Not aligned'} to first frame. "
+            f"Main selection: '{main_sel}'."
         )
 
         return SkillResult(
@@ -113,6 +120,7 @@ class LoadTrajectorySkill(Skill):
                 "trajectory_path": trajectory,
                 "n_frames": n_frames,
                 "n_atoms": n_atoms,
+                "main_selection": main_sel,
             },
             summary=summary,
         )

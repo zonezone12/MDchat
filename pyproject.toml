@@ -30,6 +30,7 @@ viz = [
     "datashader>=0.14.0",
     "plotly>=5.0.0",
     "scikit-image>=0.19.0",
+    "nglview>=3.0.0",
 ]
 rdkit = [
     "rdkit>=2022.03",

@@ -1,4 +1,4 @@
-"""Trajectory metrics skill (RMSD)."""
+"""Trajectory metrics skills — RMSD, Rg, RMSF, PCA, contacts, strain."""
 
 from __future__ import annotations
 
@@ -10,6 +10,18 @@ from ..registry import get_default_registry
 if TYPE_CHECKING:
     from ..context import AnalysisContext
 
+
+def _resolve_selection(context: "AnalysisContext", params: dict, key: str = "selection") -> str:
+    """Return the user-supplied selection or fall back to context.main_selection."""
+    sel = params.get(key)
+    if sel is not None:
+        return sel
+    return context.main_selection
+
+
+# ---------------------------------------------------------------------------
+# RMSD
+# ---------------------------------------------------------------------------
 
 class ComputeRMSDSkill(Skill):
     name = "compute_rmsd"
@@ -23,8 +35,9 @@ class ComputeRMSDSkill(Skill):
     parameters = [
         Parameter("selection", ParamType.ATOM_SELECTION,
                   "MDAnalysis atom selection string (e.g., 'protein', 'resname GSA', "
-                  "'backbone'). Defaults to all non-solvent heavy atoms.",
-                  required=False, default="not water and not name H*"),
+                  "'resname MOF', 'all'). If omitted, uses the session main "
+                  "selection (auto-detected from system composition).",
+                  required=False, default=None),
         Parameter("ref_frame", ParamType.INTEGER,
                   "Reference frame index for RMSD calculation (0-based).",
                   required=False, default=0, min_value=0),
@@ -37,7 +50,7 @@ class ComputeRMSDSkill(Skill):
         from src.TrajectoryMetrics import TrajectoryMetrics
 
         u = context.universe
-        sel_str = params.get("selection", "not water and not name H*")
+        sel_str = _resolve_selection(context, params)
         ref_frame = params.get("ref_frame", 0)
 
         tm = TrajectoryMetrics()
@@ -73,4 +86,347 @@ class ComputeRMSDSkill(Skill):
         )
 
 
-get_default_registry().register(ComputeRMSDSkill())
+# ---------------------------------------------------------------------------
+# Radius of Gyration
+# ---------------------------------------------------------------------------
+
+class ComputeRgSkill(Skill):
+    name = "compute_rg"
+    description = (
+        "Compute the radius of gyration (Rg) over the trajectory. "
+        "Rg measures the compactness of the structure — decreasing Rg "
+        "indicates compaction, increasing Rg indicates expansion. "
+        "Works for any molecular system (proteins, cages, MOFs, etc.)."
+    )
+    category = "metrics"
+    parameters = [
+        Parameter("selection", ParamType.ATOM_SELECTION,
+                  "MDAnalysis atom selection (e.g., 'protein', 'resname GSA', "
+                  "'resname MOF', 'all'). If omitted, uses the session main "
+                  "selection.",
+                  required=False, default=None),
+    ]
+    requires = ["universe"]
+    produces = ["rg_array"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+
+        u = context.universe
+        sel_str = _resolve_selection(context, params)
+
+        tm = TrajectoryMetrics()
+        rg = tm.radius_of_gyration(u, sel_str)
+
+        context.set("rg_array", rg)
+
+        mean_rg = float(np.nanmean(rg))
+        std_rg = float(np.nanstd(rg))
+        min_rg = float(np.nanmin(rg))
+        max_rg = float(np.nanmax(rg))
+
+        summary = (
+            f"Rg computed for '{sel_str}' ({len(rg)} frames). "
+            f"Mean: {mean_rg:.2f} A, Std: {std_rg:.2f} A, "
+            f"Range: {min_rg:.2f}–{max_rg:.2f} A. "
+        )
+        rel_fluct = std_rg / mean_rg if mean_rg > 0 else 0
+        if rel_fluct < 0.02:
+            summary += "Very stable compactness — no significant size changes."
+        elif rel_fluct < 0.05:
+            summary += "Modest fluctuations in molecular size."
+        else:
+            summary += "Significant size changes — possible (un)folding or large-scale motion."
+
+        return SkillResult(
+            success=True,
+            data={"rg_array": rg},
+            summary=summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# RMSF (per-atom fluctuation)
+# ---------------------------------------------------------------------------
+
+class ComputeRMSFSkill(Skill):
+    name = "compute_rmsf"
+    description = (
+        "Compute per-atom Root Mean Square Fluctuation (RMSF) over the "
+        "trajectory. RMSF reveals which atoms or residues are most flexible "
+        "versus rigid. Works for any system — for proteins use 'name CA' or "
+        "'backbone'; for MOFs/cages use the appropriate atom selection."
+    )
+    category = "metrics"
+    parameters = [
+        Parameter("selection", ParamType.ATOM_SELECTION,
+                  "MDAnalysis atom selection (e.g., 'name CA' for protein "
+                  "per-residue, 'backbone', 'resname GSA and name C*', 'all'). "
+                  "If omitted, uses the session main selection.",
+                  required=False, default=None),
+    ]
+    requires = ["universe"]
+    produces = ["rmsf_array", "rmsf_atom_info"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+
+        u = context.universe
+        sel_str = _resolve_selection(context, params)
+
+        tm = TrajectoryMetrics()
+        rmsf = tm.compute_rmsf(u, sel_str)
+
+        context.set("rmsf_array", rmsf)
+
+        atoms = u.select_atoms(sel_str)
+        atom_info = [
+            {"resname": a.resname, "resid": int(a.resid), "name": a.name}
+            for a in atoms
+        ]
+        context.set("rmsf_atom_info", atom_info)
+
+        mean_rmsf = float(np.nanmean(rmsf))
+        max_rmsf = float(np.nanmax(rmsf))
+        max_idx = int(np.nanargmax(rmsf))
+        max_atom = atom_info[max_idx] if max_idx < len(atom_info) else {}
+
+        top_n = min(5, len(rmsf))
+        top_idx = np.argsort(rmsf)[::-1][:top_n]
+        top_lines = []
+        for idx in top_idx:
+            ai = atom_info[idx]
+            top_lines.append(
+                f"  {ai['resname']} {ai['resid']}: {rmsf[idx]:.2f} A"
+            )
+
+        summary = (
+            f"RMSF computed for '{sel_str}' ({len(rmsf)} atoms). "
+            f"Mean: {mean_rmsf:.2f} A, Max: {max_rmsf:.2f} A "
+            f"({max_atom.get('resname', '?')} {max_atom.get('resid', '?')}).\n"
+            f"Top {top_n} most flexible:\n" + "\n".join(top_lines)
+        )
+
+        return SkillResult(
+            success=True,
+            data={"rmsf_array": rmsf, "rmsf_atom_info": atom_info},
+            summary=summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# PCA on fluctuations
+# ---------------------------------------------------------------------------
+
+class ComputePCASkill(Skill):
+    name = "compute_pca"
+    description = (
+        "Perform Principal Component Analysis (PCA) on atomic fluctuations "
+        "to identify the dominant modes of motion. Returns PC scores per "
+        "frame and the variance explained by each component. "
+        "Works for any molecular system — use an appropriate atom selection "
+        "to reduce dimensionality."
+    )
+    category = "metrics"
+    parameters = [
+        Parameter("selection", ParamType.ATOM_SELECTION,
+                  "MDAnalysis atom selection for PCA (e.g., 'name CA' for "
+                  "proteins, 'resname GSA and not name H*' for cages, 'all'). "
+                  "If omitted, uses the session main selection.",
+                  required=False, default=None),
+        Parameter("n_components", ParamType.INTEGER,
+                  "Number of principal components to compute.",
+                  required=False, default=5, min_value=1, max_value=50),
+    ]
+    requires = ["universe"]
+    produces = ["pca_scores", "pca_variance_explained"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+
+        u = context.universe
+        sel_str = _resolve_selection(context, params)
+        n_comp = params.get("n_components", 5)
+
+        tm = TrajectoryMetrics()
+        pcs, pca_model = tm.pca_on_fluctuations(u, sel_str, n_components=n_comp)
+
+        context.set("pca_scores", pcs)
+        var_explained = pca_model.explained_variance_ratio_
+        context.set("pca_variance_explained", var_explained)
+
+        total_var = float(np.sum(var_explained)) * 100
+        pc_lines = []
+        for i, v in enumerate(var_explained):
+            pc_lines.append(f"  PC{i+1}: {v*100:.1f}%")
+
+        summary = (
+            f"PCA computed for '{sel_str}' ({n_comp} components, "
+            f"{u.trajectory.n_frames} frames).\n"
+            f"Total variance explained: {total_var:.1f}%\n"
+            + "\n".join(pc_lines)
+        )
+
+        return SkillResult(
+            success=True,
+            data={
+                "pca_scores": pcs,
+                "pca_variance_explained": var_explained,
+            },
+            summary=summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Contact distances
+# ---------------------------------------------------------------------------
+
+class ComputeContactsSkill(Skill):
+    name = "compute_contacts"
+    description = (
+        "Compute the minimum distance between two atom selections over all "
+        "trajectory frames. Useful for tracking ligand–protein contacts, "
+        "guest–host distances, ion–cage proximity, or any pairwise interaction."
+    )
+    category = "metrics"
+    parameters = [
+        Parameter("selection_a", ParamType.ATOM_SELECTION,
+                  "First atom selection (e.g., 'resname ATP', 'resid 14', "
+                  "'name I', 'resname LIG')."),
+        Parameter("selection_b", ParamType.ATOM_SELECTION,
+                  "Second atom selection (e.g., 'resname MG', 'protein', "
+                  "'resname GSA', 'resname MOF')."),
+        Parameter("label", ParamType.STRING,
+                  "Label for this contact pair (used as context key suffix).",
+                  required=False, default="contact"),
+    ]
+    requires = ["universe"]
+    produces = ["contact_distances"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+
+        u = context.universe
+        sel_a = params["selection_a"]
+        sel_b = params["selection_b"]
+        label = params.get("label", "contact")
+
+        tm = TrajectoryMetrics()
+        dists = tm.contact_distances(u, sel_a, sel_b)
+
+        key = f"contact_distances_{label}"
+        context.set(key, dists)
+        context.set("contact_distances", dists)
+
+        mean_d = float(np.nanmean(dists))
+        std_d = float(np.nanstd(dists))
+        min_d = float(np.nanmin(dists))
+        max_d = float(np.nanmax(dists))
+
+        summary = (
+            f"Min-distance '{sel_a}' ↔ '{sel_b}' ({len(dists)} frames): "
+            f"mean={mean_d:.2f} A, std={std_d:.2f} A, "
+            f"range={min_d:.2f}–{max_d:.2f} A. "
+        )
+        if min_d < 3.5:
+            summary += "Close contact detected (< 3.5 A) — possible direct coordination."
+        elif mean_d < 6.0:
+            summary += "Persistent proximity — likely a stable interaction."
+        else:
+            summary += "Relatively distant — transient or no direct contact."
+
+        return SkillResult(
+            success=True,
+            data={"contact_distances": dists},
+            summary=summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Strain proxy
+# ---------------------------------------------------------------------------
+
+class ComputeStrainSkill(Skill):
+    name = "compute_strain"
+    description = (
+        "Compute a local affine strain proxy over the trajectory. "
+        "This metric captures local deformation intensity — spikes "
+        "indicate sudden structural rearrangements. Works for any "
+        "molecular system (proteins, cages, frameworks, etc.)."
+    )
+    category = "metrics"
+    parameters = [
+        Parameter("selection", ParamType.ATOM_SELECTION,
+                  "MDAnalysis atom selection for strain calculation "
+                  "(e.g., 'name CA' for proteins, 'resname GSA', 'all'). "
+                  "If omitted, uses the session main selection.",
+                  required=False, default=None),
+        Parameter("window", ParamType.INTEGER,
+                  "Sliding window size (frames).",
+                  required=False, default=10, min_value=2),
+        Parameter("lag", ParamType.INTEGER,
+                  "Frame lag for deformation comparison.",
+                  required=False, default=1, min_value=1),
+    ]
+    requires = ["universe"]
+    produces = ["strain_array"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import numpy as np
+        from src.TrajectoryMetrics import TrajectoryMetrics
+
+        u = context.universe
+        sel_str = _resolve_selection(context, params)
+        window = params.get("window", 10)
+        lag = params.get("lag", 1)
+
+        tm = TrajectoryMetrics()
+        strain = tm.local_affine_strain_proxy(u, sel_str, window=window, lag=lag)
+
+        context.set("strain_array", strain)
+
+        valid = strain[~np.isnan(strain)]
+        if len(valid) == 0:
+            return SkillResult(
+                success=True,
+                data={"strain_array": strain},
+                summary="Strain computed but all values are NaN (trajectory too short for window).",
+            )
+
+        mean_s = float(np.nanmean(valid))
+        max_s = float(np.nanmax(valid))
+        max_idx = int(np.nanargmax(strain))
+
+        summary = (
+            f"Strain proxy computed for '{sel_str}' (window={window}, lag={lag}). "
+            f"Mean: {mean_s:.4f}, Max: {max_s:.4f} at frame {max_idx}. "
+        )
+        if max_s > 0.1:
+            summary += "Major structural rearrangement detected."
+        elif max_s > 0.01:
+            summary += "Moderate deformation events present."
+        else:
+            summary += "Low strain — structurally quiescent trajectory."
+
+        return SkillResult(
+            success=True,
+            data={"strain_array": strain},
+            summary=summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+_registry = get_default_registry()
+_registry.register(ComputeRMSDSkill())
+_registry.register(ComputeRgSkill())
+_registry.register(ComputeRMSFSkill())
+_registry.register(ComputePCASkill())
+_registry.register(ComputeContactsSkill())
+_registry.register(ComputeStrainSkill())

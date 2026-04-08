@@ -139,5 +139,80 @@ class ComputeEndpointDistancesSkill(Skill):
         )
 
 
-get_default_registry().register(FindEndpointsSkill())
-get_default_registry().register(ComputeEndpointDistancesSkill())
+class EndpointVolumeCorrelationSkill(Skill):
+    name = "endpoint_volume_correlation"
+    description = (
+        "Compute the Pearson correlation between each pairwise endpoint "
+        "distance and the molecular volume. Identifies which residue pairs "
+        "drive expansion or shrinkage. Requires endpoint_distances and "
+        "volume_array in context."
+    )
+    category = "endpoints"
+    parameters = [
+        Parameter("top_n", ParamType.INTEGER,
+                  "Number of top-correlated pairs to highlight in the summary.",
+                  required=False, default=5, min_value=1),
+        Parameter("save_csv", ParamType.BOOLEAN,
+                  "Save correlation table as CSV.",
+                  required=False, default=True),
+    ]
+    requires = ["endpoint_distances", "volume_array"]
+    produces = ["correlation_df"]
+
+    def execute(self, context: AnalysisContext, **params) -> SkillResult:
+        import os
+        from src.EndpointAnalyzer import EndpointAnalyzer
+
+        dists = context.get("endpoint_distances")
+        volume = context.get("volume_array")
+        sel_list = context.get("residue_selections", [])
+        top_n = params.get("top_n", 5)
+        save_csv = params.get("save_csv", True)
+
+        corr_df = EndpointAnalyzer.compute_endpoint_volume_correlation(
+            dists, volume, sel_list,
+        )
+        context.set("correlation_df", corr_df)
+
+        artifacts = {}
+        if save_csv and corr_df is not None and len(corr_df) > 0:
+            csv_path = os.path.join(
+                context.output_dir, "endpoint_volume_correlation.csv"
+            )
+            corr_df.to_csv(csv_path, index=False)
+            artifacts["correlation_csv"] = csv_path
+
+        if corr_df is None or len(corr_df) == 0:
+            return SkillResult(
+                success=True,
+                data={"correlation_df": corr_df},
+                summary="No endpoint–volume correlations could be computed.",
+            )
+
+        sorted_df = corr_df.reindex(
+            corr_df["correlation"].abs().sort_values(ascending=False).index
+        )
+        top = sorted_df.head(top_n)
+
+        lines = [
+            f"Endpoint–volume correlation computed ({len(corr_df)} pairs)."
+        ]
+        lines.append(f"Top {min(top_n, len(top))} correlated pairs:")
+        for _, row in top.iterrows():
+            lines.append(
+                f"  {row.get('residue_i','?')} ↔ {row.get('residue_j','?')}: "
+                f"r = {row['correlation']:.3f} (p = {row.get('p_value', 0):.2e})"
+            )
+
+        return SkillResult(
+            success=True,
+            data={"correlation_df": corr_df},
+            artifacts=artifacts,
+            summary="\n".join(lines),
+        )
+
+
+_registry = get_default_registry()
+_registry.register(FindEndpointsSkill())
+_registry.register(ComputeEndpointDistancesSkill())
+_registry.register(EndpointVolumeCorrelationSkill())
