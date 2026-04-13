@@ -13,6 +13,31 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
+class _SkillLogEntry:
+    """Record of a single skill invocation."""
+
+    __slots__ = ("skill_name", "params", "timestamp", "elapsed_s",
+                 "success", "summary", "artifacts")
+
+    def __init__(
+        self,
+        skill_name: str,
+        params: Dict[str, Any],
+        timestamp: datetime,
+        elapsed_s: float = 0.0,
+        success: bool = True,
+        summary: str = "",
+        artifacts: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.skill_name = skill_name
+        self.params = params
+        self.timestamp = timestamp
+        self.elapsed_s = elapsed_s
+        self.success = success
+        self.summary = summary
+        self.artifacts = artifacts or {}
+
+
 class AnalysisContext:
     """Mutable state container shared across skills within a chat session."""
 
@@ -20,8 +45,10 @@ class AnalysisContext:
         self._store: Dict[str, Any] = {}
         self._artifacts: Dict[str, str] = {}  # name -> file path
         self._history: List[str] = []  # ordered list of skill names executed
+        self._log: List[_SkillLogEntry] = []
+        self.session_start = datetime.now()
         self.output_dir = output_dir or os.path.join(
-            tempfile.gettempdir(), f"mdchat_{datetime.now():%Y%m%d_%H%M%S}"
+            tempfile.gettempdir(), f"mdchat_{self.session_start:%Y%m%d_%H%M%S}"
         )
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -121,13 +148,33 @@ class AnalysisContext:
     def get_artifacts(self) -> Dict[str, str]:
         return dict(self._artifacts)
 
-    # ---- execution history ----
+    # ---- execution history / work log ----
 
-    def record_execution(self, skill_name: str) -> None:
+    def record_execution(
+        self,
+        skill_name: str,
+        params: Optional[Dict[str, Any]] = None,
+        elapsed_s: float = 0.0,
+        success: bool = True,
+        summary: str = "",
+        artifacts: Optional[Dict[str, str]] = None,
+    ) -> None:
         self._history.append(skill_name)
+        self._log.append(_SkillLogEntry(
+            skill_name=skill_name,
+            params=params or {},
+            timestamp=datetime.now(),
+            elapsed_s=elapsed_s,
+            success=success,
+            summary=summary,
+            artifacts=artifacts,
+        ))
 
     def get_history(self) -> List[str]:
         return list(self._history)
+
+    def get_log(self) -> List[_SkillLogEntry]:
+        return list(self._log)
 
     # ---- state summary for the LLM system prompt ----
 

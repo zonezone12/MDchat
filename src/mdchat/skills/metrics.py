@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Dict
 
 from ..skill import Parameter, ParamType, Skill, SkillResult
 from ..registry import get_default_registry
 
 if TYPE_CHECKING:
     from ..context import AnalysisContext
+
+_SAVE_CSV_PARAM = Parameter(
+    "save_csv", ParamType.BOOLEAN,
+    "Write a CSV of the computed data to the session output directory.",
+    required=False, default=True,
+)
 
 
 def _resolve_selection(context: "AnalysisContext", params: dict, key: str = "selection") -> str:
@@ -17,6 +24,21 @@ def _resolve_selection(context: "AnalysisContext", params: dict, key: str = "sel
     if sel is not None:
         return sel
     return context.main_selection
+
+
+def _maybe_save_csv(
+    context: "AnalysisContext",
+    params: dict,
+    filename: str,
+    columns: Dict[str, list],
+) -> Dict[str, str]:
+    """If save_csv is truthy, write *columns* to a CSV and return artifacts dict."""
+    if not params.get("save_csv", True):
+        return {}
+    import pandas as pd
+    path = os.path.join(context.output_dir, filename)
+    pd.DataFrame(columns).to_csv(path, index=False)
+    return {filename: path}
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +63,7 @@ class ComputeRMSDSkill(Skill):
         Parameter("ref_frame", ParamType.INTEGER,
                   "Reference frame index for RMSD calculation (0-based).",
                   required=False, default=0, min_value=0),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["rmsd_array", "rmsd_summary"]
@@ -76,12 +99,18 @@ class ComputeRMSDSkill(Skill):
 
         context.set("rmsd_summary", summary_text)
 
+        artifacts = _maybe_save_csv(context, params, "rmsd.csv", {
+            "frame": list(range(len(rmsd))),
+            "rmsd": rmsd.tolist(),
+        })
+
         return SkillResult(
             success=True,
             data={
                 "rmsd_array": rmsd,
                 "rmsd_summary": summary_text,
             },
+            artifacts=artifacts,
             summary=summary_text,
         )
 
@@ -105,6 +134,7 @@ class ComputeRgSkill(Skill):
                   "'resname MOF', 'all'). If omitted, uses the session main "
                   "selection.",
                   required=False, default=None),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["rg_array"]
@@ -139,9 +169,15 @@ class ComputeRgSkill(Skill):
         else:
             summary += "Significant size changes — possible (un)folding or large-scale motion."
 
+        artifacts = _maybe_save_csv(context, params, "rg.csv", {
+            "frame": list(range(len(rg))),
+            "rg": rg.tolist(),
+        })
+
         return SkillResult(
             success=True,
             data={"rg_array": rg},
+            artifacts=artifacts,
             summary=summary,
         )
 
@@ -165,6 +201,7 @@ class ComputeRMSFSkill(Skill):
                   "per-residue, 'backbone', 'resname GSA and name C*', 'all'). "
                   "If omitted, uses the session main selection.",
                   required=False, default=None),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["rmsf_array", "rmsf_atom_info"]
@@ -209,9 +246,17 @@ class ComputeRMSFSkill(Skill):
             f"Top {top_n} most flexible:\n" + "\n".join(top_lines)
         )
 
+        artifacts = _maybe_save_csv(context, params, "rmsf.csv", {
+            "resname": [a["resname"] for a in atom_info],
+            "resid": [a["resid"] for a in atom_info],
+            "atom_name": [a["name"] for a in atom_info],
+            "rmsf": rmsf.tolist(),
+        })
+
         return SkillResult(
             success=True,
             data={"rmsf_array": rmsf, "rmsf_atom_info": atom_info},
+            artifacts=artifacts,
             summary=summary,
         )
 
@@ -239,6 +284,7 @@ class ComputePCASkill(Skill):
         Parameter("n_components", ParamType.INTEGER,
                   "Number of principal components to compute.",
                   required=False, default=5, min_value=1, max_value=50),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["pca_scores", "pca_variance_explained"]
@@ -270,12 +316,21 @@ class ComputePCASkill(Skill):
             + "\n".join(pc_lines)
         )
 
+        cols = {"frame": list(range(pcs.shape[0]))}
+        for i in range(pcs.shape[1]):
+            cols[f"PC{i+1}"] = pcs[:, i].tolist()
+        cols["variance_explained"] = [None] * pcs.shape[0]
+        for i, v in enumerate(var_explained):
+            cols["variance_explained"][i] = float(v)
+        artifacts = _maybe_save_csv(context, params, "pca.csv", cols)
+
         return SkillResult(
             success=True,
             data={
                 "pca_scores": pcs,
                 "pca_variance_explained": var_explained,
             },
+            artifacts=artifacts,
             summary=summary,
         )
 
@@ -302,6 +357,7 @@ class ComputeContactsSkill(Skill):
         Parameter("label", ParamType.STRING,
                   "Label for this contact pair (used as context key suffix).",
                   required=False, default="contact"),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["contact_distances"]
@@ -339,9 +395,17 @@ class ComputeContactsSkill(Skill):
         else:
             summary += "Relatively distant — transient or no direct contact."
 
+        artifacts = _maybe_save_csv(
+            context, params, f"contacts_{label}.csv", {
+                "frame": list(range(len(dists))),
+                "min_distance": dists.tolist(),
+            },
+        )
+
         return SkillResult(
             success=True,
             data={"contact_distances": dists},
+            artifacts=artifacts,
             summary=summary,
         )
 
@@ -371,6 +435,7 @@ class ComputeStrainSkill(Skill):
         Parameter("lag", ParamType.INTEGER,
                   "Frame lag for deformation comparison.",
                   required=False, default=1, min_value=1),
+        _SAVE_CSV_PARAM,
     ]
     requires = ["universe"]
     produces = ["strain_array"]
@@ -412,9 +477,15 @@ class ComputeStrainSkill(Skill):
         else:
             summary += "Low strain — structurally quiescent trajectory."
 
+        artifacts = _maybe_save_csv(context, params, "strain.csv", {
+            "frame": list(range(len(strain))),
+            "strain": strain.tolist(),
+        })
+
         return SkillResult(
             success=True,
             data={"strain_array": strain},
+            artifacts=artifacts,
             summary=summary,
         )
 

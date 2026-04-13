@@ -78,6 +78,8 @@ class EngineMixin:
         self.callback.on_skill_start(tool_name, tool_input)
         logger.info("Executing skill '%s' with params: %s", tool_name, tool_input)
 
+        import time as _time
+        _t0 = _time.monotonic()
         try:
             result: SkillResult = skill.execute(self.context, **tool_input)
         except Exception as exc:
@@ -87,8 +89,16 @@ class EngineMixin:
                 error=f"{type(exc).__name__}: {exc}",
                 summary=f"Skill '{tool_name}' failed with an unexpected error: {exc}",
             )
+        _elapsed = _time.monotonic() - _t0
 
-        self.context.record_execution(tool_name)
+        self.context.record_execution(
+            tool_name,
+            params=tool_input,
+            elapsed_s=_elapsed,
+            success=result.success,
+            summary=result.summary,
+            artifacts=result.artifacts if result.artifacts else None,
+        )
 
         if result.artifacts:
             for name, path in result.artifacts.items():
