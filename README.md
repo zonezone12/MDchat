@@ -30,7 +30,7 @@ MDChat> I'll track the guest molecule and check for entry events.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/zonezone/MD_analysis
+git clone -b MDchat https://github.com/zonezone/MD_analysis
 cd MD_analysis
 ```
 
