@@ -17,6 +17,29 @@ _SAVE_CSV_PARAM = Parameter(
     required=False, default=True,
 )
 
+_PLATEAU_DETECT_PARAM = Parameter(
+    "detect_plateau", ParamType.BOOLEAN,
+    "If True, also run sliding-window plateau detection on this time series "
+    "(steady-state region). Writes plateau_detection.csv when save_csv is True.",
+    required=False, default=False,
+)
+_PLATEAU_WINDOW_PARAM = Parameter(
+    "plateau_window", ParamType.INTEGER,
+    "Plateau: sliding window length (frames) for local standard deviation.",
+    required=False, default=50, min_value=2,
+)
+_PLATEAU_REL_PARAM = Parameter(
+    "rel_std_threshold", ParamType.FLOAT,
+    "Plateau: tolerance as a fraction of the global std of the series (e.g. 0.12).",
+    required=False, default=0.12, min_value=1e-6, max_value=1.0,
+)
+_PLATEAU_ABS_PARAM = Parameter(
+    "abs_std_max", ParamType.FLOAT,
+    "Plateau: optional absolute cap on window std (Å for RMSD and Rg). "
+    "Effective threshold is max(abs_std_max, rel_std_threshold * global_std).",
+    required=False, default=None, min_value=0.0,
+)
+
 
 def _resolve_selection(context: "AnalysisContext", params: dict, key: str = "selection") -> str:
     """Return the user-supplied selection or fall back to context.main_selection."""
@@ -51,7 +74,9 @@ class ComputeRMSDSkill(Skill):
         "Compute the Root Mean Square Deviation (RMSD) of selected atoms over "
         "the trajectory relative to a reference frame. RMSD measures how much "
         "the structure deviates from the reference — increasing RMSD indicates "
-        "conformational change."
+        "conformational change. Optional detect_plateau finds a steady-state tail "
+        "without a separate skill call; use detect_motion_plateau alone to retune "
+        "thresholds on cached RMSD."
     )
     category = "metrics"
     parameters = [
@@ -64,13 +89,21 @@ class ComputeRMSDSkill(Skill):
                   "Reference frame index for RMSD calculation (0-based).",
                   required=False, default=0, min_value=0),
         _SAVE_CSV_PARAM,
+        _PLATEAU_DETECT_PARAM,
+        _PLATEAU_WINDOW_PARAM,
+        _PLATEAU_REL_PARAM,
+        _PLATEAU_ABS_PARAM,
     ]
     requires = ["universe"]
-    produces = ["rmsd_array", "rmsd_summary"]
+    produces = [
+        "rmsd_array", "rmsd_summary",
+        "plateau_detection", "plateau_start_frame", "steady_state_representative_frame",
+    ]
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
         from src.TrajectoryMetrics import TrajectoryMetrics
+        from ..plateau_helpers import apply_plateau_to_metric_compute
 
         u = context.universe
         sel_str = _resolve_selection(context, params)
@@ -104,12 +137,29 @@ class ComputeRMSDSkill(Skill):
             "rmsd": rmsd.tolist(),
         })
 
+        plateau_addon, plateau_data, plateau_art = apply_plateau_to_metric_compute(
+            context,
+            params,
+            universe=u,
+            y=rmsd,
+            metric="rmsd",
+            selection=sel_str,
+            compute_label="RMSD",
+            save_csv=bool(params.get("save_csv", True)),
+            csv_filename="plateau_detection.csv",
+        )
+        summary_text = summary_text + plateau_addon
+        artifacts.update(plateau_art)
+
+        data: Dict = {
+            "rmsd_array": rmsd,
+            "rmsd_summary": summary_text,
+        }
+        data.update(plateau_data)
+
         return SkillResult(
             success=True,
-            data={
-                "rmsd_array": rmsd,
-                "rmsd_summary": summary_text,
-            },
+            data=data,
             artifacts=artifacts,
             summary=summary_text,
         )
@@ -125,7 +175,9 @@ class ComputeRgSkill(Skill):
         "Compute the radius of gyration (Rg) over the trajectory. "
         "Rg measures the compactness of the structure — decreasing Rg "
         "indicates compaction, increasing Rg indicates expansion. "
-        "Works for any molecular system (proteins, cages, MOFs, etc.)."
+        "Works for any molecular system (proteins, cages, MOFs, etc.). "
+        "Optional detect_plateau finds a steady-state tail on Rg; use "
+        "detect_motion_plateau alone to retune on cached Rg."
     )
     category = "metrics"
     parameters = [
@@ -135,13 +187,21 @@ class ComputeRgSkill(Skill):
                   "selection.",
                   required=False, default=None),
         _SAVE_CSV_PARAM,
+        _PLATEAU_DETECT_PARAM,
+        _PLATEAU_WINDOW_PARAM,
+        _PLATEAU_REL_PARAM,
+        _PLATEAU_ABS_PARAM,
     ]
     requires = ["universe"]
-    produces = ["rg_array"]
+    produces = [
+        "rg_array",
+        "plateau_detection", "plateau_start_frame", "steady_state_representative_frame",
+    ]
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
         from src.TrajectoryMetrics import TrajectoryMetrics
+        from ..plateau_helpers import apply_plateau_to_metric_compute
 
         u = context.universe
         sel_str = _resolve_selection(context, params)
@@ -174,9 +234,26 @@ class ComputeRgSkill(Skill):
             "rg": rg.tolist(),
         })
 
+        plateau_addon, plateau_data, plateau_art = apply_plateau_to_metric_compute(
+            context,
+            params,
+            universe=u,
+            y=rg,
+            metric="rg",
+            selection=sel_str,
+            compute_label="Rg",
+            save_csv=bool(params.get("save_csv", True)),
+            csv_filename="plateau_detection.csv",
+        )
+        summary = summary + plateau_addon
+        artifacts.update(plateau_art)
+
+        data: Dict = {"rg_array": rg}
+        data.update(plateau_data)
+
         return SkillResult(
             success=True,
-            data={"rg_array": rg},
+            data=data,
             artifacts=artifacts,
             summary=summary,
         )

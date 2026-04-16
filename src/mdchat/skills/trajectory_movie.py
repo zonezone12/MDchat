@@ -73,6 +73,49 @@ def _viewer_http_url(repo_root: str, html_abs_path: str, port: int) -> str:
     return f"http://127.0.0.1:{port}/{path_q}"
 
 
+def _build_ngl_layer_indices(
+    atoms, idx_to_pos: dict[int, int]
+) -> dict[str, list[int]]:
+    """
+    Split the exported atom set into NGL atom-index lists (0..N-1) for visibility toggles.
+    Buckets are mutually exclusive: protein → nucleic → water → other.
+    """
+    n = len(atoms)
+    if n == 0:
+        return {}
+    all_pos = set(range(n))
+    assigned: set[int] = set()
+    layers: dict[str, list[int]] = {}
+
+    def take(sel_str: str, name: str) -> None:
+        try:
+            ag = atoms.select_atoms(sel_str)
+        except Exception:
+            return
+        pos = sorted(
+            idx_to_pos[a.index]
+            for a in ag
+            if a.index in idx_to_pos and idx_to_pos[a.index] not in assigned
+        )
+        if pos:
+            layers[name] = pos
+            assigned.update(pos)
+
+    take("protein", "protein")
+    take("nucleic", "nucleic")
+    water_sel = (
+        "resname HOH or resname WAT or resname SOL or resname TIP3 or "
+        "resname OPC or resname SPC or resname TIP4 or resname TIP4P or resname TIP5"
+    )
+    take(water_sel, "water")
+    other = sorted(all_pos - assigned)
+    if other:
+        layers["other"] = other
+    if not layers:
+        layers["all"] = list(range(n))
+    return layers
+
+
 def _build_multiframe_pdb(u, atoms, frame_indices: list[int]) -> str:
     """Write selected trajectory frames as a multi-MODEL PDB string."""
     import tempfile
@@ -107,9 +150,9 @@ TRAJECTORY_MOVIE_HTML = """\
 <style>
   * {{ box-sizing: border-box; }}
   html, body {{ margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #12121a; color: #e8e8e8; }}
-  #viewport {{ width: 100vw; height: calc(100vh - 120px); }}
+  #viewport {{ width: 100vw; height: calc(100vh - 200px); }}
   #bar {{
-    position: absolute; bottom: 0; left: 0; right: 0; min-height: 120px;
+    position: absolute; bottom: 0; left: 0; right: 0; min-height: 200px;
     background: rgba(0,0,0,0.75); padding: 10px 14px 14px;
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     border-top: 1px solid #333;
@@ -130,6 +173,14 @@ TRAJECTORY_MOVIE_HTML = """\
   #status {{ font-size: 12px; color: #9cf; min-width: 200px; flex: 1 1 200px; }}
   .row {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
   input[type="range"] {{ width: 160px; }}
+  select {{
+    background: #2a2a38; color: #e8e8e8; border: 1px solid #444;
+    padding: 6px 10px; border-radius: 6px; font-size: 13px; max-width: 200px;
+  }}
+  #layerControls {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }}
+  #layerControls label {{ display: inline; margin-bottom: 0; font-size: 12px; color: #ccc; cursor: pointer; }}
+  #layerControls input {{ vertical-align: middle; margin-right: 4px; }}
+  #appearanceRow {{ flex: 1 1 100%; border-top: 1px solid #333; padding-top: 10px; margin-top: 4px; }}
 </style>
 <script src="https://unpkg.com/ngl@2.3.1/dist/ngl.js"></script>
 </head>
@@ -163,6 +214,14 @@ TRAJECTORY_MOVIE_HTML = """\
       <input type="number" id="gifDelay" value="{gif_delay_ms}" min="20" max="500" step="5" style="width:72px" />
     </div>
   </div>
+  <div id="appearanceRow">
+    <label>Main appearance (NGL)</label>
+    <div class="row">
+      <select id="mainRepr" title="Representation for the main structure"></select>
+    </div>
+    <label style="margin-top:8px">Show species (atoms in this clip only)</label>
+    <div id="layerControls" class="row"></div>
+  </div>
   <div style="flex:1 1 100%">
     <label>After you set the view (rotate / zoom / pan), capture the animation</label>
     <div class="row">
@@ -180,7 +239,28 @@ TRAJECTORY_MOVIE_HTML = """\
 const PDB_B64 = "{pdb_b64}";
 const FRAME_LABELS = {frame_labels_json};
 const GIF_DELAY_DEFAULT = {gif_delay_ms};
+const DEFAULT_MAIN_REPR = {default_main_repr_json};
+const LAYER_INDICES = __MDCHAT_LAYER_JSON__;
+const HIGHLIGHTS_DATA = __MDCHAT_HIGHLIGHTS_JSON__;
+const REPR_CHOICES = __MDCHAT_REPR_CHOICES_JSON__;
 const GIFENC_MODULE = "https://unpkg.com/gifenc@1.0.3/dist/gifenc.esm.js";
+
+function layerLabel(key) {{
+  var m = {{
+    protein: "Protein",
+    nucleic: "Nucleic / RNA",
+    water: "Water",
+    other: "Other (ligands, ions, …)",
+    all: "All atoms",
+    structure: "Structure"
+  }};
+  return m[key] || key;
+}}
+
+function seleFromIndices(arr) {{
+  if (!arr || arr.length === 0) return null;
+  return "@" + arr.join(",");
+}}
 
 function pdbTextFromB64(b64) {{
   const bin = atob(b64);
@@ -301,6 +381,87 @@ function runTrajectoryViewer(gifenc) {{
   let structComp = null;
   let nFrames = 0;
   let playTimer = null;
+  var layerVisibility = {{}};
+
+  function initLayerVisibility() {{
+    Object.keys(LAYER_INDICES).forEach(function (k) {{
+      layerVisibility[k] = true;
+    }});
+  }}
+
+  function rebuildRepresentations() {{
+    if (!structComp) return;
+    structComp.removeAllRepresentations();
+    var mainReprEl = document.getElementById("mainRepr");
+    var mainRepr = mainReprEl && mainReprEl.value ? mainReprEl.value : DEFAULT_MAIN_REPR;
+    var keys = Object.keys(LAYER_INDICES);
+    if (keys.length === 0) {{
+      structComp.addRepresentation(mainRepr, {{ color: "element", radiusScale: 1.5 }});
+    }} else {{
+      keys.forEach(function (k) {{
+        if (!layerVisibility[k]) return;
+        var idx = LAYER_INDICES[k];
+        var sele = seleFromIndices(idx);
+        if (!sele) return;
+        structComp.addRepresentation(mainRepr, {{
+          sele: sele,
+          color: "element",
+          radiusScale: 1.5
+        }});
+      }});
+    }}
+    (HIGHLIGHTS_DATA || []).forEach(function (h) {{
+      var sele = seleFromIndices(h.indices);
+      if (!sele) return;
+      structComp.addRepresentation(h.repr, {{
+        sele: sele,
+        color: h.color,
+        radiusScale: 2.5
+      }});
+    }});
+    stage.viewer.requestRender();
+  }}
+
+  function setupAppearanceControls() {{
+    initLayerVisibility();
+    var mainRepr = document.getElementById("mainRepr");
+    if (mainRepr && REPR_CHOICES && REPR_CHOICES.length) {{
+      REPR_CHOICES.forEach(function (r) {{
+        var opt = document.createElement("option");
+        opt.value = r;
+        opt.textContent = r;
+        mainRepr.appendChild(opt);
+      }});
+      mainRepr.value =
+        REPR_CHOICES.indexOf(DEFAULT_MAIN_REPR) >= 0 ? DEFAULT_MAIN_REPR : REPR_CHOICES[0];
+      mainRepr.addEventListener("change", function () {{ rebuildRepresentations(); }});
+    }}
+    var lc = document.getElementById("layerControls");
+    var lk = Object.keys(LAYER_INDICES);
+    if (lc) {{
+      if (lk.length <= 1) {{
+        lc.style.display = "none";
+        var spLab = lc.previousElementSibling;
+        if (spLab && spLab.tagName === "LABEL") spLab.style.display = "none";
+      }} else {{
+        lk.forEach(function (k) {{
+          var id = "layer_" + k;
+          var lab = document.createElement("label");
+          var chk = document.createElement("input");
+          chk.type = "checkbox";
+          chk.id = id;
+          chk.checked = true;
+          chk.addEventListener("change", function () {{
+            layerVisibility[k] = chk.checked;
+            rebuildRepresentations();
+          }});
+          lab.appendChild(chk);
+          lab.appendChild(document.createTextNode(" " + layerLabel(k)));
+          lc.appendChild(lab);
+        }});
+      }}
+    }}
+  }}
 
   function setFrameCoords(i, done) {{
     if (!structComp || !frameCoords[i]) return;
@@ -325,7 +486,8 @@ function runTrajectoryViewer(gifenc) {{
         return;
       }}
 
-      {representation_js}
+      setupAppearanceControls();
+      rebuildRepresentations();
 
       structComp.autoView();
       statusEl.textContent = "Ready.";
@@ -638,11 +800,10 @@ class TrajectoryMovieSkill(Skill):
 
         idx_to_pos = {atom.index: pos for pos, atom in enumerate(atoms)}
 
-        repr_js_lines = [
-            f'structComp.addRepresentation("{main_repr}", '
-            f'{{ color: "element", radiusScale: 1.5 }});',
-        ]
-        highlight_summaries = []
+        layers = _build_ngl_layer_indices(atoms, idx_to_pos)
+
+        highlight_summaries: list[str] = []
+        highlights_payload: list[dict[str, Any]] = []
         for i, hl_sel in enumerate(highlight_sels):
             color = highlight_colors[i % len(highlight_colors)]
             try:
@@ -658,14 +819,14 @@ class TrajectoryMovieSkill(Skill):
                     f"  - '{hl_sel}': no overlap with main selection, skipped"
                 )
                 continue
-            sele_str = ",".join(str(p) for p in ngl_positions)
-            repr_js_lines.append(
-                f'structComp.addRepresentation("{highlight_repr_name}", '
-                f'{{ sele: "@{sele_str}", color: "{color}", radiusScale: 2.5 }});'
+            highlights_payload.append(
+                {
+                    "indices": ngl_positions,
+                    "color": color,
+                    "repr": highlight_repr_name,
+                }
             )
             highlight_summaries.append(f"  - '{hl_sel}': {len(ngl_positions)} atoms in {color}")
-
-        representation_js = "\n      ".join(repr_js_lines)
 
         pdb_text = _build_multiframe_pdb(u, atoms, frame_indices)
         pdb_b64 = base64.b64encode(pdb_text.encode("ascii", errors="replace")).decode("ascii")
@@ -676,7 +837,8 @@ class TrajectoryMovieSkill(Skill):
             f"{len(frame_indices)} frames &bull; stride {stride} &bull; "
             f"traj indices {frame_indices[0]}–{frame_indices[-1]} &bull; "
             f"{len(atoms)} atoms &bull; {selection}<br/>"
-            f"Set the view, then <b>Download GIF</b>."
+            f"Use <b>Main appearance</b> and species checkboxes (embedded atoms only), "
+            f"then <b>Download GIF</b>."
         )
 
         base_dl = filename.rsplit(".", 1)[0] if "." in filename else filename
@@ -689,9 +851,12 @@ class TrajectoryMovieSkill(Skill):
             frame_labels_json=frame_labels_json,
             gif_delay_ms=gif_delay_ms,
             bg_color=bg_color,
-            representation_js=representation_js,
+            default_main_repr_json=json.dumps(main_repr),
             download_name=download_name,
         )
+        html = html.replace("__MDCHAT_LAYER_JSON__", json.dumps(layers))
+        html = html.replace("__MDCHAT_HIGHLIGHTS_JSON__", json.dumps(highlights_payload))
+        html = html.replace("__MDCHAT_REPR_CHOICES_JSON__", json.dumps(_NGL_REPR_CHOICES))
 
         out_path = os.path.join(context.output_dir, filename)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -702,7 +867,8 @@ class TrajectoryMovieSkill(Skill):
             f"Trajectory movie viewer: {out_path}",
             f"Clip: {len(frame_indices)} frames (trajectory indices "
             f"{frame_indices[0]}–{frame_indices[-1]}), center {center}.",
-            "In the browser, rotate/zoom to the desired angle, then click **Download GIF**.",
+            "In the browser, use **Main appearance** and species checkboxes (atoms in your "
+            "selection only), rotate/zoom, then **Download GIF**.",
         ]
 
         viewer_url: str | None = None

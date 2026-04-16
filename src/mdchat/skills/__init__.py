@@ -7,6 +7,7 @@ Importing this package registers all skills with the default registry.
 from . import (  # noqa: F401
     trajectory,
     metrics,
+    plateau,
     endpoints,
     plotting,
     scoring,

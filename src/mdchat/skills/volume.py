@@ -18,7 +18,9 @@ class ComputeVolumeSkill(Skill):
         "Compute the molecular volume (and internal cavity volume) over the "
         "trajectory using a voxel-based approach. Tracks how the enclosed "
         "volume changes over time — useful for cage molecules, channels, or "
-        "binding pockets."
+        "binding pockets. Optional detect_plateau_target / detect_plateau_cavity "
+        "run plateau detection without calling compute_volume twice; use "
+        "detect_motion_plateau to retune thresholds on cached volume only."
     )
     category = "volume"
     parameters = [
@@ -39,13 +41,46 @@ class ComputeVolumeSkill(Skill):
         Parameter("save_csv", ParamType.BOOLEAN,
                   "Save volume time series as CSV.",
                   required=False, default=True),
+        Parameter(
+            "detect_plateau_target", ParamType.BOOLEAN,
+            "If True, run plateau detection on the target (enclosed) volume series.",
+            required=False, default=False,
+        ),
+        Parameter(
+            "detect_plateau_cavity", ParamType.BOOLEAN,
+            "If True, run plateau detection on the cavity volume series.",
+            required=False, default=False,
+        ),
+        Parameter(
+            "plateau_window", ParamType.INTEGER,
+            "Plateau: sliding window length (samples) for local standard deviation.",
+            required=False, default=50, min_value=2,
+        ),
+        Parameter(
+            "rel_std_threshold", ParamType.FLOAT,
+            "Plateau: tolerance as a fraction of the global std of the series.",
+            required=False, default=0.12, min_value=1e-6, max_value=1.0,
+        ),
+        Parameter(
+            "abs_std_max", ParamType.FLOAT,
+            "Plateau: optional absolute cap on window std (Å³ for volume series). "
+            "Effective threshold is max(abs_std_max, rel_std_threshold * global_std).",
+            required=False, default=None, min_value=0.0,
+        ),
     ]
     requires = ["universe"]
-    produces = ["volume_array", "cavity_volume_array"]
+    produces = [
+        "volume_array",
+        "cavity_volume_array",
+        "plateau_detection",
+        "plateau_start_frame",
+        "steady_state_representative_frame",
+    ]
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
         from src.VolumeAnalyzer import VolumeAnalyzer
+        from ..plateau_helpers import apply_plateau_volume_optional
 
         u = context.universe
         selection = params.get("selection") or context.main_selection
@@ -67,6 +102,7 @@ class ComputeVolumeSkill(Skill):
         context.set("volume_array", target_vols)
         context.set("volume", target_vols)
         context.set("cavity_volume_array", cavity_vols)
+        context.set("volume_frames", frames)
 
         artifacts = {}
         if save_csv:
@@ -98,12 +134,28 @@ class ComputeVolumeSkill(Skill):
         else:
             summary += "Volume is stable throughout the trajectory."
 
+        plateau_addon, plateau_data, plateau_art = apply_plateau_volume_optional(
+            context,
+            params,
+            universe=u,
+            target_vols=target_vols,
+            cavity_vols=cavity_vols,
+            frames=frames,
+            selection=selection,
+            save_csv=bool(save_csv),
+        )
+        summary = summary + plateau_addon
+        artifacts.update(plateau_art)
+
+        data = {
+            "volume_array": target_vols,
+            "cavity_volume_array": cavity_vols,
+        }
+        data.update(plateau_data)
+
         return SkillResult(
             success=True,
-            data={
-                "volume_array": target_vols,
-                "cavity_volume_array": cavity_vols,
-            },
+            data=data,
             artifacts=artifacts,
             summary=summary,
         )
