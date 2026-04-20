@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .context import AnalysisContext
+from .engine_common import BANNER, HELP_TEXT, format_welcome
 from .llm import create_chat_engine
 from .registry import SkillRegistry, get_default_registry
 
@@ -28,32 +29,6 @@ class _ChatEngine(Protocol):
     def reset(self) -> None: ...
 
 console = Console()
-
-BANNER = r"""
-  __  __ ____   ____ _           _
- |  \/  |  _ \ / ___| |__   __ _| |_
- | |\/| | | | | |   | '_ \ / _` | __|
- | |  | | |_| | |___| | | | (_| | |_
- |_|  |_|____/ \____|_| |_|\__,_|\__|
-
- LLM-Powered Molecular Dynamics Analysis
-"""
-
-HELP_TEXT = """\
-**Commands:**
-- Type a question in natural language to analyze your trajectory.
-- `/load <topology> <trajectory>` -- Quick-load files into the session.
-- `/status` -- Show current analysis state.
-- `/skills` -- List available skills.
-- `/reset` -- Clear conversation history (keeps loaded data).
-- `/help` -- Show this help message.
-- `/quit` or `/exit` -- Exit MDChat.
-
-**Quick start:**
-1. Set your API key in `.env` — `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini). Set `MDCHAT_PROVIDER=gemini` for Gemini (see `.env.example`).
-2. Type: `/load myfile.prmtop myfile.nc`
-3. Ask: "Compute the RMSD and plot it."
-"""
 
 
 class _RichCallback:
@@ -144,18 +119,20 @@ def run_cli(
 ) -> None:
     """Main entry point for the MDChat CLI."""
 
-    console.print(Text(BANNER, style="bold cyan"))
-    console.print(Markdown(HELP_TEXT))
-
     # -- registry --
     registry = get_default_registry()
     registry.auto_discover()
     n_skills = len(registry.list_skills())
-    console.print(f"[dim]{n_skills} skills registered.[/dim]\n")
 
     # -- context --
     context = AnalysisContext(output_dir=output_dir)
-    console.print(f"[dim]Output directory: {context.output_dir}[/dim]\n")
+
+    # -- print welcome --
+    console.print(Text(BANNER, style="bold cyan"))
+    console.print(Markdown(HELP_TEXT))
+    console.print(f"[dim]{n_skills} skills registered.[/dim]")
+    console.print(f"[dim]Output directory: {context.output_dir}[/dim]")
+    console.print(f"[dim]Provider: {provider}[/dim]\n")
 
     # -- engine --
     callback = _RichCallback()
@@ -167,7 +144,6 @@ def run_cli(
         model=model,
         callback=callback,
     )
-    console.print(f"[dim]Provider: {provider}[/dim]\n")
 
     # -- main loop --
     while True:

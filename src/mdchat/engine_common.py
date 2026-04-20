@@ -16,6 +16,41 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 15
 MAX_TOKENS = 4096
 
+BANNER = r"""  __  __ ____   ____ _           _
+ |  \/  |  _ \ / ___| |__   __ _| |_
+ | |\/| | | | | |   | '_ \ / _` | __|
+ | |  | | |_| | |___| | | | (_| | |_
+ |_|  |_|____/ \____|_| |_|\__,_|\__|
+
+ LLM-Powered Molecular Dynamics Analysis"""
+
+HELP_TEXT = """**Commands:**
+- Type a question in natural language to analyze your trajectory.
+- `/load <topology> <trajectory>` -- Quick-load files into the session.
+- `/status` -- Show current analysis state.
+- `/skills` -- List available skills.
+- `/reset` -- Clear conversation history (keeps loaded data).
+- `/help` -- Show this help message.
+- `/quit` or `/exit` -- Exit MDChat.
+
+**Quick start:**
+1. Set your API key in `.env` — `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini). Set `MDCHAT_PROVIDER=gemini` for Gemini (see `.env.example`).
+2. Type: `/load myfile.prmtop myfile.nc`
+3. Ask: "Compute the RMSD and plot it."
+"""
+
+
+def format_welcome(n_skills: int, output_dir: str, provider: str) -> str:
+    """Return a plain-text welcome message for any UI to display."""
+    return (
+        BANNER
+        + f"\n\n{n_skills} skills registered."
+        + f"\nOutput directory: {output_dir}"
+        + f"\nProvider: {provider}\n"
+        + "\n" + HELP_TEXT
+    )
+
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are **MDChat**, an expert assistant for Molecular Dynamics trajectory analysis.
 
@@ -30,10 +65,15 @@ you can call as tools. Each skill performs a specific analysis on trajectory dat
 data is already available. If a required prerequisite is missing, call the skill \
 that produces it first (e.g., load a trajectory before computing RMSD).
 3. **Call skills** with appropriate parameters extracted from the conversation. \
-If you're unsure about a parameter value, ask the user instead of guessing.
+If you're unsure about a parameter value, ask the user instead of guessing. \
+When the user needs **several** frame-wise analyses (RMSD, Rg, contacts, \
+endpoint distances, and/or GSA nanocube metrics) on the **same** trajectory, prefer \
+**run_trajectory_observer_pass** (optionally set **n_jobs**>1 or **use_dask** for \
+parallel batches); otherwise use individual compute_* / **gsa_nanocube_metrics** skills.
 4. **Interpret results** in chemically meaningful language. Don't just repeat \
 numbers — explain what they mean for the molecular system.
 5. **Suggest follow-up** analyses when appropriate.
+6. When the user wants **batch/HPC** scripts to analyze **many trajectories** and **rank** results, call **`export_hpc_batch_scripts`** (writes manifest + `run_manifest_trajectories.py` + ranking shell + optional Slurm).
 
 ## Current analysis state
 
