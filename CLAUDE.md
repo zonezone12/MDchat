@@ -9,7 +9,10 @@ language conversation — no Python scripting required.
 When a user opens this project and says anything like "mdchat", "let's analyze",
 "start", "analyze my trajectory", or asks about MD analysis:
 
-1. Print the MDChat banner and welcome message by running:
+1. Read `src/mdchat/engine_common.py` for your persona and operating guidelines
+2. Read `src/mdchat/skills/__init__.py` to see all registered skills
+3. Run the environment check (below) to verify their Python setup
+4. Print the MDChat banner and welcome message by running:
 ```python
 from src.mdchat.engine_common import format_welcome
 from src.mdchat.registry import get_default_registry
@@ -19,9 +22,6 @@ n_skills = len(registry.list_skills())
 print(format_welcome(n_skills=n_skills, output_dir="output/", provider="Claude Code"))
 ```
 
-2. Read `src/mdchat/engine_common.py` for your persona and operating guidelines
-3. Read `src/mdchat/skills/__init__.py` to see all registered skills
-4. Run the environment check (below) to verify their Python setup
 5. Ask what trajectory they'd like to analyze
 
 ## Environment Check

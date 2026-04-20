@@ -26,6 +26,9 @@ class LoadTrajectorySkill(Skill):
                   "Path to the topology file (e.g., .prmtop, .tpr, .psf, .pdb)"),
         Parameter("trajectory", ParamType.FILE_PATH,
                   "Path to the trajectory file (e.g., .nc, .xtc, .dcd, .trr)"),
+        Parameter("format", ParamType.STRING,
+                  "Format of the trajectory file (e.g., 'TRJ', 'TRR', 'DCD', 'XTC')",
+                  required=False, default="TRJ"),
         Parameter("align", ParamType.BOOLEAN,
                   "Whether to align the trajectory to the first frame",
                   required=False, default=True),
@@ -60,7 +63,7 @@ class LoadTrajectorySkill(Skill):
                 )
 
         try:
-            u = mda.Universe(topology, trajectory)
+            u = mda.Universe(topology, trajectory,format="TRJ")
         except Exception as exc:
             return SkillResult(
                 success=False,

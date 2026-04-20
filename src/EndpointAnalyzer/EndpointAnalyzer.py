@@ -576,6 +576,7 @@ class EndpointAnalyzerObserver(FrameObserver):
         self,
         residue_sel_list: List[str],
         endpoints_finder: Optional[EndpointsFinder] = None,
+        n_frame_rows: Optional[int] = None,
     ):
         """
         Initialize EndpointAnalyzerObserver.
@@ -583,11 +584,14 @@ class EndpointAnalyzerObserver(FrameObserver):
         Args:
             residue_sel_list: List of residue selection strings
             endpoints_finder: Optional EndpointsFinder instance
+            n_frame_rows: If set, allocate distance arrays with this many rows
+                (use the sliced iteration length when using start/stop/step).
         """
         super().__init__()  # Initialize results dict from FrameObserver
         
         self.residue_sel_list = residue_sel_list
         self.endpoints_finder = endpoints_finder or EndpointsFinder()
+        self._n_frame_rows = n_frame_rows
         
         # Storage for results (using self.results for ResultsGroup pattern)
         self.stored_ep_indices: List[List[int]] = []
@@ -616,7 +620,11 @@ class EndpointAnalyzerObserver(FrameObserver):
     def on_frame_start(self, iterator: TrajectoryIterator) -> None:
         """Initialize data structures before iteration."""
         self.n_res = len(self.residue_sel_list)
-        self.n_frames = iterator.get_n_frames()
+        self.n_frames = (
+            int(self._n_frame_rows)
+            if self._n_frame_rows is not None
+            else iterator.get_n_frames()
+        )
         
         # Find endpoint indices once on the initial frame
         u = iterator.universe

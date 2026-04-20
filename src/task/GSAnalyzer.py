@@ -18,7 +18,8 @@ except ImportError as e:
 
 from sklearn.cluster import KMeans
 from src.VolumeAnalyzer import VolumeAnalyzer
-from src.TrajectoryIterator import FrameObserver, TrajectoryIterator, ResultsGroup
+from src.TrajectoryIterator import FrameObserver, TrajectoryIterator
+from src.Aggregator import ResultsGroup
 
 # Import Client for type hints (optional dependency)
 try:

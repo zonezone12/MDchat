@@ -79,6 +79,20 @@ class ResultsGroup:
         not a weighted mean based on number of frames.
         """
         return (main + other) / 2
+
+    @staticmethod
+    def ndarray_merge_nonnan(main: np.ndarray, other: np.ndarray) -> np.ndarray:
+        """
+        Merge same-shaped float arrays for parallel workers: copy non-NaN values
+        from *other* into *main* (in-place) and return *main*.
+        """
+        if main.shape != other.shape:
+            raise ValueError(
+                f"ndarray_merge_nonnan shape mismatch: {main.shape} vs {other.shape}"
+            )
+        valid = ~np.isnan(other)
+        main[valid] = other[valid]
+        return main
     
     @staticmethod
     def list_extend(main: List, other: List) -> List:
