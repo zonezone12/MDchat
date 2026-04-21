@@ -64,6 +64,12 @@ def _maybe_save_csv(
     return {filename: path}
 
 
+def _run_observer_pass(context: "AnalysisContext", **params) -> SkillResult:
+    from .trajectory_observer_pass import RunTrajectoryObserverPassSkill
+
+    return RunTrajectoryObserverPassSkill().execute(context, **params)
+
+
 # ---------------------------------------------------------------------------
 # RMSD
 # ---------------------------------------------------------------------------
@@ -102,15 +108,22 @@ class ComputeRMSDSkill(Skill):
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
-        from src.TrajectoryMetrics import TrajectoryMetrics
         from ..plateau_helpers import apply_plateau_to_metric_compute
 
         u = context.universe
         sel_str = _resolve_selection(context, params)
         ref_frame = params.get("ref_frame", 0)
 
-        tm = TrajectoryMetrics()
-        rmsd = tm.compute_rmsd(u, sel_str, ref_frame=ref_frame)
+        pass_res = _run_observer_pass(
+            context,
+            include_rmsd=True,
+            rmsd_selection=sel_str,
+            rmsd_ref_frame=ref_frame,
+            save_csv=False,
+        )
+        if not pass_res.success:
+            return pass_res
+        rmsd = context.get("rmsd_array")
 
         context.set("rmsd_array", rmsd)
 
@@ -200,14 +213,20 @@ class ComputeRgSkill(Skill):
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
-        from src.TrajectoryMetrics import TrajectoryMetrics
         from ..plateau_helpers import apply_plateau_to_metric_compute
 
         u = context.universe
         sel_str = _resolve_selection(context, params)
 
-        tm = TrajectoryMetrics()
-        rg = tm.radius_of_gyration(u, sel_str)
+        pass_res = _run_observer_pass(
+            context,
+            include_rg=True,
+            rg_selection=sel_str,
+            save_csv=False,
+        )
+        if not pass_res.success:
+            return pass_res
+        rg = context.get("rg_array")
 
         context.set("rg_array", rg)
 
@@ -285,21 +304,21 @@ class ComputeRMSFSkill(Skill):
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
-        from src.TrajectoryMetrics import TrajectoryMetrics
-
-        u = context.universe
         sel_str = _resolve_selection(context, params)
 
-        tm = TrajectoryMetrics()
-        rmsf = tm.compute_rmsf(u, sel_str)
+        pass_res = _run_observer_pass(
+            context,
+            include_rmsf=True,
+            rmsf_selection=sel_str,
+            save_csv=False,
+        )
+        if not pass_res.success:
+            return pass_res
+        rmsf = context.get("rmsf_array")
 
         context.set("rmsf_array", rmsf)
 
-        atoms = u.select_atoms(sel_str)
-        atom_info = [
-            {"resname": a.resname, "resid": int(a.resid), "name": a.name}
-            for a in atoms
-        ]
+        atom_info = context.get("rmsf_atom_info")
         context.set("rmsf_atom_info", atom_info)
 
         mean_rmsf = float(np.nanmean(rmsf))
@@ -368,17 +387,21 @@ class ComputePCASkill(Skill):
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
-        from src.TrajectoryMetrics import TrajectoryMetrics
-
-        u = context.universe
         sel_str = _resolve_selection(context, params)
         n_comp = params.get("n_components", 5)
 
-        tm = TrajectoryMetrics()
-        pcs, pca_model = tm.pca_on_fluctuations(u, sel_str, n_components=n_comp)
-
+        pass_res = _run_observer_pass(
+            context,
+            include_pca=True,
+            pca_selection=sel_str,
+            pca_n_components=n_comp,
+            save_csv=False,
+        )
+        if not pass_res.success:
+            return pass_res
+        pcs = context.get("pca_scores")
+        var_explained = context.get("pca_variance_explained")
         context.set("pca_scores", pcs)
-        var_explained = pca_model.explained_variance_ratio_
         context.set("pca_variance_explained", var_explained)
 
         total_var = float(np.sum(var_explained)) * 100
@@ -388,7 +411,7 @@ class ComputePCASkill(Skill):
 
         summary = (
             f"PCA computed for '{sel_str}' ({n_comp} components, "
-            f"{u.trajectory.n_frames} frames).\n"
+            f"{pcs.shape[0]} frames).\n"
             f"Total variance explained: {total_var:.1f}%\n"
             + "\n".join(pc_lines)
         )
@@ -441,15 +464,21 @@ class ComputeContactsSkill(Skill):
 
     def execute(self, context: AnalysisContext, **params) -> SkillResult:
         import numpy as np
-        from src.TrajectoryMetrics import TrajectoryMetrics
-
-        u = context.universe
         sel_a = params["selection_a"]
         sel_b = params["selection_b"]
         label = params.get("label", "contact")
 
-        tm = TrajectoryMetrics()
-        dists = tm.contact_distances(u, sel_a, sel_b)
+        pass_res = _run_observer_pass(
+            context,
+            include_contacts=True,
+            contact_selection_a=sel_a,
+            contact_selection_b=sel_b,
+            contact_label=label,
+            save_csv=False,
+        )
+        if not pass_res.success:
+            return pass_res
+        dists = context.get("contact_distances")
 
         key = f"contact_distances_{label}"
         context.set(key, dists)

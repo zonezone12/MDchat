@@ -5,6 +5,8 @@ Shared pieces for LLM backends (Anthropic, Gemini): system prompt and skill exec
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from .context import AnalysisContext
@@ -123,6 +125,38 @@ numbers — explain what they mean for the molecular system.
 """
 
 
+def _env_truthy(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _default_playbook_path() -> Path:
+    """Repo-root ``docs/mdchat-analysis-playbook.md`` (``src/mdchat/`` → parents ×3)."""
+    return Path(__file__).resolve().parent.parent.parent / "docs" / "mdchat-analysis-playbook.md"
+
+
+def _load_optional_playbook_append() -> str:
+    """Append user-analysis playbook to system prompt when ``MDCHAT_INCLUDE_PLAYBOOK`` is set."""
+    if not _env_truthy("MDCHAT_INCLUDE_PLAYBOOK"):
+        return ""
+    override = os.environ.get("MDCHAT_PLAYBOOK_PATH", "").strip()
+    path = Path(override).expanduser() if override else _default_playbook_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning(
+            "MDCHAT_INCLUDE_PLAYBOOK is set but playbook could not be read from %s: %s",
+            path,
+            exc,
+        )
+        return ""
+    return (
+        "\n\n## User analysis playbook (opt-in)\n\n"
+        "Follow these patterns when guiding the user through analyses:\n\n"
+        f"{text}"
+    )
+
+
 class EngineMixin:
     """Shared skill runner and system prompt (used by Anthropic and Gemini engines)."""
 
@@ -131,9 +165,10 @@ class EngineMixin:
     callback: Any
 
     def _build_system_prompt(self) -> str:
-        return SYSTEM_PROMPT_TEMPLATE.format(
+        base = SYSTEM_PROMPT_TEMPLATE.format(
             context_state=self.context.get_state_summary(),
         )
+        return base + _load_optional_playbook_append()
 
     def _execute_skill(self, tool_name: str, tool_input: dict) -> tuple[str, bool]:
         skill = self.registry.get(tool_name)

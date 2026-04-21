@@ -14,7 +14,6 @@ import numpy as np
 
 try:
     import MDAnalysis as mda
-    from MDAnalysis.analysis import align
 except ImportError:
     import sys
 
@@ -23,6 +22,7 @@ except ImportError:
 
 from ..Aggregator import ResultsGroup
 from ..TrajectoryIterator import FrameObserver, TrajectoryIterator
+from .TrajectoryMetrics import contact_min_distance, rg_value, rmsd_value_aligned
 
 MetricKind = Literal["rmsd", "rg", "contacts"]
 
@@ -152,22 +152,14 @@ class StackedMetricsObserver(FrameObserver):
             if spec.kind == "rmsd":
                 sel = self._sel_cache[spec.result_key]
                 ref = self._rmsd_ref[spec.result_key]
-                _, rmsd_val = align.rotation_matrix(sel.positions, ref)
-                self._arrays[spec.result_key][frame_idx] = rmsd_val
+                self._arrays[spec.result_key][frame_idx] = rmsd_value_aligned(sel.positions, ref)
             elif spec.kind == "rg":
                 sel = self._sel_cache[spec.result_key]
-                coords = sel.positions
-                com = sel.center_of_mass()
-                rg2 = ((coords - com) ** 2).sum(axis=1).mean()
-                self._arrays[spec.result_key][frame_idx] = float(np.sqrt(rg2))
+                self._arrays[spec.result_key][frame_idx] = rg_value(sel.positions)
             elif spec.kind == "contacts":
                 a = self._sel_cache[spec.result_key + "__a"]
                 b = self._sel_cache[spec.result_key + "__b"]
-                da = a.positions[:, None, :]
-                db = b.positions[None, :, :]
-                diff = da - db
-                dd = np.sqrt((diff * diff).sum(axis=2))
-                self._arrays[spec.result_key][frame_idx] = float(dd.min())
+                self._arrays[spec.result_key][frame_idx] = contact_min_distance(a.positions, b.positions)
 
     def on_frame_end(self, iterator: TrajectoryIterator) -> None:
         for key, arr in self._arrays.items():

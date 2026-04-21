@@ -17,6 +17,39 @@ except ImportError:
 from ..FrameGatherer import FrameGatherer
 
 
+def rmsd_value_aligned(frame_coords: np.ndarray, ref_coords: np.ndarray) -> float:
+    _, rmsd_val = align.rotation_matrix(frame_coords, ref_coords)
+    return float(rmsd_val)
+
+
+def rg_value(coords: np.ndarray) -> float:
+    com = coords.mean(axis=0)
+    rg2 = ((coords - com) ** 2).sum(axis=1).mean()
+    return float(np.sqrt(rg2))
+
+
+def contact_min_distance(coords_a: np.ndarray, coords_b: np.ndarray) -> float:
+    da = coords_a[:, None, :]
+    db = coords_b[None, :, :]
+    diff = da - db
+    dd = np.sqrt((diff * diff).sum(axis=2))
+    return float(dd.min())
+
+
+def rmsf_from_coords(coords: np.ndarray) -> np.ndarray:
+    mean = coords.mean(axis=0)
+    diffsq = (coords - mean) ** 2
+    return np.sqrt(diffsq.sum(axis=2).mean(axis=0))
+
+
+def pca_from_coords(coords: np.ndarray, n_components: int = 5) -> Tuple[np.ndarray, PCA]:
+    X = coords.reshape(coords.shape[0], -1)
+    Xc = X - X.mean(axis=0)
+    pca = PCA(n_components=n_components, svd_solver="auto")
+    pcs = pca.fit_transform(Xc)
+    return pcs, pca
+
+
 class TrajectoryMetrics:
     """Compute basic trajectory metrics like RMSD, RMSF, radius of gyration, etc."""
 
@@ -56,16 +89,14 @@ class TrajectoryMetrics:
             ref = coords[ref_idx[0]].copy()
             rmsds = []
             for frame_coords in coords:
-                _, rmsd_val = align.rotation_matrix(frame_coords, ref)
-                rmsds.append(rmsd_val)
+                rmsds.append(rmsd_value_aligned(frame_coords, ref))
             result = np.array(rmsds)
         else:
             sel = u.select_atoms(sel_str)
             ref = sel.positions.copy()
             rmsds = []
             for _ in u.trajectory:
-                _, rmsd_val = align.rotation_matrix(sel.positions, ref)
-                rmsds.append(rmsd_val)
+                rmsds.append(rmsd_value_aligned(sel.positions, ref))
             result = np.array(rmsds)
 
         self.rmsd_cache[cache_key] = result
@@ -98,9 +129,7 @@ class TrajectoryMetrics:
                 coords.append(sel.positions.copy())
             coords = np.array(coords)
 
-        mean = coords.mean(axis=0)
-        diffsq = (coords - mean) ** 2
-        rmsf = np.sqrt(diffsq.sum(axis=2).mean(axis=0))
+        rmsf = rmsf_from_coords(coords)
         self.rmsf_cache[cache_key] = rmsf
         return rmsf
 
@@ -118,18 +147,13 @@ class TrajectoryMetrics:
             coords = gatherer.get_coordinates(sel_str)
             rgs = []
             for frame_coords in coords:
-                com = frame_coords.mean(axis=0)
-                rg2 = ((frame_coords - com) ** 2).sum(axis=1).mean()
-                rgs.append(np.sqrt(rg2))
+                rgs.append(rg_value(frame_coords))
             result = np.array(rgs)
         else:
             sel = u.select_atoms(sel_str)
             rgs = []
             for _ in u.trajectory:
-                coords = sel.positions
-                com = sel.center_of_mass()
-                rg2 = ((coords - com) ** 2).sum(axis=1).mean()
-                rgs.append(np.sqrt(rg2))
+                rgs.append(rg_value(sel.positions))
             result = np.array(rgs)
 
         self.rg_cache[cache_key] = result
@@ -151,11 +175,7 @@ class TrajectoryMetrics:
             coordsB = gatherer.get_coordinates(selB)
             dists = []
             for frame_idx in range(gatherer.get_n_frames()):
-                da = coordsA[frame_idx][:, None, :]
-                db = coordsB[frame_idx][None, :, :]
-                diff = da - db
-                dd = np.sqrt((diff * diff).sum(axis=2))
-                dists.append(dd.min())
+                dists.append(contact_min_distance(coordsA[frame_idx], coordsB[frame_idx]))
             result = np.array(dists)
         else:
             A = u.select_atoms(selA)
@@ -164,11 +184,7 @@ class TrajectoryMetrics:
                 raise ValueError("Empty selection for contacts.")
             dists = []
             for _ in u.trajectory:
-                da = A.positions[:, None, :]
-                db = B.positions[None, :, :]
-                diff = da - db
-                dd = np.sqrt((diff * diff).sum(axis=2))
-                dists.append(dd.min())
+                dists.append(contact_min_distance(A.positions, B.positions))
             result = np.array(dists)
 
         self.contact_cache[cache_key] = result
@@ -188,7 +204,6 @@ class TrajectoryMetrics:
 
         if gatherer is not None:
             coords = gatherer.get_coordinates(sel_str)
-            X = coords.reshape(coords.shape[0], -1)
         else:
             sel = u.select_atoms(sel_str)
             if not aligned:
@@ -200,12 +215,10 @@ class TrajectoryMetrics:
 
             coords = []
             for _ in u.trajectory:
-                coords.append(sel.positions.copy().reshape(-1))
-            X = np.array(coords)
+                coords.append(sel.positions.copy())
+            coords = np.array(coords)
 
-        Xc = X - X.mean(axis=0)
-        pca = PCA(n_components=n_components, svd_solver="auto")
-        pcs = pca.fit_transform(Xc)
+        pcs, pca = pca_from_coords(coords, n_components=n_components)
         result = (pcs, pca)
         self.pca_cache[cache_key] = result
         return result

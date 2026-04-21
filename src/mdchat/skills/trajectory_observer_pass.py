@@ -28,11 +28,76 @@ def _slice_iter_count(n_total: int, start: Optional[int], stop: Optional[int], s
     return len(range(*s.indices(n_total)))
 
 
+def _build_streaming_specs(
+    context: "AnalysisContext",
+    params: Dict[str, Any],
+) -> tuple[list[Any], str]:
+    from src.TrajectoryMetrics import MetricPassSpec
+
+    include_rmsd = bool(params.get("include_rmsd", False))
+    include_rg = bool(params.get("include_rg", False))
+    include_contacts = bool(params.get("include_contacts", False))
+    contact_label = params.get("contact_label", "contact") or "contact"
+    specs: List[MetricPassSpec] = []
+
+    if include_rmsd:
+        sel = _resolve_sel(context, params.get("rmsd_selection"))
+        rf = int(params.get("rmsd_ref_frame", 0))
+        specs.append(
+            MetricPassSpec(
+                result_key="rmsd",
+                kind="rmsd",
+                selection=sel,
+                ref_frame=rf,
+            )
+        )
+    if include_rg:
+        sel = _resolve_sel(context, params.get("rg_selection"))
+        specs.append(MetricPassSpec(result_key="rg", kind="rg", selection=sel))
+    if include_contacts:
+        specs.append(
+            MetricPassSpec(
+                result_key=f"contacts_{contact_label}",
+                kind="contacts",
+                selection=params["contact_selection_a"],
+                selection_b=params["contact_selection_b"],
+            )
+        )
+    return specs, contact_label
+
+
+def _build_accumulation_specs(
+    context: "AnalysisContext",
+    params: Dict[str, Any],
+) -> list[Any]:
+    from src.TrajectoryMetrics import CoordinateAccumulationSpec
+
+    out: List[CoordinateAccumulationSpec] = []
+    if bool(params.get("include_rmsf", False)):
+        out.append(
+            CoordinateAccumulationSpec(
+                result_key="rmsf",
+                kind="rmsf",
+                selection=_resolve_sel(context, params.get("rmsf_selection")),
+            )
+        )
+    if bool(params.get("include_pca", False)):
+        out.append(
+            CoordinateAccumulationSpec(
+                result_key="pca",
+                kind="pca",
+                selection=_resolve_sel(context, params.get("pca_selection")),
+                n_components=int(params.get("pca_n_components", 5)),
+            )
+        )
+    return out
+
+
 class RunTrajectoryObserverPassSkill(Skill):
     name = "run_trajectory_observer_pass"
     description = (
         "Run one TrajectoryIterator pass with multiple FrameObservers — RMSD, Rg, "
-        "contacts, pairwise endpoint distances, and/or GSA nanocube "
+        "contacts, RMSF, PCA, pairwise endpoint distances, and/or GSA nanocube "
         "(GSAnalyzerObserver) — so the trajectory is read once. **When the user "
         "asks for two or more of these on the same trajectory in one request, use "
         "this skill once with every relevant include_* and related parameters set** "
@@ -106,6 +171,43 @@ class RunTrajectoryObserverPassSkill(Skill):
             "Suffix for context keys (contact_distances_<label>).",
             required=False,
             default="contact",
+        ),
+        Parameter(
+            "include_rmsf",
+            ParamType.BOOLEAN,
+            "Include per-atom RMSF for rmsf_selection (computed after one iterator pass).",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "rmsf_selection",
+            ParamType.ATOM_SELECTION,
+            "Atom selection for RMSF. If omitted, uses session main_selection.",
+            required=False,
+            default=None,
+        ),
+        Parameter(
+            "include_pca",
+            ParamType.BOOLEAN,
+            "Include PCA on positional fluctuations for pca_selection.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "pca_selection",
+            ParamType.ATOM_SELECTION,
+            "Atom selection for PCA. If omitted, uses session main_selection.",
+            required=False,
+            default=None,
+        ),
+        Parameter(
+            "pca_n_components",
+            ParamType.INTEGER,
+            "Number of PCA components to compute when include_pca is true.",
+            required=False,
+            default=5,
+            min_value=1,
+            max_value=50,
         ),
         Parameter(
             "endpoint_residue_selections",
@@ -226,6 +328,10 @@ class RunTrajectoryObserverPassSkill(Skill):
         "rmsd_array",
         "rg_array",
         "contact_distances",
+        "rmsf_array",
+        "rmsf_atom_info",
+        "pca_scores",
+        "pca_variance_explained",
         "endpoint_distances",
         "residue_selections",
         "cube_metrics_df",
@@ -238,7 +344,10 @@ class RunTrajectoryObserverPassSkill(Skill):
         from src.EndpointAnalyzer import EndpointAnalyzerObserver
         from src.task import GSAnalyzerObserver
         from src.TrajectoryIterator import TrajectoryIterator
-        from src.TrajectoryMetrics import MetricPassSpec, StackedMetricsObserver
+        from src.TrajectoryMetrics import (
+            CoordinateAccumulatorObserver,
+            StackedMetricsObserver,
+        )
 
         u = context.universe
         n_total = len(u.trajectory)
@@ -246,6 +355,8 @@ class RunTrajectoryObserverPassSkill(Skill):
         include_rmsd = bool(params.get("include_rmsd", False))
         include_rg = bool(params.get("include_rg", False))
         include_contacts = bool(params.get("include_contacts", False))
+        include_rmsf = bool(params.get("include_rmsf", False))
+        include_pca = bool(params.get("include_pca", False))
         include_gsa = bool(params.get("include_gsa", False))
         ep_list: Optional[List[str]] = params.get("endpoint_residue_selections")
         if ep_list is None:
@@ -264,13 +375,16 @@ class RunTrajectoryObserverPassSkill(Skill):
             include_rmsd
             or include_rg
             or include_contacts
+            or include_rmsf
+            or include_pca
             or len(ep_list) >= 2
             or include_gsa
         ):
             return SkillResult(
                 success=False,
                 error="Nothing to compute: enable at least one of include_rmsd, "
-                "include_rg, include_contacts, include_gsa, or provide at least two "
+                "include_rg, include_contacts, include_rmsf, include_pca, include_gsa, "
+                "or provide at least two "
                 "endpoint_residue_selections for pairwise distances.",
                 summary="Observer pass needs at least one analysis block.",
             )
@@ -297,36 +411,13 @@ class RunTrajectoryObserverPassSkill(Skill):
                 summary="Adjust start_frame / stop_frame / step.",
             )
 
-        specs: List[MetricPassSpec] = []
-        if include_rmsd:
-            sel = _resolve_sel(context, params.get("rmsd_selection"))
-            rf = int(params.get("rmsd_ref_frame", 0))
-            specs.append(
-                MetricPassSpec(
-                    result_key="rmsd",
-                    kind="rmsd",
-                    selection=sel,
-                    ref_frame=rf,
-                )
-            )
-        if include_rg:
-            sel = _resolve_sel(context, params.get("rg_selection"))
-            specs.append(
-                MetricPassSpec(result_key="rg", kind="rg", selection=sel)
-            )
-        contact_label = params.get("contact_label", "contact") or "contact"
-        if include_contacts:
-            specs.append(
-                MetricPassSpec(
-                    result_key=f"contacts_{contact_label}",
-                    kind="contacts",
-                    selection=params["contact_selection_a"],
-                    selection_b=params["contact_selection_b"],
-                )
-            )
+        specs, contact_label = _build_streaming_specs(context, params)
+        accum_specs = _build_accumulation_specs(context, params)
 
         raw_nj = params.get("n_jobs")
         n_jobs = 1 if raw_nj is None else int(raw_nj)
+        if accum_specs and n_jobs != 1:
+            n_jobs = 1
         use_dask = bool(params.get("use_dask", False))
         use_parallel = n_jobs != 1
         iterator = TrajectoryIterator(u, use_dask=(use_dask and use_parallel))
@@ -335,6 +426,11 @@ class RunTrajectoryObserverPassSkill(Skill):
         if specs:
             metrics_observer = StackedMetricsObserver(specs, n_frames=n_iter)
             iterator.subscribe(metrics_observer)
+
+        accum_observer: Optional[CoordinateAccumulatorObserver] = None
+        if accum_specs:
+            accum_observer = CoordinateAccumulatorObserver(accum_specs, n_frames=n_iter)
+            iterator.subscribe(accum_observer)
 
         endpoint_obs: Optional[EndpointAnalyzerObserver] = None
         if len(ep_list) >= 2:
@@ -380,6 +476,7 @@ class RunTrajectoryObserverPassSkill(Skill):
         pass_results: Dict[str, Any] = {
             "n_frames_iterated": n_iter,
             "metrics": {},
+            "accumulated_metrics": {},
             "n_jobs": n_jobs,
             "use_dask": use_dask and use_parallel,
         }
@@ -387,6 +484,10 @@ class RunTrajectoryObserverPassSkill(Skill):
         summary_parts: List[str] = [
             f"Iterator finished ({n_iter} frame(s) visited, n_jobs={n_jobs})."
         ]
+        if accum_specs and raw_nj is not None and int(raw_nj) != 1:
+            summary_parts.append(
+                "RMSF/PCA requested; forcing n_jobs=1 for accumulation safety."
+            )
 
         artifacts: Dict[str, str] = {}
 
@@ -440,6 +541,57 @@ class RunTrajectoryObserverPassSkill(Skill):
                             }
                         ).to_csv(p, index=False)
                         artifacts[f"observer_pass_contacts_{contact_label}.csv"] = p
+
+        if accum_observer is not None:
+            for spec in accum_specs:
+                payload = accum_observer.results.get(spec.result_key)
+                if payload is None:
+                    continue
+                if spec.kind == "rmsf":
+                    arr = payload
+                    atoms = u.select_atoms(spec.selection)
+                    atom_info = [
+                        {"resname": a.resname, "resid": int(a.resid), "name": a.name}
+                        for a in atoms
+                    ]
+                    context.set("rmsf_array", arr)
+                    context.set("rmsf_atom_info", atom_info)
+                    pass_results["accumulated_metrics"]["rmsf"] = arr
+                    summary_parts.append(
+                        f"RMSF: computed for {len(arr)} atoms ({spec.selection})."
+                    )
+                    if save_csv:
+                        p = os.path.join(context.output_dir, "observer_pass_rmsf.csv")
+                        pd.DataFrame(
+                            {
+                                "resname": [a["resname"] for a in atom_info],
+                                "resid": [a["resid"] for a in atom_info],
+                                "atom_name": [a["name"] for a in atom_info],
+                                "rmsf": arr,
+                            }
+                        ).to_csv(p, index=False)
+                        artifacts["observer_pass_rmsf.csv"] = p
+                elif spec.kind == "pca":
+                    pcs, pca_model = payload
+                    var_explained = pca_model.explained_variance_ratio_
+                    context.set("pca_scores", pcs)
+                    context.set("pca_variance_explained", var_explained)
+                    pass_results["accumulated_metrics"]["pca_scores_shape"] = pcs.shape
+                    pass_results["accumulated_metrics"]["pca_variance_explained"] = var_explained
+                    summary_parts.append(
+                        f"PCA: {pcs.shape[1]} component(s), total variance "
+                        f"{float(np.sum(var_explained)) * 100:.1f}%."
+                    )
+                    if save_csv:
+                        cols = {"frame": list(range(pcs.shape[0]))}
+                        for i in range(pcs.shape[1]):
+                            cols[f"PC{i+1}"] = pcs[:, i]
+                        cols["variance_explained"] = [None] * pcs.shape[0]
+                        for i, v in enumerate(var_explained):
+                            cols["variance_explained"][i] = float(v)
+                        p = os.path.join(context.output_dir, "observer_pass_pca.csv")
+                        pd.DataFrame(cols).to_csv(p, index=False)
+                        artifacts["observer_pass_pca.csv"] = p
 
         if endpoint_obs is not None:
             ep_dict = {
