@@ -1,5 +1,5 @@
 """
-Optional single-pass trajectory analysis: register observers on TrajectoryIterator
+Single-pass trajectory analysis: register observers on TrajectoryIterator
 and iterate once (metrics + endpoint distances + GSA nanocube metrics).
 
 Supports parallel iteration (multiprocessing, fork on Linux, or Dask when use_dask=True).
@@ -31,12 +31,15 @@ def _slice_iter_count(n_total: int, start: Optional[int], stop: Optional[int], s
 class RunTrajectoryObserverPassSkill(Skill):
     name = "run_trajectory_observer_pass"
     description = (
-        "OPTIONAL efficiency path: run one TrajectoryIterator pass with multiple "
-        "FrameObservers — standard metrics (RMSD, Rg, contacts), pairwise endpoint "
-        "distances, and/or GSA nanocube geometry (GSAnalyzerObserver) — so the "
-        "trajectory is read once. Use n_jobs>1 or n_jobs=-1 with optional use_dask "
-        "for parallel frame batches (same merge rules as GSAnalyzer.gsa_nanocube_metrics). "
-        "Individual compute_* / gsa_nanocube_metrics skills remain for one-off use."
+        "Run one TrajectoryIterator pass with multiple FrameObservers — RMSD, Rg, "
+        "contacts, pairwise endpoint distances, and/or GSA nanocube "
+        "(GSAnalyzerObserver) — so the trajectory is read once. **When the user "
+        "asks for two or more of these on the same trajectory in one request, use "
+        "this skill once with every relevant include_* and related parameters set** "
+        "(do not split into multiple compute_* calls). For a single analysis, either "
+        "this skill with one flag or a standalone compute_* / gsa_nanocube_metrics "
+        "is acceptable. Use n_jobs>1 or n_jobs=-1 with optional use_dask for parallel "
+        "batches (same merge rules as GSAnalyzer.gsa_nanocube_metrics)."
     )
     category = "trajectory"
     parameters = [

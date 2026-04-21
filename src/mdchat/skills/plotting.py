@@ -77,17 +77,20 @@ class PlotTimeseriesSkill(Skill):
                 summary="Cannot plot — matplotlib not available.",
             )
 
-        fig, ax = plt.subplots(figsize=(10, 4))
+        from src.Plotter import Plotter
+
+        plotter = Plotter()
+        fig, ax = plt.subplots(figsize=plotter.figure_size)
         frames = np.arange(len(data))
-        ax.plot(frames, data, linewidth=0.8)
-        ax.set_xlabel("Frame")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
+        ax.plot(frames, data, "b-", linewidth=2, alpha=0.8)
+        ax.set_xlabel("Frame", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight="bold")
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        plt.tight_layout()
 
         out_path = os.path.join(context.output_dir, filename)
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=plotter.dpi, bbox_inches="tight")
         plt.close(fig)
 
         return SkillResult(
@@ -203,7 +206,7 @@ class PlotGuestTimelineSkill(Skill):
         plotter = Plotter()
         plotter.plot_guest_entering_events(stats, out_prefix)
 
-        png_path = out_prefix + ".png"
+        png_path = out_prefix + "_guest_entering_events.png"
         if os.path.isfile(png_path):
             return SkillResult(
                 success=True,
@@ -253,30 +256,47 @@ class PlotRMSFSkill(Skill):
                 summary="Cannot plot — matplotlib not available.",
             )
 
+        from src.Plotter import Plotter
+
         resids = (
             np.array([a["resid"] for a in atom_info])
             if atom_info
             else np.arange(len(rmsf))
         )
 
-        colors = ["#dc2626" if v > threshold else "#2563eb" for v in rmsf]
+        plotter = Plotter()
+        bar_w = max(float(plotter.figure_size[0]), len(rmsf) * 0.04)
+        colors = ["red" if v > threshold else "blue" for v in rmsf]
 
-        fig, ax = plt.subplots(figsize=(max(10, len(rmsf) * 0.04), 4.5))
+        fig, ax = plt.subplots(figsize=(bar_w, plotter.figure_size[1]))
         ax.bar(resids, rmsf, color=colors, width=0.8, edgecolor="none")
-        ax.axhline(y=np.mean(rmsf), ls="--", color="gray", lw=1,
-                    label=f"mean = {np.mean(rmsf):.2f} A")
+        mean_r = float(np.mean(rmsf))
+        ax.axhline(
+            y=mean_r,
+            color="r",
+            linestyle="--",
+            alpha=0.5,
+            linewidth=1,
+            label=f"Mean: {mean_r:.2f} Å",
+        )
         if threshold > 0:
-            ax.axhline(y=threshold, ls=":", color="#dc2626", lw=1,
-                        label=f"threshold = {threshold:.1f} A")
-        ax.set_xlabel("Residue ID")
-        ax.set_ylabel("RMSF (A)")
-        ax.set_title("Per-residue RMSF")
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.2)
-        fig.tight_layout()
+            ax.axhline(
+                y=threshold,
+                color="orange",
+                linestyle=":",
+                alpha=0.5,
+                linewidth=1,
+                label=f"threshold = {threshold:.1f} Å",
+            )
+        ax.set_xlabel("Residue ID", fontsize=12)
+        ax.set_ylabel("RMSF (Å)", fontsize=12)
+        ax.set_title("Per-residue RMSF", fontsize=14, fontweight="bold")
+        ax.legend(loc="best", fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
 
         out_path = os.path.join(context.output_dir, filename)
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=plotter.dpi, bbox_inches="tight")
         plt.close(fig)
 
         return SkillResult(

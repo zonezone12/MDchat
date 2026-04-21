@@ -83,7 +83,7 @@ User Question
          │ tool_use
          ▼
 ┌────────────────────┐
-│  Skill Registry    │  7 skills registered, each with
+│  Skill Registry    │  29 skills registered, each with
 │                    │  typed parameters and prerequisites
 └────────┬───────────┘
          │

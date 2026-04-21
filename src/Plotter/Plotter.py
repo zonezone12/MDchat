@@ -5,7 +5,7 @@ import io
 import os
 import re
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 # Try to import multiprocessing for parallel frame generation
 try:
@@ -108,7 +108,7 @@ except ImportError:
     warnings.warn("scikit-image not available. Mesh volume computation will be disabled.")
 
 try:
-    from ..utils.plotly_molecule import make_molecule_components
+    from src.utils.plotly_molecule import make_molecule_components
 except ImportError:
     make_molecule_components = None
     warnings.warn("plotly_molecule not available. Interactive 3D visualization will be limited.")
@@ -117,11 +117,219 @@ except ImportError:
 try:
     from src.utils.rdkit_utils import get_3d_coordinates_from_smiles
 except ImportError:
+    get_3d_coordinates_from_smiles = None
+    warnings.warn("rdkit_utils not available. SMILES input will be disabled.")
+
+
+def _parse_numpy_int_string_guest(s) -> Optional[int]:
+    """Extract an int from raw CSV values or strings like ``np.int64(708)``."""
+    if isinstance(s, (int, np.integer)):
+        return int(s)
+    if isinstance(s, str):
+        match = re.search(r"np\.int\d+\((\d+)\)", s)
+        if match:
+            return int(match.group(1))
+        try:
+            return int(float(s))
+        except Exception:
+            return None
     try:
-        from utils.rdkit_utils import get_3d_coordinates_from_smiles
-    except ImportError:
-        get_3d_coordinates_from_smiles = None
-        warnings.warn("rdkit_utils not available. SMILES input will be disabled.")   
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _pair_guest_entry_exit_intervals(guest_residence_stats: dict) -> List[Tuple[int, int]]:
+    """
+    Match each exit to the latest unmatched entry for the same guest index
+    (same logic as the guest timeline GIF). Falls back to index-aligned pairing
+    when guest index lists are missing or empty.
+    """
+    entry_frames = guest_residence_stats.get("entry_frames") or []
+    exit_frames = guest_residence_stats.get("exit_frames") or []
+    entry_guest_indices = guest_residence_stats.get("entry_guest_indices") or []
+    exit_guest_indices = guest_residence_stats.get("exit_guest_indices") or []
+
+    pairs: List[Tuple[int, int]] = []
+
+    use_guest_ids = (
+        len(entry_guest_indices) == len(entry_frames)
+        and len(exit_guest_indices) == len(exit_frames)
+        and any(len(x or []) > 0 for x in entry_guest_indices)
+        and any(len(x or []) > 0 for x in exit_guest_indices)
+    )
+
+    if use_guest_ids:
+        guest_timelines: Dict[int, List[dict]] = {}
+        for ef, gidxs in zip(entry_frames, entry_guest_indices):
+            for g in gidxs or []:
+                guest_timelines.setdefault(g, []).append({"entry": ef, "exit": None})
+        for xf, gidxs in zip(exit_frames, exit_guest_indices):
+            for g in gidxs or []:
+                if g not in guest_timelines:
+                    continue
+                for period in reversed(guest_timelines[g]):
+                    if period["exit"] is None:
+                        period["exit"] = xf
+                        break
+        for periods in guest_timelines.values():
+            for p in periods:
+                ex = p["exit"]
+                if ex is not None:
+                    ef, xf = p["entry"], ex
+                    if xf >= ef:
+                        pairs.append((ef, xf))
+    else:
+        max_frame_val = max(entry_frames + exit_frames) if (entry_frames or exit_frames) else 0
+        for i, ef in enumerate(entry_frames):
+            if i < len(exit_frames):
+                xf = exit_frames[i]
+            else:
+                xf = max_frame_val
+            if xf >= ef:
+                pairs.append((ef, xf))
+
+    pairs.sort(key=lambda t: (t[0], t[1]))
+    return pairs
+
+
+def _merge_frame_intervals(pairs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Merge overlapping or touching frame intervals (avoids stacked alpha turning into a solid block)."""
+    if not pairs:
+        return []
+    sorted_pairs = sorted(pairs, key=lambda t: (t[0], t[1]))
+    merged: List[List[int]] = [[sorted_pairs[0][0], sorted_pairs[0][1]]]
+    for a, b in sorted_pairs[1:]:
+        ma, mb = merged[-1]
+        if a <= mb:
+            merged[-1][1] = max(mb, b)
+        else:
+            merged.append([a, b])
+    return [(int(u), int(v)) for u, v in merged]
+
+
+def guest_residence_stats_from_entering_events_csv(
+    events_csv_path: str,
+    stats_csv_path: Optional[str] = None,
+) -> dict:
+    """
+    Build a ``guest_residence_stats`` dict from ``*_guest_entering_events.csv``
+    (and optional ``*_guest_entering_stats.csv``), for plotting without re-running analysis.
+    """
+    entry_frames: List[int] = []
+    exit_frames: List[int] = []
+    entry_times: List[float] = []
+    exit_times: List[float] = []
+    entry_guest_indices: List[List[int]] = []
+    exit_guest_indices: List[List[int]] = []
+
+    if not os.path.exists(events_csv_path):
+        warnings.warn(f"Guest entering events CSV not found: {events_csv_path}")
+        return {}
+
+    try:
+        events_df = pd.read_csv(events_csv_path)
+        for _, row in events_df.iterrows():
+            event_type = str(row["event_type"]).strip().lower()
+
+            frame = _parse_numpy_int_string_guest(row["frame"])
+            if frame is None:
+                continue
+
+            try:
+                time = float(row["time"])
+            except Exception:
+                continue
+
+            guest_indices_str = row.get("guest_indices", "[]")
+            guest_indices: List[int] = []
+
+            if pd.isna(guest_indices_str) or guest_indices_str == "":
+                guest_indices = []
+            elif isinstance(guest_indices_str, str):
+                guest_indices_str = guest_indices_str.strip("\"'")
+                matches = re.findall(r"np\.int\d+\((\d+)\)", guest_indices_str)
+                if matches:
+                    guest_indices = [int(m) for m in matches]
+                else:
+                    try:
+                        parsed = ast.literal_eval(guest_indices_str)
+                        if isinstance(parsed, list):
+                            guest_indices = [
+                                x for x in (_parse_numpy_int_string_guest(v) for v in parsed)
+                                if x is not None
+                            ]
+                        else:
+                            idx = _parse_numpy_int_string_guest(parsed)
+                            if idx is not None:
+                                guest_indices = [idx]
+                    except Exception:
+                        parts = guest_indices_str.strip("[]()").split(",")
+                        for part in parts:
+                            idx = _parse_numpy_int_string_guest(part.strip())
+                            if idx is not None:
+                                guest_indices.append(idx)
+            elif isinstance(guest_indices_str, list):
+                guest_indices = [
+                    x for x in (_parse_numpy_int_string_guest(v) for v in guest_indices_str)
+                    if x is not None
+                ]
+            else:
+                idx = _parse_numpy_int_string_guest(guest_indices_str)
+                if idx is not None:
+                    guest_indices = [idx]
+
+            if event_type == "entry":
+                entry_frames.append(frame)
+                entry_times.append(time)
+                entry_guest_indices.append(guest_indices)
+            elif event_type == "exit":
+                exit_frames.append(frame)
+                exit_times.append(time)
+                exit_guest_indices.append(guest_indices)
+    except Exception as e:
+        warnings.warn(f"Failed to read guest entering events CSV {events_csv_path}: {e}")
+        return {}
+
+    guest_residence_stats: dict = {}
+    if stats_csv_path and os.path.exists(stats_csv_path):
+        try:
+            stats_df = pd.read_csv(stats_csv_path)
+            for _, row in stats_df.iterrows():
+                metric = row["metric"]
+                value = row["value"]
+                if pd.notna(value):
+                    if metric in ["first_entry_frame", "n_entries", "n_exits"]:
+                        guest_residence_stats[metric] = int(value)
+                    elif metric in [
+                        "first_entry_time",
+                        "total_time_inside",
+                        "total_time_outside",
+                        "avg_stay_duration",
+                        "max_stay_duration",
+                        "min_stay_duration",
+                    ]:
+                        guest_residence_stats[metric] = float(value)
+                    else:
+                        guest_residence_stats[metric] = value
+        except Exception as e:
+            warnings.warn(f"Failed to read stats CSV {stats_csv_path}: {e}")
+
+    if "n_entries" not in guest_residence_stats:
+        guest_residence_stats["n_entries"] = len(entry_frames)
+    if "n_exits" not in guest_residence_stats:
+        guest_residence_stats["n_exits"] = len(exit_frames)
+    if "first_entry_frame" not in guest_residence_stats and entry_frames:
+        guest_residence_stats["first_entry_frame"] = min(entry_frames)
+
+    guest_residence_stats["entry_frames"] = entry_frames
+    guest_residence_stats["exit_frames"] = exit_frames
+    guest_residence_stats["entry_times"] = entry_times
+    guest_residence_stats["exit_times"] = exit_times
+    guest_residence_stats["entry_guest_indices"] = entry_guest_indices
+    guest_residence_stats["exit_guest_indices"] = exit_guest_indices
+
+    return guest_residence_stats
 
 
 # ============================================================================
@@ -1958,8 +2166,6 @@ class Plotter:
 
         entry_frames = guest_residence_stats.get('entry_frames', [])
         exit_frames = guest_residence_stats.get('exit_frames', [])
-        entry_times = guest_residence_stats.get('entry_times', [])
-        exit_times = guest_residence_stats.get('exit_times', [])
         durations_inside = guest_residence_stats.get('durations_inside', [])
 
         if not entry_frames and not exit_frames:
@@ -1987,9 +2193,6 @@ class Plotter:
         pixel_height = int(self.figure_size[1] * self.dpi / 4)
 
         try:
-            # Create blank white image
-            img = Image.new('RGBA', (pixel_width, pixel_height), (255, 255, 255, 255))
-            
             # Build scatter data
             scatter_markers = []
             legend_items = []
@@ -2006,41 +2209,11 @@ class Plotter:
 
             # Add margins for annotations
             margin = {'top': 60, 'bottom': 50, 'left': 80, 'right': 180}
-            
-            # Create annotated image with margins
             new_width = pixel_width + margin['left'] + margin['right']
             new_height = pixel_height + margin['top'] + margin['bottom']
-            annotated = Image.new('RGBA', (new_width, new_height), (255, 255, 255, 255))
-            annotated.paste(img, (margin['left'], margin['top']))
-            
-            # Draw duration shaded regions if requested
-            if show_durations and durations_inside and entry_frames:
-                draw = ImageDraw.Draw(annotated)
-                plot_width = pixel_width
-                plot_height = pixel_height
-                
-                for i, (entry_frame, duration) in enumerate(zip(entry_frames, durations_inside)):
-                    if i < len(exit_frames):
-                        exit_frame = exit_frames[i]
-                    else:
-                        exit_frame = max_frame_val if max_frames else entry_frame + int(duration)
-                    
-                    # Calculate pixel positions
-                    x1_frac = (entry_frame - x_min) / (x_max - x_min) if x_max > x_min else 0
-                    x2_frac = (exit_frame - x_min) / (x_max - x_min) if x_max > x_min else 0
-                    x1_pixel = margin['left'] + int(plot_width * x1_frac)
-                    x2_pixel = margin['left'] + int(plot_width * x2_frac)
-                    
-                    # Draw shaded region
-                    draw.rectangle(
-                        [x1_pixel, margin['top'], x2_pixel, margin['top'] + plot_height],
-                        fill=(144, 238, 144, 50)  # Light green with alpha
-                    )
-            
-            # Draw scatter markers using PIL
-            annotated = _draw_scatter_markers_pil(
-                annotated, scatter_markers, (x_min, x_max), (y_min, y_max),
-                margin=margin, marker_size=10
+
+            stay_intervals = _merge_frame_intervals(
+                _pair_guest_entry_exit_intervals(guest_residence_stats)
             )
 
             # Build statistics text
@@ -2057,41 +2230,19 @@ class Plotter:
                     stats_lines.append(f"Total inside: {guest_residence_stats['total_time_inside']:.1f} ps")
             stats_text = '\n'.join(stats_lines) if stats_lines else ""
 
-            # Add text annotations
-            annotated = _add_text_annotations(
-                Image.new('RGBA', (pixel_width, pixel_height), (255, 255, 255, 0)),
-                title="Guest Entering/Exiting Events",
-                xlabel="Frame",
-                ylabel="Event Type",
-                stats_text="",  # Stats added separately
-                legend_items=legend_items,
-                x_range=(x_min, x_max),
-                y_range=(y_min, y_max),
-                margin=margin,
-            )
-            
-            # Composite images
             final_img = Image.new('RGBA', (new_width, new_height), (255, 255, 255, 255))
-            
-            # Re-draw everything on final image
             draw = ImageDraw.Draw(final_img)
-            
-            # Draw duration shaded regions
-            if show_durations and durations_inside and entry_frames:
-                for i, (entry_frame, duration) in enumerate(zip(entry_frames, durations_inside)):
-                    if i < len(exit_frames):
-                        exit_frame = exit_frames[i]
-                    else:
-                        exit_frame = max_frame_val if max_frames else entry_frame + int(duration)
-                    
+
+            # Shaded "inside host" intervals: per-guest–matched, merged (no stacked alpha slab)
+            if show_durations and stay_intervals:
+                for entry_frame, exit_frame in stay_intervals:
                     x1_frac = (entry_frame - x_min) / (x_max - x_min) if x_max > x_min else 0
                     x2_frac = (exit_frame - x_min) / (x_max - x_min) if x_max > x_min else 0
                     x1_pixel = margin['left'] + int(pixel_width * x1_frac)
                     x2_pixel = margin['left'] + int(pixel_width * x2_frac)
-                    
                     draw.rectangle(
                         [x1_pixel, margin['top'], x2_pixel, margin['top'] + pixel_height],
-                        fill=(144, 238, 144, 80)
+                        fill=(220, 248, 220, 255),
                     )
             
             # Draw scatter markers
@@ -2141,9 +2292,6 @@ class Plotter:
 
         entry_frames = guest_residence_stats.get('entry_frames', [])
         exit_frames = guest_residence_stats.get('exit_frames', [])
-        entry_times = guest_residence_stats.get('entry_times', [])
-        exit_times = guest_residence_stats.get('exit_times', [])
-        durations_inside = guest_residence_stats.get('durations_inside', [])
 
         if not entry_frames and not exit_frames:
             return
@@ -2162,14 +2310,18 @@ class Plotter:
 
         fig, ax = plt.subplots(figsize=self.figure_size)
 
-        if show_durations and durations_inside and entry_frames:
-            for i, (entry_frame, duration) in enumerate(zip(entry_frames, durations_inside)):
-                if i < len(exit_frames):
-                    exit_frame = exit_frames[i]
-                else:
-                    exit_frame = max_frame_val if max_frames else entry_frame + int(duration)
-                ax.axvspan(entry_frame, exit_frame, alpha=0.2, color='green',
-                          label='Inside host' if i == 0 else '')
+        stay_intervals = _merge_frame_intervals(
+            _pair_guest_entry_exit_intervals(guest_residence_stats)
+        )
+        if show_durations and stay_intervals:
+            for i, (entry_frame, exit_frame) in enumerate(stay_intervals):
+                ax.axvspan(
+                    entry_frame,
+                    exit_frame,
+                    alpha=0.18,
+                    color="green",
+                    label="Inside host" if i == 0 else "",
+                )
 
         if entry_frames:
             ax.scatter(entry_frames, [1] * len(entry_frames), color='green', marker='^',
@@ -2544,144 +2696,17 @@ class Plotter:
             events_csv_path = csv_path
             stats_csv_path = None
 
-        # Helper function to parse numpy type strings like 'np.int64(708)'
-        def parse_numpy_int_string(s):
-            """Extract integer from numpy type string like 'np.int64(708)' or just return int"""
-            if isinstance(s, (int, np.integer)):
-                return int(s)
-            if isinstance(s, str):
-                # Match patterns like np.int64(708), np.int32(123), etc.
-                match = re.search(r'np\.int\d+\((\d+)\)', s)
-                if match:
-                    return int(match.group(1))
-                # Try direct conversion
-                try:
-                    return int(float(s))
-                except:
-                    return None
-            try:
-                return int(float(s))
-            except:
-                return None
-
-        # Read events CSV file (primary source)
-        entry_frames = []
-        exit_frames = []
-        entry_times = []
-        exit_times = []
-        entry_guest_indices = []
-        exit_guest_indices = []
-        
         if not os.path.exists(events_csv_path):
             warnings.warn(f"Events CSV file not found at {events_csv_path}. Cannot create GIF.")
             return
-        
-        try:
-            events_df = pd.read_csv(events_csv_path)
-            
-            # Parse events
-            for _, row in events_df.iterrows():
-                event_type = str(row['event_type']).strip().lower()
-                
-                # Parse frame (handle numpy types)
-                frame_val = row['frame']
-                frame = parse_numpy_int_string(frame_val)
-                if frame is None:
-                    continue
-                
-                # Parse time
-                time_val = row['time']
-                try:
-                    time = float(time_val)
-                except:
-                    continue
-                
-                # Parse guest_indices (handle numpy type strings)
-                guest_indices_str = row.get('guest_indices', '[]')
-                guest_indices = []
-                
-                if pd.isna(guest_indices_str) or guest_indices_str == '':
-                    guest_indices = []
-                elif isinstance(guest_indices_str, str):
-                    # Remove quotes if present
-                    guest_indices_str = guest_indices_str.strip('"\'')
-                    
-                    # Try to extract all np.int64(...) patterns
-                    numpy_int_pattern = r'np\.int\d+\((\d+)\)'
-                    matches = re.findall(numpy_int_pattern, guest_indices_str)
-                    if matches:
-                        guest_indices = [int(m) for m in matches]
-                    else:
-                        # Try ast.literal_eval for normal list format
-                        try:
-                            parsed = ast.literal_eval(guest_indices_str)
-                            if isinstance(parsed, list):
-                                guest_indices = [parse_numpy_int_string(x) for x in parsed if parse_numpy_int_string(x) is not None]
-                            else:
-                                idx = parse_numpy_int_string(parsed)
-                                if idx is not None:
-                                    guest_indices = [idx]
-                        except:
-                            # Fallback: try comma-separated
-                            parts = guest_indices_str.strip('[]()').split(',')
-                            for part in parts:
-                                idx = parse_numpy_int_string(part.strip())
-                                if idx is not None:
-                                    guest_indices.append(idx)
-                elif isinstance(guest_indices_str, list):
-                    guest_indices = [parse_numpy_int_string(x) for x in guest_indices_str if parse_numpy_int_string(x) is not None]
-                else:
-                    idx = parse_numpy_int_string(guest_indices_str)
-                    if idx is not None:
-                        guest_indices = [idx]
-                
-                if event_type == 'entry':
-                    entry_frames.append(frame)
-                    entry_times.append(time)
-                    entry_guest_indices.append(guest_indices)
-                elif event_type == 'exit':
-                    exit_frames.append(frame)
-                    exit_times.append(time)
-                    exit_guest_indices.append(guest_indices)
-        except Exception as e:
-            warnings.warn(f"Failed to read events CSV file {events_csv_path}: {e}")
-            import traceback
-            traceback.print_exc()
-            return
 
-        # Read stats CSV for additional metadata (optional)
-        guest_residence_stats = {}
-        if stats_csv_path and os.path.exists(stats_csv_path):
-            try:
-                stats_df = pd.read_csv(stats_csv_path)
-                for _, row in stats_df.iterrows():
-                    metric = row['metric']
-                    value = row['value']
-                    if pd.notna(value):
-                        if metric in ['first_entry_frame', 'n_entries', 'n_exits']:
-                            guest_residence_stats[metric] = int(value)
-                        elif metric in ['first_entry_time', 'total_time_inside', 'total_time_outside',
-                                       'avg_stay_duration', 'max_stay_duration', 'min_stay_duration']:
-                            guest_residence_stats[metric] = float(value)
-                        else:
-                            guest_residence_stats[metric] = value
-            except Exception as e:
-                warnings.warn(f"Failed to read stats CSV file {stats_csv_path}: {e}. Continuing without stats metadata.")
-        
-        # Calculate stats from events if not available
-        if 'n_entries' not in guest_residence_stats:
-            guest_residence_stats['n_entries'] = len(entry_frames)
-        if 'n_exits' not in guest_residence_stats:
-            guest_residence_stats['n_exits'] = len(exit_frames)
-        if 'first_entry_frame' not in guest_residence_stats and entry_frames:
-            guest_residence_stats['first_entry_frame'] = min(entry_frames)
-
-        guest_residence_stats['entry_frames'] = entry_frames
-        guest_residence_stats['exit_frames'] = exit_frames
-        guest_residence_stats['entry_times'] = entry_times
-        guest_residence_stats['exit_times'] = exit_times
-        guest_residence_stats['entry_guest_indices'] = entry_guest_indices
-        guest_residence_stats['exit_guest_indices'] = exit_guest_indices
+        guest_residence_stats = guest_residence_stats_from_entering_events_csv(
+            events_csv_path, stats_csv_path
+        )
+        entry_frames = guest_residence_stats.get("entry_frames", [])
+        exit_frames = guest_residence_stats.get("exit_frames", [])
+        entry_guest_indices = guest_residence_stats.get("entry_guest_indices", [])
+        exit_guest_indices = guest_residence_stats.get("exit_guest_indices", [])
 
         if not entry_frames and not exit_frames:
             warnings.warn("No entry or exit events found. Skipping GIF.")

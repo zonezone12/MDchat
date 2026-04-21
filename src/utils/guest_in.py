@@ -20,7 +20,8 @@ try:
 except ImportError:
     Client = None  # type: ignore
 
-from src.TrajectoryIterator import TrajectoryIterator, FrameObserver, ResultsGroup
+from src.TrajectoryIterator import TrajectoryIterator, FrameObserver
+from src.Aggregator import ResultsGroup
 
 
 class GuestEnteringObserver(FrameObserver):

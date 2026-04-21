@@ -20,6 +20,16 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from .chat_persistence import (
+    CONVERSATION_FILENAME,
+    TRANSCRIPT_FILENAME,
+    append_transcript,
+    clear_conversation_file,
+    conversation_path,
+    load_conversation,
+    read_transcript_tail,
+    save_conversation,
+)
 from .context import AnalysisContext
 from .engine_common import HELP_TEXT, format_welcome
 from .llm import create_chat_engine
@@ -100,6 +110,8 @@ def _handle_slash_command(
     context: AnalysisContext,
     registry: SkillRegistry,
     model_choices: list[str],
+    session_dir: str,
+    provider: str,
 ) -> bool:
     """Handle a slash command. Returns True if the command was recognized."""
     parts = cmd.strip().split()
@@ -155,7 +167,22 @@ def _handle_slash_command(
 
     if verb == "/reset":
         engine.reset()
-        console.print("[yellow]Conversation history cleared.[/yellow]")
+        clear_conversation_file(session_dir)
+        console.print(
+            "[yellow]Conversation history cleared[/yellow] "
+            "[dim](saved chat file removed for this session folder)[/dim]"
+        )
+        return True
+
+    if verb == "/history":
+        tail = read_transcript_tail(session_dir)
+        if not tail.strip():
+            console.print(
+                "[dim]No transcript yet. Chat is logged to mdchat_transcript.md "
+                "after each reply when using a session output directory.[/dim]"
+            )
+        else:
+            console.print(Panel(tail, title="Recent chat (transcript)", border_style="blue"))
         return True
 
     if verb == "/load":
@@ -163,10 +190,15 @@ def _handle_slash_command(
             console.print("[red]Usage: /load <topology> <trajectory>[/red]")
             return True
         topo, traj = parts[1], parts[2]
+        load_prompt = f"Load the trajectory with topology={topo} and trajectory={traj}"
         with console.status("[bold cyan]Loading trajectory...[/bold cyan]", spinner="dots"):
-            response = engine.send_message(
-                f"Load the trajectory with topology={topo} and trajectory={traj}"
-            )
+            try:
+                response = engine.send_message(load_prompt)
+            except Exception as exc:
+                console.print(f"\n[bold red]Error:[/bold red] {exc}")
+                return True
+        append_transcript(session_dir, load_prompt, response)
+        save_conversation(session_dir, provider, engine)
         console.print()
         console.print(Panel(Markdown(response), title="MDChat", border_style="cyan"))
         console.print()
@@ -212,6 +244,13 @@ def run_cli(
         model=model,
         callback=callback,
     )
+    if os.path.isfile(conversation_path(session_dir)):
+        ok, info = load_conversation(session_dir, provider, engine)
+        if ok:
+            console.print(f"[bold green]{info}[/bold green]")
+        elif info:
+            console.print(f"[yellow]{info}[/yellow]")
+
     welcome_text = format_welcome(
         n_skills=n_skills,
         output_dir=context.output_dir,
@@ -219,6 +258,11 @@ def run_cli(
         model=getattr(engine, "model", None),
     )
     console.print(Text(welcome_text, style="bold cyan"))
+    console.print(
+        f"[dim]Session folder:[/dim] {session_dir}\n"
+        f"[dim]Chat state:[/dim] {CONVERSATION_FILENAME} · "
+        f"[dim]readable log:[/dim] {TRANSCRIPT_FILENAME}\n"
+    )
 
     # -- main loop --
     while True:
@@ -233,7 +277,13 @@ def run_cli(
 
         if user_input.startswith("/"):
             if _handle_slash_command(
-                user_input, engine, context, registry, model_choices
+                user_input,
+                engine,
+                context,
+                registry,
+                model_choices,
+                session_dir,
+                provider,
             ):
                 continue
 
@@ -246,6 +296,9 @@ def run_cli(
             except Exception as exc:
                 console.print(f"\n[bold red]Error:[/bold red] {exc}")
                 continue
+
+        append_transcript(session_dir, user_input, response)
+        save_conversation(session_dir, provider, engine)
 
         console.print()
         console.print(Panel(Markdown(response), title="MDChat", border_style="cyan"))

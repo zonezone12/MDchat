@@ -95,8 +95,8 @@ class ComputeVolumeSkill(Skill):
         )
         results = va.analyze_trajectory(stride=stride)
 
-        target_vols = np.array([r["target_volume"] for r in results])
-        cavity_vols = np.array([r["cavity_volume"] for r in results])
+        target_vols = np.array([r["target_volume_A3"] for r in results])
+        cavity_vols = np.array([r["cavity_volume_A3"] for r in results])
         frames = np.array([r["frame"] for r in results])
 
         context.set("volume_array", target_vols)

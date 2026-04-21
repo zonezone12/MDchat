@@ -16,6 +16,7 @@ from .engine_common import (
     EngineMixin,
     MAX_TOOL_ROUNDS,
     MAX_TOKENS,
+    MODEL_EMPTY_TEXT_FALLBACK,
     tool_rounds_exceeded_message,
 )
 from .registry import SkillRegistry
@@ -102,11 +103,11 @@ class AnthropicChatEngine(EngineMixin):
                 ]
                 full_text = "\n".join(text_parts) if text_parts else ""
                 self.callback.on_text_chunk(full_text)
-                return full_text
+                return full_text or MODEL_EMPTY_TEXT_FALLBACK
 
             tool_results = []
             for block in tool_use_blocks:
-                result_str = self._execute_skill(block.name, block.input)
+                result_str, skill_ok = self._execute_skill(block.name, block.input)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

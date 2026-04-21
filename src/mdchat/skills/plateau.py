@@ -211,8 +211,8 @@ class DetectMotionPlateauSkill(Skill):
                     probe_radius=probe_radius,
                 )
                 results = va.analyze_trajectory(stride=stride)
-                y = np.array([r["target_volume"] for r in results], dtype=np.float64)
-                cavity = np.array([r["cavity_volume"] for r in results], dtype=np.float64)
+                y = np.array([r["target_volume_A3"] for r in results], dtype=np.float64)
+                cavity = np.array([r["cavity_volume_A3"] for r in results], dtype=np.float64)
                 frames = np.array([r["frame"] for r in results], dtype=np.int64)
                 context.set("volume_array", y)
                 context.set("volume", y)
@@ -248,8 +248,8 @@ class DetectMotionPlateauSkill(Skill):
                     probe_radius=probe_radius,
                 )
                 results = va.analyze_trajectory(stride=stride)
-                y = np.array([r["cavity_volume"] for r in results], dtype=np.float64)
-                tv = np.array([r["target_volume"] for r in results], dtype=np.float64)
+                y = np.array([r["cavity_volume_A3"] for r in results], dtype=np.float64)
+                tv = np.array([r["target_volume_A3"] for r in results], dtype=np.float64)
                 frames = np.array([r["frame"] for r in results], dtype=np.int64)
                 context.set("volume_array", tv)
                 context.set("volume", tv)

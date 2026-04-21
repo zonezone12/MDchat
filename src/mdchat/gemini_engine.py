@@ -11,7 +11,13 @@ from google import genai
 from google.genai import types
 
 from .context import AnalysisContext
-from .engine_common import EngineMixin, MAX_TOOL_ROUNDS, MAX_TOKENS, tool_rounds_exceeded_message
+from .engine_common import (
+    EngineMixin,
+    MAX_TOOL_ROUNDS,
+    MAX_TOKENS,
+    MODEL_EMPTY_TEXT_FALLBACK,
+    tool_rounds_exceeded_message,
+)
 from .registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
@@ -121,7 +127,7 @@ class GeminiChatEngine(EngineMixin):
                 if not full_text and getattr(response, "text", None):
                     full_text = (response.text or "").strip()
                 self.callback.on_text_chunk(full_text)
-                return full_text or "(Empty reply.)"
+                return full_text or MODEL_EMPTY_TEXT_FALLBACK
 
             response_parts: List[types.Part] = []
             for part in function_calls:
@@ -129,7 +135,7 @@ class GeminiChatEngine(EngineMixin):
                 name = fc.name or ""
                 args = _args_to_dict(fc.args)
                 logger.info("Gemini tool call: %s %s", name, args)
-                result_str = self._execute_skill(name, args)
+                result_str, skill_ok = self._execute_skill(name, args)
                 fr = types.FunctionResponse(
                     name=name,
                     response={"result": result_str},
