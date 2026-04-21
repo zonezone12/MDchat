@@ -244,7 +244,7 @@ Key conventions:
 | `MDCHAT_PROVIDER` | `anthropic` (Claude) or `gemini` | `anthropic` |
 | `ANTHROPIC_API_KEY` | Anthropic API key (Claude) | — |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google AI Studio key (Gemini) | — |
-| `MDCHAT_MODEL` | Model id for the active provider | Claude: `claude-sonnet-4-20250514`; Gemini: `gemini-2.0-flash` |
+| `MDCHAT_MODEL` | Model id for the active provider | Claude: `claude-sonnet-4-20250514`; Gemini: `gemini-2.5-flash` |
 | `MDCHAT_OUTPUT_DIR` | Output directory for artifacts | system temp dir |
 
 ### CLI arguments

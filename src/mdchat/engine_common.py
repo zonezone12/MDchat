@@ -29,9 +29,12 @@ HELP_TEXT = """**Commands:**
 - `/load <topology> <trajectory>` -- Quick-load files into the session.
 - `/status` -- Show current analysis state.
 - `/skills` -- List available skills.
+- `/model` -- Show the model list; `/model <n>` pick by number; `/model <id>` set API model id.
 - `/reset` -- Clear conversation history (keeps loaded data).
 - `/help` -- Show this help message.
 - `/quit` or `/exit` -- Exit MDChat.
+
+**Model:** Set `MDCHAT_MODEL` in `.env`, pass `--model` at startup, or `/model` for the picker. Optional `MDCHAT_MODEL_CHOICES=id1,id2,...` replaces the built-in list for your provider.
 
 **Quick start:**
 1. Set your API key in `.env` — `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini). Set `MDCHAT_PROVIDER=gemini` for Gemini (see `.env.example`).
@@ -40,13 +43,17 @@ HELP_TEXT = """**Commands:**
 """
 
 
-def format_welcome(n_skills: int, output_dir: str, provider: str) -> str:
+def format_welcome(
+    n_skills: int, output_dir: str, provider: str, model: str | None = None
+) -> str:
     """Return a plain-text welcome message for any UI to display."""
+    model_line = model if model else "(provider default)"
     return (
         BANNER
         + f"\n\n{n_skills} skills registered."
         + f"\nOutput directory: {output_dir}"
-        + f"\nProvider: {provider}\n"
+        + f"\nProvider: {provider}"
+        + f"\nModel: {model_line}\n"
         + "\n" + HELP_TEXT
     )
 

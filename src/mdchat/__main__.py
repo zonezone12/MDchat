@@ -56,11 +56,15 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         default=os.environ.get("MDCHAT_OUTPUT_DIR"),
-        help="Directory for output artifacts (or set MDCHAT_OUTPUT_DIR in .env)",
+        help=(
+            "Exact directory for artifacts; if omitted, creates "
+            "output/YYYY-MM-DD_mdchat-HHMMSS/ (see MDCHAT_OUTPUT_DIR in .env)"
+        ),
     )
     args = parser.parse_args()
 
     provider = (args.provider or "anthropic").lower()
+    model = args.model.strip() if args.model else None
     if args.api_key:
         api_key = args.api_key
     elif provider == "gemini":
@@ -73,7 +77,7 @@ def main() -> None:
     run_cli(
         provider=provider,
         api_key=api_key,
-        model=args.model,
+        model=model,
         output_dir=args.output_dir,
     )
 

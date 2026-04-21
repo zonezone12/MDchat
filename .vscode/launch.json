@@ -15,9 +15,6 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.mdchat",
-            "args": [
-                "--output-dir", "${workspaceFolder}/output"
-            ],
             "console": "integratedTerminal",
             "envFile": "${workspaceFolder}/.env",
             "justMyCode": true

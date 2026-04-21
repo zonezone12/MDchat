@@ -9,8 +9,10 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+from datetime import datetime
 from typing import Protocol
 
 from rich.console import Console
@@ -19,8 +21,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .context import AnalysisContext
-from .engine_common import BANNER, HELP_TEXT, format_welcome
+from .engine_common import HELP_TEXT, format_welcome
 from .llm import create_chat_engine
+from .model_catalog import model_choices_for_provider
 from .registry import SkillRegistry, get_default_registry
 
 
@@ -29,6 +32,23 @@ class _ChatEngine(Protocol):
     def reset(self) -> None: ...
 
 console = Console()
+
+
+def _default_session_output_dir(base: str = "output") -> str:
+    """Per CLAUDE.md session layout: ``<base>/YYYY-MM-DD_<slug>/`` (unique per run)."""
+    now = datetime.now()
+    slug = f"mdchat-{now:%H%M%S}"
+    return os.path.join(base, f"{now:%Y-%m-%d}_{slug}")
+
+
+def _is_resolved_default_output_dir(path: str) -> bool:
+    """True when ``path`` is the cwd's ``output`` folder (.env often sets ``./output``)."""
+    try:
+        resolved = os.path.normpath(os.path.abspath(os.path.expanduser(path.strip())))
+        default_out = os.path.normpath(os.path.abspath("output"))
+        return resolved == default_out
+    except OSError:
+        return False
 
 
 class _RichCallback:
@@ -57,11 +77,29 @@ class _RichCallback:
         pass  # final text is rendered by the main loop
 
 
+def _print_model_picker(current: str | None, choices: list[str]) -> None:
+    console.print(f"[bold]Current model:[/bold] {current!r}")
+    if not choices:
+        console.print(
+            "[dim]No catalog (set MDCHAT_MODEL_CHOICES=id1,id2 in .env). "
+            "Use: /model <api-model-id>[/dim]"
+        )
+        return
+    console.print("[bold]Models[/bold] [dim](/model <n> or /model <id>)[/dim]")
+    for i, mid in enumerate(choices, start=1):
+        tag = " [cyan]*[/cyan]" if mid == current else ""
+        console.print(f"  {i:2}. {mid}{tag}")
+    console.print(
+        "[dim]Customize list: MDCHAT_MODEL_CHOICES in .env (comma-separated)[/dim]"
+    )
+
+
 def _handle_slash_command(
     cmd: str,
     engine: _ChatEngine,
     context: AnalysisContext,
     registry: SkillRegistry,
+    model_choices: list[str],
 ) -> bool:
     """Handle a slash command. Returns True if the command was recognized."""
     parts = cmd.strip().split()
@@ -83,6 +121,36 @@ def _handle_slash_command(
             status = "[green]ready[/green]" if ok else "[dim]needs prereqs[/dim]"
             console.print(f"  {s.name:30s} {status}  {s.description[:60]}")
         console.print()
+        return True
+
+    if verb == "/model":
+        current = getattr(engine, "model", None)
+        if len(parts) < 2:
+            _print_model_picker(current, model_choices)
+            return True
+        token = parts[1].strip()
+        if not hasattr(engine, "model"):
+            console.print("[red]This backend does not support /model.[/red]")
+            return True
+        new_model: str | None = None
+        if token.isdigit() and model_choices:
+            idx = int(token)
+            if 1 <= idx <= len(model_choices):
+                new_model = model_choices[idx - 1]
+            else:
+                console.print(
+                    f"[red]Pick 1–{len(model_choices)} or use /model <api-model-id>.[/red]"
+                )
+                return True
+        if new_model is None:
+            new_model = " ".join(parts[1:]).strip()
+        if not new_model:
+            console.print("[red]Model id cannot be empty.[/red]")
+            return True
+        engine.model = new_model
+        console.print(
+            f"[green]Model set to[/green] {new_model!r} [dim](this session only)[/dim]"
+        )
         return True
 
     if verb == "/reset":
@@ -123,16 +191,16 @@ def run_cli(
     registry = get_default_registry()
     registry.auto_discover()
     n_skills = len(registry.list_skills())
-
-    # -- context --
-    context = AnalysisContext(output_dir=output_dir)
-
-    # -- print welcome --
-    console.print(Text(BANNER, style="bold cyan"))
-    console.print(Markdown(HELP_TEXT))
-    console.print(f"[dim]{n_skills} skills registered.[/dim]")
-    console.print(f"[dim]Output directory: {context.output_dir}[/dim]")
-    console.print(f"[dim]Provider: {provider}[/dim]\n")
+    if output_dir is None or (isinstance(output_dir, str) and not output_dir.strip()):
+        session_dir = _default_session_output_dir()
+    elif isinstance(output_dir, str) and _is_resolved_default_output_dir(output_dir):
+        # MDCHAT_OUTPUT_DIR=./output means "artifacts under output/", not "flat output/ only"
+        base = os.path.normpath(os.path.abspath(os.path.expanduser(output_dir.strip())))
+        session_dir = _default_session_output_dir(base=base)
+    else:
+        session_dir = output_dir.strip()
+    context = AnalysisContext(output_dir=session_dir)
+    model_choices = model_choices_for_provider(provider)
 
     # -- engine --
     callback = _RichCallback()
@@ -144,6 +212,13 @@ def run_cli(
         model=model,
         callback=callback,
     )
+    welcome_text = format_welcome(
+        n_skills=n_skills,
+        output_dir=context.output_dir,
+        provider=provider,
+        model=getattr(engine, "model", None),
+    )
+    console.print(Text(welcome_text, style="bold cyan"))
 
     # -- main loop --
     while True:
@@ -157,7 +232,9 @@ def run_cli(
             continue
 
         if user_input.startswith("/"):
-            if _handle_slash_command(user_input, engine, context, registry):
+            if _handle_slash_command(
+                user_input, engine, context, registry, model_choices
+            ):
                 continue
 
         with console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots"):

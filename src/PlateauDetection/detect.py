@@ -25,8 +25,9 @@ def _rolling_std(y: np.ndarray, window: int) -> np.ndarray:
     c1[1:] = np.cumsum(y)
     c2[1:] = np.cumsum(y * y)
     s1 = c1[window:] - c1[:-window]
+    s2 = c2[window:] - c2[:-window]
     # Sample variance: (sum x^2 - (sum x)^2 / n) / (n - 1)
-    var = (s2[window:] - s2[:-window] - (s1 * s1) / window) / max(window - 1, 1)
+    var = (s2 - (s1 * s1) / window) / max(window - 1, 1)
     return np.sqrt(np.maximum(var, 0.0))
 
 

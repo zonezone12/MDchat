@@ -26,9 +26,14 @@ class LoadTrajectorySkill(Skill):
                   "Path to the topology file (e.g., .prmtop, .tpr, .psf, .pdb)"),
         Parameter("trajectory", ParamType.FILE_PATH,
                   "Path to the trajectory file (e.g., .nc, .xtc, .dcd, .trr)"),
-        Parameter("format", ParamType.STRING,
-                  "Format of the trajectory file (e.g., 'TRJ', 'TRR', 'DCD', 'XTC')",
-                  required=False, default="TRJ"),
+        Parameter(
+            "format",
+            ParamType.STRING,
+            "MDAnalysis trajectory format (e.g. 'XTC', 'TRR', 'DCD', 'TRJ'). "
+            "Omit for automatic detection from the trajectory filename.",
+            required=False,
+            default=None,
+        ),
         Parameter("align", ParamType.BOOLEAN,
                   "Whether to align the trajectory to the first frame",
                   required=False, default=True),
@@ -53,6 +58,7 @@ class LoadTrajectorySkill(Skill):
         trajectory = params["trajectory"]
         do_align = params.get("align", True)
         align_sel = params.get("align_selection")
+        trj_format = params.get("format")
 
         for f in (topology, trajectory):
             if not os.path.isfile(f):
@@ -63,7 +69,14 @@ class LoadTrajectorySkill(Skill):
                 )
 
         try:
-            u = mda.Universe(topology, trajectory,format="TRJ")
+            # Never default to format="TRJ": that forces ASCII/Amber-style parsing
+            # and breaks binary trajectories (XTC, DCD, …) — on Windows locale
+            # decoders (e.g. cp950) this surfaces as UnicodeDecodeError on XTC magic.
+            u = (
+                mda.Universe(topology, trajectory, format=trj_format)
+                if trj_format
+                else mda.Universe(topology, trajectory)
+            )
         except Exception as exc:
             return SkillResult(
                 success=False,
