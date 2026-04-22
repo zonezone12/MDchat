@@ -26,6 +26,7 @@ Suggested prompt:
 - If you request **2+ metrics together** (RMSD/Rg/contacts/RMSF/PCA), ask for a **single observer pass**.
 - If you need **plateau detection** for RMSD or Rg, ask for standalone `compute_rmsd` / `compute_rg` with plateau options.
 - If RMSF/PCA is included with `n_jobs > 1`, execution is expected to run effectively with `n_jobs=1` for accumulation safety.
+- **GSA nanocube:** If you only need cage geometry (faces, volume, guest distance), ask for **`gsa_nanocube_metrics`** with a list of **six face selections** (and optional guest selection). If you need **GSA together with RMSD, Rg, contacts, endpoints, etc. in one trajectory read**, ask for **`run_trajectory_observer_pass`** with **`include_gsa=true`** and the same face/guest parameters (`gsa_face_selections`, optional `gsa_guest_selection`, `gsa_guest_tracking_method`, etc.). Face strings can be prepared from topology using helpers in **`src/task/GSAnalyzer.py`** (`gsa_auto_faces_by_kmeans`, `faces_from_atomname_blocks`, `amber_preset_selections`) when selections are not obvious from the residue catalog.
 
 ## 4) Copy-Paste Prompt Templates
 
@@ -40,6 +41,12 @@ Suggested prompt:
 
 - **Endpoint analysis**
   - `Find endpoints and compute endpoint distances for: <residue_selection_list>.`
+
+- **GSA nanocube (standalone)**
+  - `Run gsa_nanocube_metrics with face_selections = [<six MDAnalysis face strings>] and guest_selection = "<guest_sel>".`
+
+- **GSA + other metrics in one pass**
+  - `Run trajectory observer pass with include_rmsd=true, include_rg=true, include_gsa=true, gsa_face_selections=[...], rmsd_selection="<sel>", rg_selection="<sel>".`
 
 - **Session summary**
   - `Summarize the key structural events and list all generated files.`

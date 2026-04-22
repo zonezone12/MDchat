@@ -36,8 +36,8 @@ HELP_TEXT = """**Commands:**
 - Type a question in natural language to analyze your trajectory.
 - `/load <topology> <trajectory>` -- Quick-load files into the session.
 - `/status` -- Show current analysis state.
-- `/skills` -- List available skills.
-- `/model` -- Show the model list; `/model <n>` pick by number; `/model <id>` set API model id.
+- `/analysis` (or `/analysis method`) -- Full catalog of all analysis skills (grouped, with descriptions and requires/produces). `/skills` -- compact one-line list.
+- `/model` -- Show the model list; then type `n`, or `/model <n>` / `/model <id>` to set the API model id.
 - `/history` -- Show recent chat from this session’s markdown transcript.
 - `/reset` -- Clear conversation history and saved chat file (keeps loaded trajectory data).
 - `/help` -- Show this help message.

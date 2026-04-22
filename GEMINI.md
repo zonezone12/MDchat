@@ -30,6 +30,8 @@ Use this to reduce repeated trajectory reads:
 | 2+ metrics in one request | `run_trajectory_observer_pass` with all needed `include_*` flags |
 | RMSD/Rg + explicit plateau request | `compute_rmsd` / `compute_rg` (plateau params exposed) |
 | RMSF/PCA with `n_jobs != 1` | observer pass, expect effective `n_jobs=1` |
+| GSA nanocube only (faces + volume + optional guest) | `gsa_nanocube_metrics` with `face_selections` |
+| GSA + any other observer metric in one turn | `run_trajectory_observer_pass` with `include_gsa=true` and full `gsa_*` params |
 
 Observer pass parameters to use as needed:
 - RMSD: `include_rmsd`, `rmsd_selection`, `rmsd_ref_frame`
@@ -37,6 +39,14 @@ Observer pass parameters to use as needed:
 - Contacts: `include_contacts`, `contact_selection_a`, `contact_selection_b`, `contact_label`
 - RMSF: `include_rmsf`, `rmsf_selection`
 - PCA: `include_pca`, `pca_selection`, `pca_n_components`
+- GSA nanocube: `include_gsa`, `gsa_face_selections` (required when true), optional `gsa_corner_selections`, `gsa_guest_selection`, `gsa_guest_tracking_method` (`distance` or `volume`), `gsa_guest_distance_threshold`
+
+## GSA module (`src/task/GSAnalyzer.py`)
+
+- **`GSAnalyzer`** — Batch-style API; **`gsa_nanocube_metrics(universe, face_sel_list, ...)`** runs a single `TrajectoryIterator` pass with **`GSAnalyzerObserver`** (face planarity, edges, volume, guest–center distance, integrated guest entry/exit stats). Optional **`guest_tracking_method`** / **`guest_distance_threshold`**; parallel batch args **`n_jobs`**, **`use_dask`** apply at this call site.
+- **`GSAnalyzerObserver`** — Frame observer used by the iterator and by **`run_trajectory_observer_pass`** when **`include_gsa`** is set. After a run, metrics come from **`get_metrics_df()`**; guest summaries from **`get_guest_residence_stats()`** (used by plotting / downstream tools).
+- **Face list helpers** (Python only—not separate MDChat skills): **`amber_preset_selections`**, **`gsa_auto_faces_by_kmeans`**, **`faces_from_atomname_blocks`** — use in scripts or one-off code to build the six face MDAnalysis selection strings before calling **`gsa_nanocube_metrics`** or the observer pass.
+- **MDChat skills:** **`gsa_nanocube_metrics`** wraps **`GSAnalyzer.gsa_nanocube_metrics`** (parameters: `face_selections`, optional `guest_selection`, `save_csv`). Do not chain **`gsa_nanocube_metrics`** with other trajectory reads in the same turn if the user asked for a combined pass—use **`run_trajectory_observer_pass`** once with **`include_gsa`** plus the other **`include_*`** flags.
 
 ## Session Output
 

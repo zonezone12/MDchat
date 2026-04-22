@@ -95,7 +95,9 @@ def _print_model_picker(current: str | None, choices: list[str]) -> None:
             "Use: /model <api-model-id>[/dim]"
         )
         return
-    console.print("[bold]Models[/bold] [dim](/model <n> or /model <id>)[/dim]")
+    console.print(
+        "[bold]Models[/bold] [dim](/model <n>, /model <id>, or type the number only)[/dim]"
+    )
     for i, mid in enumerate(choices, start=1):
         tag = " [cyan]*[/cyan]" if mid == current else ""
         console.print(f"  {i:2}. {mid}{tag}")
@@ -112,10 +114,14 @@ def _handle_slash_command(
     model_choices: list[str],
     session_dir: str,
     provider: str,
+    model_picker_pending: list[bool],
 ) -> bool:
     """Handle a slash command. Returns True if the command was recognized."""
     parts = cmd.strip().split()
     verb = parts[0].lower()
+    bare_model_menu = verb == "/model" and len(parts) < 2
+    if not bare_model_menu:
+        model_picker_pending[0] = False
 
     if verb in ("/quit", "/exit"):
         console.print("[bold]Goodbye![/bold]")
@@ -135,10 +141,36 @@ def _handle_slash_command(
         console.print()
         return True
 
+    if verb == "/analysis":
+        if len(parts) > 1:
+            sub = parts[1].lower()
+            if sub not in ("method", "methods", "list"):
+                console.print(
+                    "[red]Unknown.[/red] Use [bold]/analysis[/bold] or "
+                    "[bold]/analysis method[/bold] for the full skill catalog."
+                )
+                return True
+        text = registry.format_analysis_method_catalog(context)
+        head = (
+            "Every registered **analysis method** the assistant can run (with "
+            "description, prerequisites, and outputs). For a short table, use "
+            "**/skills**.\n\n---\n\n"
+        )
+        console.print(
+            Panel(
+                Markdown(head + text),
+                title="MDChat: analysis methods",
+                border_style="blue",
+            )
+        )
+        console.print()
+        return True
+
     if verb == "/model":
         current = getattr(engine, "model", None)
         if len(parts) < 2:
             _print_model_picker(current, model_choices)
+            model_picker_pending[0] = True
             return True
         token = parts[1].strip()
         if not hasattr(engine, "model"):
@@ -160,6 +192,7 @@ def _handle_slash_command(
             console.print("[red]Model id cannot be empty.[/red]")
             return True
         engine.model = new_model
+        model_picker_pending[0] = False
         console.print(
             f"[green]Model set to[/green] {new_model!r} [dim](this session only)[/dim]"
         )
@@ -264,6 +297,8 @@ def run_cli(
         f"[dim]readable log:[/dim] {TRANSCRIPT_FILENAME}\n"
     )
 
+    model_picker_pending = [False]
+
     # -- main loop --
     while True:
         try:
@@ -284,8 +319,27 @@ def run_cli(
                 model_choices,
                 session_dir,
                 provider,
+                model_picker_pending,
             ):
                 continue
+
+        if model_picker_pending[0] and model_choices and hasattr(engine, "model"):
+            if user_input.isdigit():
+                idx = int(user_input)
+                if 1 <= idx <= len(model_choices):
+                    new_model = model_choices[idx - 1]
+                    engine.model = new_model
+                    model_picker_pending[0] = False
+                    console.print(
+                        f"[green]Model set to[/green] {new_model!r} "
+                        f"[dim](this session only)[/dim]"
+                    )
+                    continue
+                console.print(
+                    f"[red]Pick 1–{len(model_choices)} or use /model <api-model-id>.[/red]"
+                )
+                continue
+            model_picker_pending[0] = False
 
         with console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots"):
             try:

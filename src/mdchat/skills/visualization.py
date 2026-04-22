@@ -76,8 +76,8 @@ class VisualizeStructureSkill(Skill):
         "Render a 3D interactive visualization of the molecular structure "
         "at a given trajectory frame. Produces a self-contained HTML file "
         "(opens in any browser) and a reusable nglview Python script for "
-        "Jupyter notebooks. Supports custom atom selections, representation "
-        "styles, and highlighted regions with distinct colors."
+        "Jupyter notebooks. Supports custom atom selections, drawing style "
+        "(NGL representation), and highlighted regions with distinct colors."
     )
     category = "visualization"
     parameters = [
@@ -94,8 +94,9 @@ class VisualizeStructureSkill(Skill):
             required=False, default=0,
         ),
         Parameter(
-            "representation", ParamType.STRING,
-            "NGL representation for the main selection.",
+            "style", ParamType.STRING,
+            "Drawing style for the main structure (NGL representation): "
+            "licorice, ball+stick, cartoon, spacefill, surface, ribbon, rope, tube, line.",
             required=False, default="licorice",
             enum_values=_NGL_REPR_CHOICES,
         ),
@@ -140,7 +141,11 @@ class VisualizeStructureSkill(Skill):
         u = context.universe
         selection = params.get("selection") or context.main_selection
         frame_idx = params.get("frame", 0)
-        main_repr = params.get("representation", "licorice")
+        main_repr = (
+            params.get("style")
+            or params.get("representation")
+            or "licorice"
+        )
         highlight_sels = params.get("highlight_selections", []) or []
         highlight_colors = params.get("highlight_colors", _DEFAULT_HIGHLIGHT_COLORS)
         highlight_repr_name = params.get("highlight_repr", "ball+stick")
@@ -226,7 +231,7 @@ class VisualizeStructureSkill(Skill):
         title = f"MDChat \u2014 Frame {frame_idx}"
         info_text = (
             f"Frame {frame_idx} / {n_frames - 1} &bull; "
-            f"{len(atoms)} atoms &bull; {selection}"
+            f"{len(atoms)} atoms &bull; {main_repr} &bull; {selection}"
         )
 
         html = NGL_HTML_TEMPLATE.format(

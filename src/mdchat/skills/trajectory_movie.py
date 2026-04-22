@@ -77,15 +77,34 @@ def _build_ngl_layer_indices(
     atoms, idx_to_pos: dict[int, int]
 ) -> dict[str, list[int]]:
     """
-    Split the exported atom set into NGL atom-index lists (0..N-1) for visibility toggles.
-    Buckets are mutually exclusive: protein → nucleic → water → other.
+    Split exported atoms into per-species NGL atom-index lists (0..N-1).
+    Prefer residue-name buckets so each chemical species gets its own style control.
+    Falls back to broad structural buckets when residue names are unavailable.
     """
     n = len(atoms)
     if n == 0:
         return {}
+    layers: dict[str, list[int]] = {}
+
+    # Primary path: one layer per residue name (species-like control in typical systems).
+    try:
+        by_resname: dict[str, list[int]] = {}
+        for atom in atoms:
+            key = str(getattr(atom, "resname", "") or "").strip() or "UNSPEC"
+            pos = idx_to_pos.get(atom.index)
+            if pos is None:
+                continue
+            by_resname.setdefault(key, []).append(pos)
+        if len(by_resname) > 1:
+            for rn in sorted(by_resname.keys()):
+                layers[rn] = sorted(by_resname[rn])
+            return layers
+    except Exception:
+        pass
+
+    # Fallback path: broad mutually exclusive buckets.
     all_pos = set(range(n))
     assigned: set[int] = set()
-    layers: dict[str, list[int]] = {}
 
     def take(sel_str: str, name: str) -> None:
         try:
@@ -113,6 +132,34 @@ def _build_ngl_layer_indices(
         layers["other"] = other
     if not layers:
         layers["all"] = list(range(n))
+    return layers
+
+
+def _build_layers_from_residue_catalog(
+    u, idx_to_pos: dict[int, int], residue_catalog: list[dict[str, Any]] | None
+) -> dict[str, list[int]]:
+    """
+    Build per-species layers from context residue_catalog selections.
+    Returns empty dict when no valid per-species layers are available.
+    """
+    if not residue_catalog:
+        return {}
+
+    layers: dict[str, list[int]] = {}
+    for row in residue_catalog:
+        sel = str(row.get("selection", "") or "").strip()
+        if not sel:
+            continue
+        segid = str(row.get("segid", "") or "").strip()
+        resname = str(row.get("resname", "") or "").strip() or "UNSPEC"
+        key = f"{segid}:{resname}" if segid else resname
+        try:
+            ag = u.select_atoms(sel)
+        except Exception:
+            continue
+        pos = sorted(idx_to_pos[a.index] for a in ag if a.index in idx_to_pos)
+        if pos:
+            layers[key] = pos
     return layers
 
 
@@ -180,6 +227,8 @@ TRAJECTORY_MOVIE_HTML = """\
   #layerControls {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }}
   #layerControls label {{ display: inline; margin-bottom: 0; font-size: 12px; color: #ccc; cursor: pointer; }}
   #layerControls input {{ vertical-align: middle; margin-right: 4px; }}
+  .layer-item {{ display: flex; align-items: center; gap: 8px; background: #1f1f2b; border: 1px solid #333; border-radius: 8px; padding: 6px 8px; }}
+  .layer-item select {{ max-width: 150px; padding: 4px 8px; font-size: 12px; }}
   #appearanceRow {{ flex: 1 1 100%; border-top: 1px solid #333; padding-top: 10px; margin-top: 4px; }}
 </style>
 <script src="https://unpkg.com/ngl@2.3.1/dist/ngl.js"></script>
@@ -215,11 +264,7 @@ TRAJECTORY_MOVIE_HTML = """\
     </div>
   </div>
   <div id="appearanceRow">
-    <label>Main appearance (NGL)</label>
-    <div class="row">
-      <select id="mainRepr" title="Representation for the main structure"></select>
-    </div>
-    <label style="margin-top:8px">Show species (atoms in this clip only)</label>
+    <label>Species appearance (atoms in this clip only)</label>
     <div id="layerControls" class="row"></div>
   </div>
   <div style="flex:1 1 100%">
@@ -239,7 +284,7 @@ TRAJECTORY_MOVIE_HTML = """\
 const PDB_B64 = "{pdb_b64}";
 const FRAME_LABELS = {frame_labels_json};
 const GIF_DELAY_DEFAULT = {gif_delay_ms};
-const DEFAULT_MAIN_REPR = {default_main_repr_json};
+const DEFAULT_LAYER_REPR = {default_main_repr_json};
 const LAYER_INDICES = __MDCHAT_LAYER_JSON__;
 const HIGHLIGHTS_DATA = __MDCHAT_HIGHLIGHTS_JSON__;
 const REPR_CHOICES = __MDCHAT_REPR_CHOICES_JSON__;
@@ -255,6 +300,10 @@ function layerLabel(key) {{
     structure: "Structure"
   }};
   return m[key] || key;
+}}
+
+function layerDomId(prefix, key) {{
+  return prefix + "_" + String(key).replace(/[^A-Za-z0-9_-]/g, "_");
 }}
 
 function seleFromIndices(arr) {{
@@ -382,28 +431,29 @@ function runTrajectoryViewer(gifenc) {{
   let nFrames = 0;
   let playTimer = null;
   var layerVisibility = {{}};
+  var layerRepr = {{}};
 
   function initLayerVisibility() {{
     Object.keys(LAYER_INDICES).forEach(function (k) {{
       layerVisibility[k] = true;
+      layerRepr[k] = DEFAULT_LAYER_REPR;
     }});
   }}
 
   function rebuildRepresentations() {{
     if (!structComp) return;
     structComp.removeAllRepresentations();
-    var mainReprEl = document.getElementById("mainRepr");
-    var mainRepr = mainReprEl && mainReprEl.value ? mainReprEl.value : DEFAULT_MAIN_REPR;
     var keys = Object.keys(LAYER_INDICES);
     if (keys.length === 0) {{
-      structComp.addRepresentation(mainRepr, {{ color: "element", radiusScale: 1.5 }});
+      structComp.addRepresentation(DEFAULT_LAYER_REPR, {{ color: "element", radiusScale: 1.5 }});
     }} else {{
       keys.forEach(function (k) {{
         if (!layerVisibility[k]) return;
+        var reprName = layerRepr[k] || DEFAULT_LAYER_REPR;
         var idx = LAYER_INDICES[k];
         var sele = seleFromIndices(idx);
         if (!sele) return;
-        structComp.addRepresentation(mainRepr, {{
+        structComp.addRepresentation(reprName, {{
           sele: sele,
           color: "element",
           radiusScale: 1.5
@@ -424,42 +474,48 @@ function runTrajectoryViewer(gifenc) {{
 
   function setupAppearanceControls() {{
     initLayerVisibility();
-    var mainRepr = document.getElementById("mainRepr");
-    if (mainRepr && REPR_CHOICES && REPR_CHOICES.length) {{
-      REPR_CHOICES.forEach(function (r) {{
-        var opt = document.createElement("option");
-        opt.value = r;
-        opt.textContent = r;
-        mainRepr.appendChild(opt);
-      }});
-      mainRepr.value =
-        REPR_CHOICES.indexOf(DEFAULT_MAIN_REPR) >= 0 ? DEFAULT_MAIN_REPR : REPR_CHOICES[0];
-      mainRepr.addEventListener("change", function () {{ rebuildRepresentations(); }});
-    }}
+    var defaultRepr =
+      REPR_CHOICES.indexOf(DEFAULT_LAYER_REPR) >= 0 ? DEFAULT_LAYER_REPR : REPR_CHOICES[0];
+    Object.keys(layerRepr).forEach(function (k) {{ layerRepr[k] = defaultRepr; }});
     var lc = document.getElementById("layerControls");
     var lk = Object.keys(LAYER_INDICES);
     if (lc) {{
-      if (lk.length <= 1) {{
-        lc.style.display = "none";
-        var spLab = lc.previousElementSibling;
-        if (spLab && spLab.tagName === "LABEL") spLab.style.display = "none";
-      }} else {{
-        lk.forEach(function (k) {{
-          var id = "layer_" + k;
-          var lab = document.createElement("label");
-          var chk = document.createElement("input");
-          chk.type = "checkbox";
-          chk.id = id;
-          chk.checked = true;
-          chk.addEventListener("change", function () {{
-            layerVisibility[k] = chk.checked;
-            rebuildRepresentations();
-          }});
-          lab.appendChild(chk);
-          lab.appendChild(document.createTextNode(" " + layerLabel(k)));
-          lc.appendChild(lab);
+      lk.forEach(function (k) {{
+        var wrap = document.createElement("div");
+        wrap.className = "layer-item";
+        var id = layerDomId("layer", k);
+        var lab = document.createElement("label");
+        var chk = document.createElement("input");
+        chk.type = "checkbox";
+        chk.id = id;
+        chk.checked = true;
+        chk.addEventListener("change", function () {{
+          layerVisibility[k] = chk.checked;
+          rebuildRepresentations();
         }});
-      }}
+        lab.appendChild(chk);
+        lab.appendChild(document.createTextNode(" " + layerLabel(k)));
+        wrap.appendChild(lab);
+
+        var reprSel = document.createElement("select");
+        reprSel.id = layerDomId("repr", k);
+        reprSel.title = "Representation for " + layerLabel(k);
+        if (REPR_CHOICES && REPR_CHOICES.length) {{
+          REPR_CHOICES.forEach(function (r) {{
+            var opt = document.createElement("option");
+            opt.value = r;
+            opt.textContent = r;
+            reprSel.appendChild(opt);
+          }});
+          reprSel.value = defaultRepr;
+        }}
+        reprSel.addEventListener("change", function () {{
+          layerRepr[k] = reprSel.value || defaultRepr;
+          rebuildRepresentations();
+        }});
+        wrap.appendChild(reprSel);
+        lc.appendChild(wrap);
+      }});
     }}
   }}
 
@@ -635,7 +691,7 @@ class TrajectoryMovieSkill(Skill):
         Parameter(
             "selection",
             ParamType.ATOM_SELECTION,
-            "Atom selection to include in the movie. If omitted, session main selection.",
+            "Optional atom selection to include in the movie. If omitted, uses all atoms.",
             required=False,
             default=None,
         ),
@@ -738,7 +794,7 @@ class TrajectoryMovieSkill(Skill):
         center = int(params["center_frame"])
         window = int(params.get("window", 50))
         stride = int(params.get("stride", 1))
-        selection = params.get("selection") or context.main_selection
+        selection = params.get("selection")
         main_repr = params.get("representation", "licorice")
         highlight_sels = params.get("highlight_selections", []) or []
         highlight_colors = params.get("highlight_colors", _DEFAULT_HIGHLIGHT_COLORS)
@@ -782,25 +838,34 @@ class TrajectoryMovieSkill(Skill):
                 ),
             )
 
-        try:
-            atoms = u.select_atoms(selection)
-        except Exception as exc:
-            return SkillResult(
-                success=False,
-                error=f"Invalid selection '{selection}': {exc}",
-                summary=f"Atom selection failed: {exc}",
-            )
+        if selection:
+            try:
+                atoms = u.select_atoms(selection)
+            except Exception as exc:
+                return SkillResult(
+                    success=False,
+                    error=f"Invalid selection '{selection}': {exc}",
+                    summary=f"Atom selection failed: {exc}",
+                )
+        else:
+            atoms = u.atoms
 
         if len(atoms) == 0:
             return SkillResult(
                 success=False,
-                error=f"Selection '{selection}' matched 0 atoms.",
+                error=(
+                    f"Selection '{selection}' matched 0 atoms."
+                    if selection
+                    else "No atoms available in the universe."
+                ),
                 summary="No atoms matched the selection.",
             )
 
         idx_to_pos = {atom.index: pos for pos, atom in enumerate(atoms)}
 
-        layers = _build_ngl_layer_indices(atoms, idx_to_pos)
+        layers = _build_layers_from_residue_catalog(
+            u, idx_to_pos, context.get("residue_catalog")
+        ) or _build_ngl_layer_indices(atoms, idx_to_pos)
 
         highlight_summaries: list[str] = []
         highlights_payload: list[dict[str, Any]] = []
@@ -816,7 +881,7 @@ class TrajectoryMovieSkill(Skill):
             )
             if not ngl_positions:
                 highlight_summaries.append(
-                    f"  - '{hl_sel}': no overlap with main selection, skipped"
+                    f"  - '{hl_sel}': no overlap with exported movie atoms, skipped"
                 )
                 continue
             highlights_payload.append(
@@ -836,8 +901,9 @@ class TrajectoryMovieSkill(Skill):
         info_text = (
             f"{len(frame_indices)} frames &bull; stride {stride} &bull; "
             f"traj indices {frame_indices[0]}–{frame_indices[-1]} &bull; "
-            f"{len(atoms)} atoms &bull; {selection}<br/>"
-            f"Use <b>Main appearance</b> and species checkboxes (embedded atoms only), "
+            f"{len(atoms)} atoms &bull; "
+            f"{selection if selection else 'all atoms'}<br/>"
+            f"Set each species appearance and visibility (embedded atoms only), "
             f"then <b>Download GIF</b>."
         )
 
@@ -867,8 +933,13 @@ class TrajectoryMovieSkill(Skill):
             f"Trajectory movie viewer: {out_path}",
             f"Clip: {len(frame_indices)} frames (trajectory indices "
             f"{frame_indices[0]}–{frame_indices[-1]}), center {center}.",
-            "In the browser, use **Main appearance** and species checkboxes (atoms in your "
-            "selection only), rotate/zoom, then **Download GIF**.",
+            (
+                f"Movie atoms: '{selection}' ({len(atoms)} atoms)."
+                if selection
+                else f"Movie atoms: all atoms ({len(atoms)} atoms)."
+            ),
+            "In the browser, set per-species styles and visibility (atoms in your "
+            "movie export), rotate/zoom, then **Download GIF**.",
         ]
 
         viewer_url: str | None = None

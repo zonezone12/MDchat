@@ -333,6 +333,10 @@ class GuestEnteringObserver(FrameObserver):
         else:
             is_inside, current_guest_indices = self._is_guest_inside_distance(universe)
         
+        guest_resid_by_id = {
+            int(atom.id): int(atom.resid) for atom in universe.select_atoms(self.guest_sel)
+        }
+        
         # Convert to set for easier comparison
         current_guest_indices_set = set(current_guest_indices)
         
@@ -343,20 +347,32 @@ class GuestEnteringObserver(FrameObserver):
                 self.entry_frame = ts.frame  # First entry (for backward compatibility)
             self._current_entry_frame = ts.frame
             self._current_entry_time = ts.time
+            entered_guest_indices = sorted(list(newly_entered))
             self.entry_events.append({
                 'frame': ts.frame,
                 'time': ts.time,
-                'guest_indices': sorted(list(newly_entered))
+                'guest_indices': entered_guest_indices,
+                'guest_resids': sorted({
+                    guest_resid_by_id[idx]
+                    for idx in entered_guest_indices
+                    if idx in guest_resid_by_id
+                })
             })
         
         # Detect exits: atoms that just exited
         newly_exited = self._inside_guest_indices - current_guest_indices_set
         if newly_exited:
             if self._current_entry_frame is not None:
+                exited_guest_indices = sorted(list(newly_exited))
                 self.exit_events.append({
                     'frame': ts.frame,
                     'time': ts.time,
-                    'guest_indices': sorted(list(newly_exited))
+                    'guest_indices': exited_guest_indices,
+                    'guest_resids': sorted({
+                        guest_resid_by_id[idx]
+                        for idx in exited_guest_indices
+                        if idx in guest_resid_by_id
+                    })
                 })
                 # Only clear current entry if all atoms have exited
                 if len(current_guest_indices_set) == 0:
@@ -372,10 +388,19 @@ class GuestEnteringObserver(FrameObserver):
         # If guest is still inside at the end, record the final frame as exit
         if self._was_inside and self._current_entry_frame is not None:
             if self._last_frame is not None and self._last_time is not None:
+                guest_resid_by_id = {
+                    int(atom.id): int(atom.resid) for atom in iterator.universe.select_atoms(self.guest_sel)
+                }
+                inside_guest_indices = sorted(list(self._inside_guest_indices))
                 self.exit_events.append({
                     'frame': self._last_frame,
                     'time': self._last_time,
-                    'guest_indices': sorted(list(self._inside_guest_indices))
+                    'guest_indices': inside_guest_indices,
+                    'guest_resids': sorted({
+                        guest_resid_by_id[idx]
+                        for idx in inside_guest_indices
+                        if idx in guest_resid_by_id
+                    })
                 })
     
     def get_entry_frame(self) -> Optional[int]:
@@ -410,9 +435,11 @@ class GuestEnteringObserver(FrameObserver):
             - entry_frames: List of frame indices when guest entered
             - entry_times: List of times (ps) when guest entered
             - entry_guest_indices: List of guest atom indices that entered at each event
+            - entry_guest_resids: List of guest residue IDs that entered at each event
             - exit_frames: List of frame indices when guest exited
             - exit_times: List of times (ps) when guest exited
             - exit_guest_indices: List of guest atom indices that exited at each event
+            - exit_guest_resids: List of guest residue IDs that exited at each event
             - durations_inside: List of durations (ps) for each stay inside
             - durations_outside: List of durations (ps) for each stay outside
             - total_time_inside: Total time (ps) guest spent inside
@@ -467,9 +494,11 @@ class GuestEnteringObserver(FrameObserver):
             'entry_frames': [e['frame'] for e in self.entry_events],
             'entry_times': [e['time'] for e in self.entry_events],
             'entry_guest_indices': [e.get('guest_indices', []) for e in self.entry_events],
+            'entry_guest_resids': [e.get('guest_resids', []) for e in self.entry_events],
             'exit_frames': [e['frame'] for e in self.exit_events],
             'exit_times': [e['time'] for e in self.exit_events],
             'exit_guest_indices': [e.get('guest_indices', []) for e in self.exit_events],
+            'exit_guest_resids': [e.get('guest_resids', []) for e in self.exit_events],
             'durations_inside': durations_inside,
             'durations_outside': durations_outside,
             'total_time_inside': total_time_inside,
@@ -529,9 +558,11 @@ def guest_entering(universe: mda.Universe, host_sel: str, guest_sel: str,
             - entry_frames: List of entry frame indices
             - entry_times: List of entry times (ps)
             - entry_guest_indices: List of guest atom indices that entered at each event
+            - entry_guest_resids: List of guest residue IDs that entered at each event
             - exit_frames: List of exit frame indices
             - exit_times: List of exit times (ps)
             - exit_guest_indices: List of guest atom indices that exited at each event
+            - exit_guest_resids: List of guest residue IDs that exited at each event
             - durations_inside: List of durations (ps) for each stay inside
             - durations_outside: List of durations (ps) for each stay outside
             - total_time_inside: Total time (ps) spent inside

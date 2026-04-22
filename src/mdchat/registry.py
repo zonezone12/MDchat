@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import textwrap
+from collections import defaultdict
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from .skill import Skill
@@ -59,6 +61,35 @@ class SkillRegistry:
             reqs = ", ".join(s.requires) if s.requires else "none"
             lines.append(f"- **{s.name}** [{s.category}]: {s.description}  (requires: {reqs})")
         return "\n".join(lines)
+
+    def format_analysis_method_catalog(
+        self,
+        context: Optional["AnalysisContext"] = None,
+        *,
+        wrap_width: int = 88,
+    ) -> str:
+        """Full multi-line catalog: every skill, grouped by category, for /analysis."""
+        by_cat: Dict[str, List[Skill]] = defaultdict(list)
+        for s in sorted(self._skills.values(), key=lambda x: (x.category, x.name)):
+            by_cat[s.category].append(s)
+
+        blocks: List[str] = []
+        for cat in sorted(by_cat.keys()):
+            blocks.append(f"## {cat}\n")
+            for s in by_cat[cat]:
+                if context is not None:
+                    ok, _ = s.validate(context)
+                    status = "ready" if ok else "needs prereqs"
+                else:
+                    status = "n/a (not in MDChat session)"
+                blocks.append(f"### {s.name}\n")
+                blocks.append(f"**Status (this session):** {status}\n\n")
+                desc = " ".join(s.description.split())
+                blocks.append(textwrap.fill(desc, width=wrap_width) + "\n\n")
+                reqs = ", ".join(s.requires) if s.requires else "none"
+                prods = ", ".join(s.produces) if s.produces else "none"
+                blocks.append(f"**Requires:** {reqs}  \n**Produces:** {prods}\n\n")
+        return "".join(blocks).rstrip() + "\n"
 
     def auto_discover(self) -> None:
         """Import the built-in skills package so skills self-register."""
