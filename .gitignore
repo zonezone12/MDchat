@@ -17,6 +17,8 @@ traj/
 *.log.gz
 *.err.gz
 *.out.gz
+.claude/
+chat_history_exports/
 
 # Environment / secrets
 .env
