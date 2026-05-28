@@ -9,6 +9,8 @@ alwaysApply: true
 
 - `src/` — all analysis modules (each in its own subpackage).
 - `src/mdchat/` — the LLM chat platform (skills, registry, LLM engine, CLI).
+- `src/task/` — specialized higher-level analysis tasks (e.g., `GSAnalyzer`).
+- `src/utils/` — shared helper utilities (`guest_in`, `radii`, `monitor`, `rdkit_utils`, …).
 - `scripts/` — CLI entry-point scripts for batch analysis.
 - `legacy/` — deprecated monolithic workflow (reference only).
 
@@ -30,5 +32,8 @@ Or press **F5** in VS Code / Cursor (uses `.vscode/launch.json`).
 ## Adding dependencies
 
 - Core analysis deps go in `pyproject.toml` under `[project] dependencies`.
-- MDChat-specific deps go under `[project.optional-dependencies] chat`.
-- Visualization-only deps go under `viz`.
+- MDChat-specific deps go under `[project.optional-dependencies] chat` (Anthropic, rich, dotenv).
+- Visualization-only deps go under `viz` (datashader, plotly, scikit-image, nglview).
+- RDKit-only deps go under `rdkit`.
+- Gemini provider deps go under `gemini` (`google-genai`).
+- The `all` extra is a meta-extra that pulls in `chat`, `viz`, `rdkit`, and `gemini` together.

@@ -8,23 +8,53 @@ alwaysApply: false
 
 ## Creating a new skill
 
+You can author a skill in **two equivalent styles**:
+
+### A. Class-based (preferred for non-trivial skills)
+
 1. Create a class that inherits from `Skill` (in `src.mdchat.skill`).
 2. Set class attributes: `name`, `description`, `category`, `parameters`, `requires`, `produces`.
 3. Implement `execute(self, context, **params) -> SkillResult`.
 4. Register at module level: `get_default_registry().register(MySkill())`.
 5. Import the module in `src/mdchat/skills/__init__.py`.
 
+### B. `@md_skill` decorator (concise, for simple function-style skills)
+
+```python
+from src.mdchat.skill import md_skill, Parameter, ParamType, SkillResult
+from src.mdchat.registry import get_default_registry
+
+@md_skill(
+    name="my_skill",
+    description="...",
+    parameters=[Parameter("selection", ParamType.ATOM_SELECTION, "...", default="protein", required=False)],
+    requires=["universe"],
+    produces=["my_array"],
+    category="metrics",
+)
+def my_skill(context, selection="protein"):
+    return SkillResult(success=True, summary="...", data={"my_array": ...})
+
+get_default_registry().register(my_skill)
+```
+
 ## Import rules
 
-- **Never** import heavy libraries (`numpy`, `MDAnalysis`, `rdkit`) at module level in skill files.
-- Import them inside `execute()` so auto-discovery works in minimal environments.
+- **Never** import optional/heavy libraries at module level: `MDAnalysis`, `rdkit`, `scipy`, `sklearn`, `matplotlib` (and anything from `src.<analysis module>` whose own imports are heavy). Import them inside `execute()` so auto-discovery still works when those extras aren't installed.
+- `numpy` and `pandas` are core dependencies and **may** be imported at module level, but prefer keeping them inside `execute()` for consistency unless you need them for type hints or shared helpers.
 - Use `from src.ModuleName import ClassName` for existing analysis modules.
 
 ## SkillResult
 
+- Always set `success=True` (or `False` with `error=...` on failure).
 - Always set `summary` to a human-readable string the LLM can relay to the user.
 - Put array/DataFrame outputs in `data` keyed by the name from `produces`.
-- Put file paths (plots, CSVs) in `artifacts`.
+- Put file paths (plots, CSVs, GIFs) in `artifacts` keyed by a short label (e.g., `"plot"`, `"csv"`).
+- For exceptions inside `execute()`, you may let them propagate when using `@md_skill` (the decorator wraps them); for class-based skills, catch and return a `SkillResult(success=False, error=..., summary=...)`.
+
+## Categories
+
+Common values seen in the registry: `trajectory`, `metrics`, `plateau`, `endpoints`, `plotting`, `scoring`, `visualization`, `volume`, `guest`, `clustering`, `fileio`, `gsa`, `selection`, `work_log`, `hpc_batch`. Reuse one of these when it fits, otherwise pick a short lowercase tag.
 
 ## Example
 

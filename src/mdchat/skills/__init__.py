@@ -9,6 +9,7 @@ from . import (  # noqa: F401
     trajectory_observer_pass,
     metrics,
     plateau,
+    changepoint,
     endpoints,
     plotting,
     scoring,
