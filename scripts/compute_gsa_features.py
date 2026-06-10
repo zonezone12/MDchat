@@ -93,6 +93,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override assembly selection (default: resname GSA_RESNAME)",
     )
+    parser.add_argument(
+        "--format",
+        default='TRJ',
+        help="Trajectory format (e.g. 'TRJ', 'DCD', 'XTC')",
+    )
     parser.add_argument("--stride", type=int, default=1, help="Frame stride")
     parser.add_argument("--start", type=int, default=None, help="Start frame index")
     parser.add_argument("--stop", type=int, default=None, help="Stop frame index (exclusive)")
@@ -125,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         help="Cavity radius for solvent counts (Angstrom)",
     )
     parser.add_argument(
-        "--n-jobs",
+        "--n_jobs",
         type=int,
         default=1,
         help="Parallel jobs (1=sequential; >1 uses TrajectoryIterator parallel batches)",
@@ -172,7 +177,7 @@ def main() -> None:
                 component="compute_gsa_features",
                 context={"traj_path": str(traj_path), "traj_id": traj_id},
             ):
-                u = mda.Universe(top, str(traj_path))
+                u = mda.Universe(top, str(traj_path),format=args.format)
                 out_prefix = str(out_dir / traj_id)
                 df = compute_gsa_features(
                     u,
