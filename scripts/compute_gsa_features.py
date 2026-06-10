@@ -26,6 +26,7 @@ import MDAnalysis as mda
 
 from src.utils.gsa_feature_observer import compute_gsa_features
 from src.utils.gsa_selections import GSAFeatureSelections
+from src.utils.run_log import RunContext, log_event, step
 
 
 def _expand_trajectories(patterns: list[str]) -> list[Path]:
@@ -84,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--guest-selection",
-        default=None,
+        default='resname IOD',
         help="MDAnalysis selection for guest (e.g. 'resname IOD')",
     )
     parser.add_argument(
@@ -100,6 +101,11 @@ def parse_args() -> argparse.Namespace:
         "--no-tier2",
         action="store_true",
         help="Skip Tier-2 gear/interface chemistry features",
+    )
+    parser.add_argument(
+        "--no-auto-tooth",
+        action="store_true",
+        help="Disable EndpointAnalyzer auto tooth detection for Tier-2 gear features",
     )
     parser.add_argument(
         "--no-guest",
@@ -142,47 +148,71 @@ def main() -> None:
         guest_sel=args.guest_selection,
     )
 
-    print(f"Topology: {args.topology}")
-    print(f"Trajectories ({len(traj_paths)}):")
-    for p in traj_paths:
-        print(f"  {p}")
-    print(f"GSA resname: {args.gsa_resname}, n_monomers: {args.n_monomers}")
-    if args.guest_selection:
-        print(f"Guest: {args.guest_selection}")
-    print(f"Output: {out_dir}")
-    print()
-
-    top = str(args.topology)
-    for traj_path in traj_paths:
-        traj_id = traj_path.stem
-        print(f"Processing {traj_id} ...")
-        u = mda.Universe(top, str(traj_path))
-
-        out_prefix = str(out_dir / traj_id)
-        df = compute_gsa_features(
-            u,
-            selections=selections,
-            gsa_resname=args.gsa_resname,
-            n_monomers=args.n_monomers,
-            include_tier1=True,
-            include_tier2=not args.no_tier2,
-            include_guest=not args.no_guest,
-            ref_frame=args.ref_frame,
-            contact_cutoff=args.contact_cutoff,
-            cavity_radius=args.cavity_radius,
-            traj_id=traj_id,
-            out_prefix=out_prefix,
-            start=args.start,
-            stop=args.stop,
-            step=args.stride,
-            n_jobs=args.n_jobs,
+    with RunContext.from_namespace(args, name="compute_gsa_features") as run:
+        print(f"Run log: {run.run_dir}")
+        log_event(
+            "config",
+            "compute_gsa_features configuration",
+            component="compute_gsa_features",
+            context={
+                "topology": args.topology,
+                "n_trajectories": len(traj_paths),
+                "output_dir": str(out_dir),
+                "gsa_resname": args.gsa_resname,
+                "n_monomers": args.n_monomers,
+                "guest_selection": args.guest_selection,
+            },
         )
 
-        csv_path = out_dir / f"{traj_id}_gsa_features.csv"
-        print(f"  Wrote {csv_path} ({len(df)} frames, {len(df.columns)} columns)")
+        top = str(args.topology)
+        for traj_path in traj_paths:
+            traj_id = traj_path.stem
+            with step(
+                f"trajectory:{traj_id}",
+                component="compute_gsa_features",
+                context={"traj_path": str(traj_path), "traj_id": traj_id},
+            ):
+                u = mda.Universe(top, str(traj_path))
+                out_prefix = str(out_dir / traj_id)
+                df = compute_gsa_features(
+                    u,
+                    selections=selections,
+                    gsa_resname=args.gsa_resname,
+                    n_monomers=args.n_monomers,
+                    include_tier1=True,
+                    include_tier2=not args.no_tier2,
+                    include_guest=not args.no_guest,
+                    auto_tooth=not args.no_auto_tooth,
+                    ref_frame=args.ref_frame,
+                    contact_cutoff=args.contact_cutoff,
+                    cavity_radius=args.cavity_radius,
+                    traj_id=traj_id,
+                    out_prefix=out_prefix,
+                    start=args.start,
+                    stop=args.stop,
+                    step=args.stride,
+                    n_jobs=args.n_jobs,
+                )
+
+                csv_path = out_dir / f"{traj_id}_gsa_features.csv"
+                log_event(
+                    "artifact_written",
+                    str(csv_path),
+                    component="compute_gsa_features",
+                    context={
+                        "traj_id": traj_id,
+                        "n_frames": len(df),
+                        "n_columns": len(df.columns),
+                        "csv_path": str(csv_path),
+                    },
+                )
+                print(f"  Wrote {csv_path} ({len(df)} frames, {len(df.columns)} columns)")
 
     print("Done.")
 
 
 if __name__ == "__main__":
     main()
+
+
+#python scripts/compute_gsa_features.py --topology traj/BMMpM_ca.prmtop --trajectories traj/BMMpM_891249_mdcrd_v.trj --gsa-resname MOL --guest-selection "resname IOD" --output-dir output/gsa_features --stride 10

@@ -228,6 +228,59 @@ def _derive_inner_atoms(gsa_resname: str) -> str:
     return f"resname {gsa_resname} and not name H*"
 
 
+def _derive_tooth_selections(
+    universe: Any,
+    monomer_selections: List[str],
+) -> Optional[List[str]]:
+    """Per-monomer gear-tooth atom groups via EndpointAnalyzer convex-hull endpoints."""
+    try:
+        from src.EndpointAnalyzer import EndpointAnalyzer, EndpointsFinder
+    except ImportError as exc:
+        warnings.warn(
+            f"Cannot auto-detect gear teeth: EndpointAnalyzer unavailable ({exc}). "
+            "Install the rdkit extra or provide explicit tooth_selections.",
+            stacklevel=3,
+        )
+        return None
+
+    if hasattr(universe.trajectory, "__len__") and len(universe.trajectory) > 0:
+        universe.trajectory[0]
+
+    finder = EndpointsFinder()
+    tooth_sels: List[str] = []
+    n_found = 0
+    for mon_sel in monomer_selections:
+        try:
+            _, ep_ids = EndpointAnalyzer.find_residue_endpoints(
+                universe, mon_sel, finder
+            )
+            if ep_ids:
+                tooth_sels.append("id " + " ".join(str(i) for i in ep_ids))
+                n_found += 1
+            else:
+                tooth_sels.append(f"({mon_sel}) and index -1")
+        except Exception as exc:
+            warnings.warn(
+                f"Tooth detection failed for '{mon_sel}': {exc}",
+                stacklevel=3,
+            )
+            tooth_sels.append(f"({mon_sel}) and index -1")
+
+    if n_found == 0:
+        warnings.warn(
+            "Auto tooth detection found no endpoints on any monomer.",
+            stacklevel=3,
+        )
+        return None
+
+    warnings.warn(
+        f"Auto-detected gear teeth on {n_found}/{len(monomer_selections)} monomers "
+        "via EndpointAnalyzer.",
+        stacklevel=3,
+    )
+    return tooth_sels
+
+
 # ---------------------------------------------------------------------------
 # Main resolver
 # ---------------------------------------------------------------------------
@@ -237,6 +290,8 @@ def resolve_selections(
     explicit: Optional[GSAFeatureSelections] = None,
     gsa_resname: str = "MOL",
     n_monomers: int = 6,
+    *,
+    auto_tooth: bool = True,
 ) -> GSAFeatureSelections:
     """Fill in missing selections with topology-aware heuristics.
 
@@ -250,6 +305,9 @@ def resolve_selections(
         Residue name of the GSA amphiphile building blocks (default ``"MOL"``).
     n_monomers : int
         Expected number of monomers forming the nanocube (default 6).
+    auto_tooth : bool
+        When True and ``tooth_selections`` is unset, derive per-monomer tooth
+        atom groups with :class:`~src.EndpointAnalyzer.EndpointAnalyzer`.
 
     Returns
     -------
@@ -302,5 +360,10 @@ def resolve_selections(
 
     if sel.inner_atom_sel is None:
         sel.inner_atom_sel = _derive_inner_atoms(gsa_resname)
+
+    if sel.tooth_selections is None and auto_tooth and sel.monomer_selections:
+        sel.tooth_selections = _derive_tooth_selections(
+            universe, sel.monomer_selections
+        )
 
     return sel

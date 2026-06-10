@@ -121,6 +121,7 @@ def compute_gsa_features_pass(
     ref_frame: int = 0,
     include_tier2: bool = True,
     include_guest: bool = True,
+    auto_tooth: bool = True,
     traj_id: str = "",
 ) -> "Any":
     """
@@ -138,6 +139,7 @@ def compute_gsa_features_pass(
         include_tier1=True,
         include_tier2=include_tier2,
         include_guest=include_guest,
+        auto_tooth=auto_tooth,
         ref_frame=ref_frame,
         traj_id=traj_id,
         step=stride,
@@ -203,6 +205,7 @@ def segment_trajectory_gsa(
     signal_columns: Optional[Sequence[str]] = None,
     include_tier2: bool = True,
     include_guest: bool = True,
+    auto_tooth: bool = True,
     method: str = "Pelt",
     cost_model: str = "rbf",
     penalty: Optional[float] = None,
@@ -225,6 +228,7 @@ def segment_trajectory_gsa(
         ref_frame=ref_frame,
         include_tier2=include_tier2,
         include_guest=include_guest,
+        auto_tooth=auto_tooth,
         traj_id=traj_id,
     )
     n_frames = len(features_df)
@@ -674,6 +678,7 @@ def process_trajectory_files(
     gsa_signal_columns: Optional[Sequence[str]] = None,
     include_tier2: bool = True,
     include_guest: bool = True,
+    auto_tooth: bool = True,
     cluster_mode: str = "rmsd",
 ) -> Dict[str, Any]:
     """
@@ -710,6 +715,7 @@ def process_trajectory_files(
                 signal_columns=gsa_signal_columns,
                 include_tier2=include_tier2,
                 include_guest=include_guest,
+                auto_tooth=auto_tooth,
                 method=ruptures_method,
                 cost_model=ruptures_cost,
                 penalty=penalty,

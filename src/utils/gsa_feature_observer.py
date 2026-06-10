@@ -69,11 +69,13 @@ class GSAFeatureObserver(FrameObserver):
         surface_shell: float = 3.0,
         traj_id: str = "",
         out_prefix: Optional[str] = None,
+        auto_tooth: bool = True,
     ):
         super().__init__()
         self._raw_selections = selections
         self._gsa_resname = gsa_resname
         self._n_monomers = n_monomers
+        self._auto_tooth = auto_tooth
         self.include_tier1 = include_tier1
         self.include_tier2 = include_tier2
         self.include_guest = include_guest
@@ -134,6 +136,7 @@ class GSAFeatureObserver(FrameObserver):
             explicit=self._raw_selections,
             gsa_resname=self._gsa_resname,
             n_monomers=self._n_monomers,
+            auto_tooth=self._auto_tooth and self.include_tier2,
         )
         self._build_ag_cache(u)
 
@@ -202,6 +205,7 @@ class GSAFeatureObserver(FrameObserver):
             return []
         out = [self.sel.assembly_sel or ""]
         out.extend(self.sel.monomer_selections or [])
+        out.extend(self.sel.tooth_selections or [])
         for attr in (
             "hydrophilic_sel", "hydrophobic_sel", "headgroup_sel", "tail_sel",
             "inner_atom_sel", "water_sel", "ion_sel", "guest_sel",
@@ -223,6 +227,7 @@ class GSAFeatureObserver(FrameObserver):
             explicit=self._raw_selections,
             gsa_resname=self._gsa_resname,
             n_monomers=self._n_monomers,
+            auto_tooth=self._auto_tooth and self.include_tier2,
         )
         self._build_ag_cache(universe)
 
@@ -270,6 +275,25 @@ class GSAFeatureObserver(FrameObserver):
                     self._ag_cache[f"monomer_{i}"] = universe.select_atoms(ms)
                 except Exception as e:
                     warnings.warn(f"Monomer selection {i} '{ms}' failed: {e}")
+
+        if sel.tooth_selections:
+            for i, ts in enumerate(sel.tooth_selections):
+                try:
+                    self._ag_cache[f"tooth_{i}"] = universe.select_atoms(ts)
+                except Exception as e:
+                    warnings.warn(f"Tooth selection {i} '{ts}' failed: {e}")
+
+    def _get_tooth_coords_list(self, n_mon: int) -> Optional[List[np.ndarray]]:
+        result: List[np.ndarray] = []
+        any_nonempty = False
+        for i in range(n_mon):
+            ag = self._ag_cache.get(f"tooth_{i}")
+            if ag is not None and len(ag) > 0:
+                result.append(ag.positions)
+                any_nonempty = True
+            else:
+                result.append(np.empty((0, 3)))
+        return result if any_nonempty else None
 
     def _get_positions(self, key: str) -> np.ndarray:
         ag = self._ag_cache.get(key)
@@ -358,13 +382,19 @@ class GSAFeatureObserver(FrameObserver):
 
         # ── Tier 2 ────────────────────────────────────────────────────
         if self.include_tier2:
-            tooth_coords = self._per_monomer_subgroup("tooth", n_mon, universe)
+            tooth_coords = self._get_tooth_coords_list(n_mon)
+            endpoint_by_pair = (
+                F.all_monomer_endpoint_distance_matrices(tooth_coords)
+                if tooth_coords is not None
+                else None
+            )
             row.update(F.gear_interlocking_features(
                 monomer_coords,
                 tooth_coords_list=tooth_coords,
                 monomer_coms=monomer_coms,
                 assembly_center=assembly_center,
                 cutoff=self._contact_cutoff,
+                endpoint_dist_by_pair=endpoint_by_pair,
             ))
 
             donor_coords = self._per_monomer_subgroup("hbond_donor", n_mon, universe)
@@ -463,6 +493,7 @@ def compute_gsa_features(
     surface_shell: float = 3.0,
     traj_id: str = "",
     out_prefix: Optional[str] = None,
+    auto_tooth: bool = True,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     step: Optional[int] = None,
@@ -490,6 +521,7 @@ def compute_gsa_features(
         surface_shell=surface_shell,
         traj_id=traj_id,
         out_prefix=out_prefix,
+        auto_tooth=auto_tooth,
     )
     iterator = TrajectoryIterator(universe)
     iterator.subscribe(observer)

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, Union, Tuple
+import logging
+import time
 import warnings
 import pickle
 import os
@@ -81,6 +83,49 @@ def _can_use_fork() -> bool:
     return False
 
 _cache_lock = threading.Lock()
+
+
+def _progress_log(
+    event: str,
+    message: str,
+    context: Optional[Dict[str, Any]] = None,
+    *,
+    level: int = logging.INFO,
+) -> None:
+    """Log to run_log when active, otherwise print."""
+    try:
+        from src.utils import run_log
+
+        if run_log.active():
+            run_log.log_event(
+                event,
+                message,
+                component="TrajectoryIterator",
+                context=context or {},
+                level=level,
+            )
+            return
+    except Exception:
+        pass
+    print(message, flush=True)
+
+
+def _active_log_queue():
+    try:
+        from src.utils import run_log
+
+        return run_log.get_queue() if run_log.active() else None
+    except Exception:
+        return None
+
+
+def _active_run_id() -> Optional[str]:
+    try:
+        from src.utils import run_log
+
+        return run_log.run_id() if run_log.active() else None
+    except Exception:
+        return None
 
 
 def _get_worker_id() -> str:
@@ -386,6 +431,12 @@ class TrajectoryIterator:
                            step: Optional[int] = None,
                            preload_coordinates: bool = False) -> None:
         """Sequential iteration (original implementation)."""
+        _progress_log(
+            "iterate_start",
+            "Sequential trajectory iteration",
+            {"mode": "sequential", "start": start, "stop": stop, "step": step},
+        )
+        t0 = time.perf_counter()
         # Notify observers that iteration is starting
         for observer in self.observers:
             observer.on_frame_start(self)
@@ -415,6 +466,15 @@ class TrajectoryIterator:
         # Notify observers that iteration is complete
         for observer in self.observers:
             observer.on_frame_end(self)
+        _progress_log(
+            "iterate_end",
+            "Sequential trajectory iteration complete",
+            {
+                "mode": "sequential",
+                "n_frames": len(self.frame_indices),
+                "elapsed_ms": (time.perf_counter() - t0) * 1000.0,
+            },
+        )
     
     def _iterate_parallel_dask(self, start: Optional[int] = None,
                                stop: Optional[int] = None,
@@ -453,7 +513,11 @@ class TrajectoryIterator:
         
         # Extract coordinates and times from trajectory in main process
         # This avoids workers having to re-open trajectory files
-        print("Extracting coordinates from trajectory (main process)...")
+        _progress_log(
+            "coords_extract_start",
+            "Extracting coordinates from trajectory (main process)",
+            {"n_frames": len(frame_indices_to_process)},
+        )
         all_coords = {}  # {frame_idx: positions_array}
         all_times = {}   # {frame_idx: time}
         all_frame_nums = {}  # {frame_idx: frame_number}
@@ -470,7 +534,11 @@ class TrajectoryIterator:
                 dimensions = ts.dimensions.copy()
         
         times_to_process = [all_times[idx] for idx in frame_indices_to_process]
-        print(f"Extracted coordinates for {len(all_coords)} frames")
+        _progress_log(
+            "coords_extract_end",
+            f"Extracted coordinates for {len(all_coords)} frames",
+            {"n_frames": len(all_coords)},
+        )
         
         # Validate that all observers can be pickled before starting parallel processing
         unpickleable_observers = []
@@ -505,16 +573,22 @@ class TrajectoryIterator:
             client = Client(n_workers=n_jobs, threads_per_worker=1)
             self._dask_client = client
             self._dask_client_managed = True
-            print(f"Created local Dask cluster with {n_jobs} workers")
-            print(f"Dask dashboard: {client.dashboard_link}")
+            _progress_log(
+                "dask_cluster_created",
+                f"Created local Dask cluster with {n_jobs} workers",
+                {"n_workers": n_jobs, "dashboard": getattr(client, "dashboard_link", None)},
+            )
         else:
             # Use provided client
             self._dask_client = client
             self._dask_client_managed = False
             n_workers = len(client.scheduler_info()['workers'])
-            print(f"Using Dask cluster with {n_workers} workers")
-            if hasattr(client, 'dashboard_link'):
-                print(f"Dask dashboard: {client.dashboard_link}")
+            dash = getattr(client, "dashboard_link", None)
+            _progress_log(
+                "dask_cluster_connected",
+                f"Using Dask cluster with {n_workers} workers",
+                {"n_workers": n_workers, "dashboard": dash},
+            )
         
         n_workers = len(client.scheduler_info()['workers'])
         
@@ -535,13 +609,27 @@ class TrajectoryIterator:
             
             batches.append((i, batch_end, batch_coords, batch_times, batch_frames))
         
-        print(f"Processing {n_frames_to_process} frames in {len(batches)} batches "
-              f"(~{batch_size} frames per batch, {n_workers} workers)")
+        _progress_log(
+            "batches_scheduled",
+            (
+                f"Processing {n_frames_to_process} frames in {len(batches)} batches "
+                f"(~{batch_size} frames per batch, {n_workers} workers)"
+            ),
+            {
+                "mode": "dask",
+                "n_frames": n_frames_to_process,
+                "n_batches": len(batches),
+                "batch_size": batch_size,
+                "n_workers": n_workers,
+            },
+        )
         
+        log_queue = _active_log_queue()
+        run_id_value = _active_run_id()
         # Submit batches to Dask cluster
         try:
             futures = []
-            for batch_start_idx, batch_end_idx, batch_coords, batch_times, batch_frames in batches:
+            for batch_idx, (batch_start_idx, batch_end_idx, batch_coords, batch_times, batch_frames) in enumerate(batches):
                 future = client.submit(
                     _process_frame_batch_with_coords,
                     top_file,
@@ -550,7 +638,10 @@ class TrajectoryIterator:
                     batch_frames,
                     batch_start_idx,
                     self.observers,
-                    dimensions
+                    dimensions,
+                    log_queue,
+                    batch_idx,
+                    run_id_value,
                 )
                 futures.append(future)
             
@@ -565,15 +656,29 @@ class TrajectoryIterator:
                     results.append(result)
                     completed += 1
                     if completed % max(1, total // 10) == 0:
-                        print(f"Progress: {completed}/{total} batches completed ({100*completed/total:.1f}%)")
+                        _progress_log(
+                            "batch_progress",
+                            f"Progress: {completed}/{total} batches completed ({100 * completed / total:.1f}%)",
+                            {"completed": completed, "total": total, "mode": "dask"},
+                        )
                 except Exception as e:
+                    _progress_log(
+                        "batch_error",
+                        f"Error processing batch in Dask worker: {e}",
+                        {"mode": "dask", "error": str(e)},
+                        level=logging.ERROR,
+                    )
                     warnings.warn(
                         f"Error processing batch in Dask worker: {e}. "
                         "This batch will be skipped."
                     )
                     results.append(None)
             
-            print(f"Completed all {total} batches")
+            _progress_log(
+                "batches_completed",
+                f"Completed all {total} batches",
+                {"total": total, "mode": "dask"},
+            )
             
         except Exception as e:
             warnings.warn(
@@ -647,7 +752,11 @@ class TrajectoryIterator:
         """
         global _shared_universe, _shared_observers
         
-        print("Using fork-based parallel processing (Linux copy-on-write optimization)")
+        _progress_log(
+            "iterate_start",
+            "Using fork-based parallel processing (Linux copy-on-write optimization)",
+            {"mode": "fork"},
+        )
         
         # Collect frame indices
         traj = self.universe.trajectory
@@ -700,12 +809,27 @@ class TrajectoryIterator:
             batch_frame_indices = frame_indices_to_process[i:batch_end]
             batches.append((batch_frame_indices, i))  # (frame_indices, batch_start_idx)
         
-        print(f"Processing {n_frames} frames in {len(batches)} batches (~{batch_size} per batch, {n_jobs} workers)")
-        print("Workers will share trajectory memory via copy-on-write (no memory duplication)")
+        _progress_log(
+            "batches_scheduled",
+            (
+                f"Processing {n_frames} frames in {len(batches)} batches "
+                f"(~{batch_size} per batch, {n_jobs} workers)"
+            ),
+            {"mode": "fork", "n_frames": n_frames, "n_batches": len(batches), "n_jobs": n_jobs},
+        )
         
+        log_queue = _active_log_queue()
+        run_id_value = _active_run_id()
+        pool_kwargs: Dict[str, Any] = {"processes": n_jobs}
+        if log_queue is not None:
+            from src.utils.run_log import pool_worker_init
+
+            pool_kwargs["initializer"] = pool_worker_init
+            pool_kwargs["initargs"] = (log_queue, run_id_value)
+
         # Process batches in parallel using fork
         try:
-            with mp.Pool(processes=n_jobs) as pool:
+            with mp.Pool(**pool_kwargs) as pool:
                 results = pool.starmap(_process_frame_batch_fork, batches)
         except Exception as e:
             warnings.warn(f"Fork-based parallel processing failed: {e}. Falling back to sequential.")
@@ -772,7 +896,11 @@ class TrajectoryIterator:
             return
         
         # Extract coordinates in main process
-        print("Extracting coordinates from trajectory (main process)...")
+        _progress_log(
+            "coords_extract_start",
+            "Extracting coordinates from trajectory (main process)",
+            {"mode": "multiprocessing", "n_frames": len(frame_indices_to_process)},
+        )
         all_coords = {}
         all_times = {}
         all_frame_nums = {}
@@ -788,7 +916,11 @@ class TrajectoryIterator:
                 dimensions = ts.dimensions.copy()
         
         times_to_process = [all_times[idx] for idx in frame_indices_to_process]
-        print(f"Extracted coordinates for {len(all_coords)} frames")
+        _progress_log(
+            "coords_extract_end",
+            f"Extracted coordinates for {len(all_coords)} frames",
+            {"mode": "multiprocessing", "n_frames": len(all_coords)},
+        )
         
         # Validate observers
         unpickleable_observers = []
@@ -825,16 +957,49 @@ class TrajectoryIterator:
             batch_frames = {local_i: all_frame_nums[idx] for local_i, idx in enumerate(batch_frame_indices)}
             batches.append((i, batch_end, batch_coords, batch_times, batch_frames))
         
-        print(f"Processing {n_frames} frames in {len(batches)} batches (~{batch_size} per batch, {n_jobs} workers)")
+        _progress_log(
+            "batches_scheduled",
+            (
+                f"Processing {n_frames} frames in {len(batches)} batches "
+                f"(~{batch_size} per batch, {n_jobs} workers)"
+            ),
+            {
+                "mode": "multiprocessing",
+                "n_frames": n_frames,
+                "n_batches": len(batches),
+                "n_jobs": n_jobs,
+            },
+        )
         
+        log_queue = _active_log_queue()
+        run_id_value = _active_run_id()
+        pool_kwargs: Dict[str, Any] = {"processes": n_jobs}
+        if log_queue is not None:
+            from src.utils.run_log import pool_worker_init
+
+            pool_kwargs["initializer"] = pool_worker_init
+            pool_kwargs["initargs"] = (log_queue, run_id_value)
+
         # Process in parallel
         try:
-            with mp.Pool(processes=n_jobs) as pool:
+            with mp.Pool(**pool_kwargs) as pool:
                 results = pool.starmap(
                     _process_frame_batch_with_coords,
-                    [(top_file, batch_coords, batch_times, batch_frames, batch_start_idx, 
-                      self.observers, dimensions) 
-                     for batch_start_idx, _, batch_coords, batch_times, batch_frames in batches]
+                    [
+                        (
+                            top_file,
+                            batch_coords,
+                            batch_times,
+                            batch_frames,
+                            batch_start_idx,
+                            self.observers,
+                            dimensions,
+                            log_queue,
+                            batch_idx,
+                            run_id_value,
+                        )
+                        for batch_idx, (batch_start_idx, _, batch_coords, batch_times, batch_frames) in enumerate(batches)
+                    ],
                 )
         except Exception as e:
             warnings.warn(f"Parallel processing failed: {e}. Falling back to sequential.")
@@ -983,6 +1148,9 @@ def _process_frame_batch_with_coords(
     batch_start_idx: int,
     observers: List[FrameObserver],
     dimensions: Optional[np.ndarray] = None,  # Box dimensions
+    log_queue: Optional[Any] = None,
+    batch_idx: int = 0,
+    run_id_value: Optional[str] = None,
 ) -> List[Any]:
     """
     Process a batch of frames in a worker process using pre-extracted coordinates.
@@ -1003,11 +1171,37 @@ def _process_frame_batch_with_coords(
         List of observer results (one per observer)
     """
     import numpy as np
+
+    if log_queue is not None:
+        from src.utils.run_log import attach_worker, log_event
+
+        attach_worker(log_queue, run_id_value)
+
+    wid = _get_worker_id()
+    t0 = time.perf_counter()
+    frame_indices_sorted = sorted(batch_coords.keys())
+    if log_queue is not None:
+        from src.utils.run_log import log_event
+
+        log_event(
+            "batch_start",
+            f"Worker batch {batch_idx}",
+            component="TrajectoryIterator",
+            worker_id_value=wid,
+            context={
+                "batch_idx": batch_idx,
+                "batch_start_idx": batch_start_idx,
+                "n_frames": len(frame_indices_sorted),
+                "frame_range": [
+                    frame_indices_sorted[0] if frame_indices_sorted else None,
+                    frame_indices_sorted[-1] if frame_indices_sorted else None,
+                ],
+            },
+        )
     
     try:
         # Get or create cached Universe from topology only
-        worker_id = _get_worker_id()
-        cache_key = (worker_id, top_file)
+        cache_key = (wid, top_file)
         
         with _cache_lock:
             u = _universe_cache.get(cache_key)
@@ -1061,7 +1255,7 @@ def _process_frame_batch_with_coords(
                 return self._pos
         
         # Process each frame in the batch
-        frame_indices = sorted(batch_coords.keys())
+        frame_indices = frame_indices_sorted
         for local_idx, frame_idx in enumerate(frame_indices):
             global_idx = batch_start_idx + local_idx
             frame_num = batch_frames.get(local_idx, frame_idx)
@@ -1095,11 +1289,31 @@ def _process_frame_batch_with_coords(
                 traceback.print_exc()
                 continue
         
+        if log_queue is not None:
+            log_event(
+                "batch_completed",
+                f"Worker batch {batch_idx} done",
+                component="TrajectoryIterator",
+                worker_id_value=wid,
+                context={"batch_idx": batch_idx, "n_frames": len(frame_indices)},
+                elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+            )
         return worker_observers
         
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
+        if log_queue is not None:
+            from src.utils.run_log import log_event
+
+            log_event(
+                "batch_error",
+                str(e),
+                level=logging.ERROR,
+                component="TrajectoryIterator",
+                worker_id_value=wid,
+                context={"batch_idx": batch_idx, "traceback": error_traceback},
+            )
         warnings.warn(f"Error in worker process: {e}\nTraceback:\n{error_traceback}")
         return [None] * len(observers)
 
@@ -1123,6 +1337,30 @@ def _process_frame_batch_fork(
         List of observer results (one per observer)
     """
     global _shared_universe, _shared_observers
+
+    wid = _get_worker_id()
+    t0 = time.perf_counter()
+    try:
+        from src.utils.run_log import log_event, logging_enabled
+
+        if logging_enabled():
+            log_event(
+                "batch_start",
+                f"Fork worker batch at frame offset {batch_start_idx}",
+                component="TrajectoryIterator",
+                worker_id_value=wid,
+                context={
+                    "mode": "fork",
+                    "batch_start_idx": batch_start_idx,
+                    "n_frames": len(frame_indices),
+                    "frame_range": [
+                        frame_indices[0] if frame_indices else None,
+                        frame_indices[-1] if frame_indices else None,
+                    ],
+                },
+            )
+    except Exception:
+        pass
     
     try:
         # Access shared Universe directly (copy-on-write - no memory copy if read-only)
@@ -1169,9 +1407,38 @@ def _process_frame_batch_fork(
                 warnings.warn(f"Failed to process frame {frame_idx}: {e}")
                 continue
         
+        try:
+            from src.utils.run_log import log_event, logging_enabled
+
+            if logging_enabled():
+                log_event(
+                    "batch_completed",
+                    f"Fork worker batch at frame offset {batch_start_idx} done",
+                    component="TrajectoryIterator",
+                    worker_id_value=wid,
+                    context={"mode": "fork", "batch_start_idx": batch_start_idx, "n_frames": len(frame_indices)},
+                    elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                )
+        except Exception:
+            pass
         return worker_observers
         
     except Exception as e:
         import traceback
-        warnings.warn(f"Error in fork worker: {e}\n{traceback.format_exc()}")
+        tb = traceback.format_exc()
+        try:
+            from src.utils.run_log import log_event, logging_enabled
+
+            if logging_enabled():
+                log_event(
+                    "batch_error",
+                    str(e),
+                    level=logging.ERROR,
+                    component="TrajectoryIterator",
+                    worker_id_value=wid,
+                    context={"mode": "fork", "batch_start_idx": batch_start_idx, "traceback": tb},
+                )
+        except Exception:
+            pass
+        warnings.warn(f"Error in fork worker: {e}\n{tb}")
         return [None] * len(_shared_observers) if _shared_observers else []

@@ -485,76 +485,260 @@ def monomer_deformation_features(
 #  Tier 2 — Gear / interlocking
 # ═══════════════════════════════════════════════════════════════════════════
 
+def pairwise_endpoint_distance_matrix(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+) -> np.ndarray:
+    """All-pairs distance matrix between two endpoint (tooth) atom groups.
+
+    Same layout as :meth:`EndpointAnalyzer.compute_endpoint_distances` per
+    residue pair for a single frame: shape ``(n_ep_a, n_ep_b)``.
+    """
+    if len(coords_a) == 0 or len(coords_b) == 0:
+        return np.empty((0, 0))
+    diff = coords_a[:, None, :] - coords_b[None, :, :]
+    return np.linalg.norm(diff, axis=2)
+
+
+def contacts_from_endpoint_distance_matrix(
+    dist_matrix: np.ndarray,
+    cutoff: float,
+) -> int:
+    """Count endpoint pairs within *cutoff* in an endpoint distance matrix."""
+    if dist_matrix.size == 0:
+        return 0
+    return int(np.sum(dist_matrix < cutoff))
+
+
+def tooth_contact_features_from_endpoint_matrices(
+    dist_matrices: List[np.ndarray],
+    cutoff: float,
+) -> Dict[str, float]:
+    """Aggregate tooth-contact stats from neighbor endpoint distance matrices."""
+    nan = float("nan")
+    if not dist_matrices:
+        return {
+            "tooth_contact_total": nan,
+            "tooth_contact_min": nan,
+            "tooth_contact_std": nan,
+        }
+    counts = np.array(
+        [contacts_from_endpoint_distance_matrix(m, cutoff) for m in dist_matrices],
+        dtype=float,
+    )
+    return {
+        "tooth_contact_total": float(counts.sum()),
+        "tooth_contact_min": float(counts.min()),
+        "tooth_contact_std": float(counts.std()),
+    }
+
+
+def neighbor_monomer_pairs(
+    monomer_coms: np.ndarray,
+    n_neighbors: int = 4,
+) -> List[Tuple[int, int]]:
+    """Undirected monomer pairs among spatial nearest neighbors (COM-based)."""
+    n = len(monomer_coms)
+    com_dist = np.linalg.norm(
+        monomer_coms[:, None, :] - monomer_coms[None, :, :], axis=2
+    )
+    pairs: List[Tuple[int, int]] = []
+    seen: set[Tuple[int, int]] = set()
+    for i in range(n):
+        d = com_dist[i].copy()
+        d[i] = np.inf
+        neighbors = np.argsort(d)[:n_neighbors]
+        for j in neighbors:
+            pair = (i, j) if i < j else (j, i)
+            if pair not in seen:
+                seen.add(pair)
+                pairs.append(pair)
+    return pairs
+
+
+def neighbor_endpoint_distance_matrices(
+    tooth_coords_list: List[np.ndarray],
+    monomer_coms: np.ndarray,
+    n_neighbors: int = 4,
+) -> List[np.ndarray]:
+    """Endpoint distance matrices for each spatially neighboring monomer pair."""
+    matrices: List[np.ndarray] = []
+    for i, j in neighbor_monomer_pairs(monomer_coms, n_neighbors=n_neighbors):
+        matrices.append(
+            pairwise_endpoint_distance_matrix(
+                tooth_coords_list[i], tooth_coords_list[j]
+            )
+        )
+    return matrices
+
+
+def all_monomer_endpoint_distance_matrices(
+    tooth_coords_list: List[np.ndarray],
+) -> Dict[Tuple[int, int], np.ndarray]:
+    """Endpoint distance matrix for every monomer pair ``(i, j)`` with ``i < j``."""
+    n = len(tooth_coords_list)
+    return {
+        (i, j): pairwise_endpoint_distance_matrix(
+            tooth_coords_list[i], tooth_coords_list[j]
+        )
+        for i in range(n)
+        for j in range(i + 1, n)
+    }
+
+
+def endpoint_distance_matrix_record_features(
+    dist_by_pair: Optional[Dict[Tuple[int, int], np.ndarray]],
+    n_monomers: int,
+) -> Dict[str, float]:
+    """Per-pair and global endpoint-distance stats for CSV export.
+
+    Column names match :meth:`EndpointAnalyzer.compute_endpoint_metrics`:
+    ``endpoint_dist_{i}_{j}_{min,mean,max}`` plus assembly-wide
+    ``endpoint_dist_{mean,min,max,std}``.
+    """
+    nan = float("nan")
+    result: Dict[str, float] = {}
+    all_vals: List[float] = []
+
+    for i in range(n_monomers):
+        for j in range(i + 1, n_monomers):
+            key_min = f"endpoint_dist_{i}_{j}_min"
+            key_mean = f"endpoint_dist_{i}_{j}_mean"
+            key_max = f"endpoint_dist_{i}_{j}_max"
+            dist_matrix = dist_by_pair.get((i, j)) if dist_by_pair else None
+            if dist_matrix is not None and dist_matrix.size > 0:
+                result[key_min] = float(np.min(dist_matrix))
+                result[key_mean] = float(np.mean(dist_matrix))
+                result[key_max] = float(np.max(dist_matrix))
+                all_vals.extend(dist_matrix.ravel().tolist())
+            else:
+                result[key_min] = nan
+                result[key_mean] = nan
+                result[key_max] = nan
+
+    if all_vals:
+        arr = np.asarray(all_vals, dtype=float)
+        result["endpoint_dist_mean"] = float(np.mean(arr))
+        result["endpoint_dist_min"] = float(np.min(arr))
+        result["endpoint_dist_max"] = float(np.max(arr))
+        result["endpoint_dist_std"] = float(np.std(arr))
+    else:
+        result["endpoint_dist_mean"] = nan
+        result["endpoint_dist_min"] = nan
+        result["endpoint_dist_max"] = nan
+        result["endpoint_dist_std"] = nan
+
+    return result
+
+
 def gear_interlocking_features(
     monomer_coords_list: List[np.ndarray],
     tooth_coords_list: Optional[List[np.ndarray]] = None,
     monomer_coms: Optional[np.ndarray] = None,
     assembly_center: Optional[np.ndarray] = None,
     cutoff: float = 4.5,
+    endpoint_dist_by_pair: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
 ) -> Dict[str, float]:
     """Gear tooth contacts and phase offsets between neighboring monomers.
 
-    If *tooth_coords_list* is None the features are NaN (Tier 2 optional).
+    Tooth-contact features are derived from the endpoint distance matrix
+    (all pairwise distances between auto-detected tooth/endpoint atoms on
+    neighboring monomers), matching
+    :class:`~src.EndpointAnalyzer.EndpointAnalyzer` pair layout.  Each
+    neighbor-pair matrix entry below *cutoff* counts as one tooth contact.
+
+    Pass precomputed *endpoint_dist_by_pair* to reuse matrices from another
+    pass; otherwise they are built from *tooth_coords_list*.
+
+    Returned columns are ordered: tooth-contact aggregates, per-pair endpoint
+    distance matrix summaries, then gear-phase metrics.
+
+    If *tooth_coords_list* is None and no matrices are supplied, tooth-contact
+    and endpoint-distance features are NaN (Tier 2 optional).
     """
     nan = float("nan")
-    defaults = {
-        "tooth_contact_total": nan,
-        "tooth_contact_min": nan,
-        "tooth_contact_std": nan,
-        "gear_phase_offset_mean": nan,
-        "gear_phase_offset_std": nan,
-        "neighbor_relative_rotation_angle_mean": nan,
-        "neighbor_relative_rotation_angle_std": nan,
-    }
-    if tooth_coords_list is None:
-        return defaults
-
     n = len(monomer_coords_list)
+
+    if tooth_coords_list is None and endpoint_dist_by_pair is None:
+        result: Dict[str, float] = {
+            "tooth_contact_total": nan,
+            "tooth_contact_min": nan,
+            "tooth_contact_std": nan,
+        }
+        result.update(endpoint_distance_matrix_record_features(None, n))
+        result.update({
+            "gear_phase_offset_mean": nan,
+            "gear_phase_offset_std": nan,
+            "neighbor_relative_rotation_angle_mean": nan,
+            "neighbor_relative_rotation_angle_std": nan,
+        })
+        return result
+
     if monomer_coms is None:
         monomer_coms = compute_monomer_coms(monomer_coords_list)
     if assembly_center is None:
         assembly_center = monomer_coms.mean(axis=0)
 
-    # Tooth contacts per neighbor pair
-    dist_mat = np.linalg.norm(
-        monomer_coms[:, None, :] - monomer_coms[None, :, :], axis=2
-    )
-    tooth_contacts: List[int] = []
-    for i in range(n):
-        d = dist_mat[i].copy()
-        d[i] = np.inf
-        neighbors = np.argsort(d)[:4]
-        for j in neighbors:
-            if j > i:
-                tc = _count_contacts(tooth_coords_list[i], tooth_coords_list[j], cutoff)
-                tooth_contacts.append(tc)
+    if endpoint_dist_by_pair is None:
+        if tooth_coords_list is None:
+            result = {
+                "tooth_contact_total": nan,
+                "tooth_contact_min": nan,
+                "tooth_contact_std": nan,
+            }
+            result.update(endpoint_distance_matrix_record_features(None, n))
+            result.update({
+                "gear_phase_offset_mean": nan,
+                "gear_phase_offset_std": nan,
+                "neighbor_relative_rotation_angle_mean": nan,
+                "neighbor_relative_rotation_angle_std": nan,
+            })
+            return result
+        endpoint_dist_by_pair = all_monomer_endpoint_distance_matrices(
+            tooth_coords_list
+        )
 
-    tc_arr = np.array(tooth_contacts) if tooth_contacts else np.array([0])
-    defaults["tooth_contact_total"] = float(tc_arr.sum())
-    defaults["tooth_contact_min"] = float(tc_arr.min())
-    defaults["tooth_contact_std"] = float(tc_arr.std())
+    neighbor_mats = [
+        endpoint_dist_by_pair[pair]
+        for pair in neighbor_monomer_pairs(monomer_coms)
+        if pair in endpoint_dist_by_pair
+    ]
+
+    result = tooth_contact_features_from_endpoint_matrices(neighbor_mats, cutoff)
+    result.update(endpoint_distance_matrix_record_features(endpoint_dist_by_pair, n))
+
+    if tooth_coords_list is None:
+        result.update({
+            "gear_phase_offset_mean": nan,
+            "gear_phase_offset_std": nan,
+            "neighbor_relative_rotation_angle_mean": nan,
+            "neighbor_relative_rotation_angle_std": nan,
+        })
+        return result
 
     # Phase offsets via projection angle around radial axis
     phases = _gear_phases(tooth_coords_list, monomer_coms, assembly_center)
     if phases is not None:
         offsets = []
         angles = []
-        for i in range(n):
-            d = dist_mat[i].copy()
-            d[i] = np.inf
-            neighbors = np.argsort(d)[:4]
-            for j in neighbors:
-                if j > i:
-                    offsets.append(abs(phases[i] - phases[j]))
-                    angles.append(abs(phases[i] - phases[j]) % 180.0)
+        for i, j in neighbor_monomer_pairs(monomer_coms):
+            offsets.append(abs(phases[i] - phases[j]))
+            angles.append(abs(phases[i] - phases[j]) % 180.0)
         off_arr = np.array(offsets) if offsets else np.array([nan])
         ang_arr = np.array(angles) if angles else np.array([nan])
-        defaults["gear_phase_offset_mean"] = float(np.nanmean(off_arr))
-        defaults["gear_phase_offset_std"] = float(np.nanstd(off_arr))
-        defaults["neighbor_relative_rotation_angle_mean"] = float(np.nanmean(ang_arr))
-        defaults["neighbor_relative_rotation_angle_std"] = float(np.nanstd(ang_arr))
+        result["gear_phase_offset_mean"] = float(np.nanmean(off_arr))
+        result["gear_phase_offset_std"] = float(np.nanstd(off_arr))
+        result["neighbor_relative_rotation_angle_mean"] = float(np.nanmean(ang_arr))
+        result["neighbor_relative_rotation_angle_std"] = float(np.nanstd(ang_arr))
+    else:
+        result.update({
+            "gear_phase_offset_mean": nan,
+            "gear_phase_offset_std": nan,
+            "neighbor_relative_rotation_angle_mean": nan,
+            "neighbor_relative_rotation_angle_std": nan,
+        })
 
-    return defaults
+    return result
 
 
 def _gear_phases(

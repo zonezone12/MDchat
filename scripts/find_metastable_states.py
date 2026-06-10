@@ -33,6 +33,7 @@ from src.utils.metastable_states import (
     plot_dendrogram,
     process_trajectory_files,
 )
+from src.utils.run_log import RunContext, log_event, step
 
 
 def _expand_trajectories(patterns: list[str]) -> list[Path]:
@@ -169,6 +170,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip Tier-2 GSA features during extraction",
     )
     parser.add_argument(
+        "--no-auto-tooth",
+        action="store_true",
+        help="Disable EndpointAnalyzer auto tooth detection for Tier-2 gear features",
+    )
+    parser.add_argument(
         "--no-guest",
         action="store_true",
         help="Skip guest GSA features during extraction",
@@ -186,107 +192,173 @@ def main() -> None:
         print("No trajectory files matched.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Topology: {args.topology}")
-    print(f"Trajectories ({len(traj_paths)}):")
-    for p in traj_paths:
-        print(f"  {p}")
-    print(f"Selection: {args.selection}")
-    if args.use_gsa_features:
-        print(f"GSA mode: resname={args.gsa_resname}, n_monomers={args.n_monomers}")
-        print(f"Cluster mode: {args.cluster_mode}")
-        if args.guest_selection:
-            print(f"Guest: {args.guest_selection}")
-    print(f"Output: {out_dir}")
-    print()
-
     gsa_selections = None
     if args.use_gsa_features:
         gsa_selections = GSAFeatureSelections(guest_sel=args.guest_selection)
 
-    results = process_trajectory_files(
-        args.topology,
-        traj_paths,
-        args.selection,
-        stride=args.stride,
-        ref_frame=args.ref_frame,
-        signal_metric=args.signal_metric,
-        ruptures_method=args.method,
-        ruptures_cost=args.cost_model,
-        penalty=args.penalty,
-        n_bkps=args.n_bkps,
-        min_segment_frames=args.min_segment_frames,
-        linkage_method=args.linkage,
-        rmsd_cutoff=args.rmsd_cutoff,
-        k_max=args.k_max,
-        use_gsa_features=args.use_gsa_features,
-        gsa_selections=gsa_selections,
-        gsa_resname=args.gsa_resname,
-        n_monomers=args.n_monomers,
-        include_tier2=not args.no_tier2,
-        include_guest=not args.no_guest,
-        cluster_mode=args.cluster_mode,
-    )
+    with RunContext.from_namespace(args, name="find_metastable_states") as run:
+        print(f"Run log: {run.run_dir}")
+        log_event(
+            "config",
+            "find_metastable_states configuration",
+            component="find_metastable_states",
+            context={
+                "topology": args.topology,
+                "n_trajectories": len(traj_paths),
+                "trajectory_paths": [str(p) for p in traj_paths],
+                "output_dir": str(out_dir),
+                "selection": args.selection,
+                "use_gsa_features": args.use_gsa_features,
+                "gsa_resname": args.gsa_resname,
+                "n_monomers": args.n_monomers,
+                "cluster_mode": args.cluster_mode,
+                "guest_selection": args.guest_selection,
+                "signal_metric": args.signal_metric,
+                "ruptures_method": args.method,
+                "ruptures_cost": args.cost_model,
+            },
+        )
 
-    segments = results["segments"]
-    dist_mat = results["distance_matrix"]
-    clustering = results["clustering"]
-    leaf_labels = results["leaf_labels"]
+        with step(
+            "process_trajectories",
+            component="find_metastable_states",
+            context={"n_trajectories": len(traj_paths)},
+        ):
+            results = process_trajectory_files(
+                args.topology,
+                traj_paths,
+                args.selection,
+                stride=args.stride,
+                ref_frame=args.ref_frame,
+                signal_metric=args.signal_metric,
+                ruptures_method=args.method,
+                ruptures_cost=args.cost_model,
+                penalty=args.penalty,
+                n_bkps=args.n_bkps,
+                min_segment_frames=args.min_segment_frames,
+                linkage_method=args.linkage,
+                rmsd_cutoff=args.rmsd_cutoff,
+                k_max=args.k_max,
+                use_gsa_features=args.use_gsa_features,
+                gsa_selections=gsa_selections,
+                gsa_resname=args.gsa_resname,
+                n_monomers=args.n_monomers,
+                include_tier2=not args.no_tier2,
+                include_guest=not args.no_guest,
+                auto_tooth=not args.no_auto_tooth,
+                cluster_mode=args.cluster_mode,
+            )
 
-    seg_rows = []
-    for s in segments:
-        row = {
-            "traj_file": s.traj_id,
-            "segment_id": s.segment_id,
-            "start_frame": s.start_frame,
-            "end_frame": s.end_frame,
-            "rep_frame": s.rep_frame,
-            "n_frames": s.n_frames,
-            "rmsd_mean": s.rmsd_mean,
-            "rg_mean": s.rg_mean,
-            "cluster_label": s.cluster_label,
-        }
-        if s.feature_means:
-            row.update(s.feature_means)
-        seg_rows.append(row)
-    seg_df = pd.DataFrame(seg_rows)
-    seg_csv = out_dir / "segments_all.csv"
-    seg_df.to_csv(seg_csv, index=False)
-    print(f"Wrote {seg_csv}")
+        segments = results["segments"]
+        dist_mat = results["distance_matrix"]
+        clustering = results["clustering"]
+        leaf_labels = results["leaf_labels"]
+        n = dist_mat.shape[0]
 
-    if "features_dfs" in results:
-        for i, feat_df in enumerate(results["features_dfs"]):
-            traj_stem = traj_paths[i].stem if i < len(traj_paths) else f"traj_{i}"
-            feat_csv = out_dir / f"{traj_stem}_gsa_features.csv"
-            feat_df.to_csv(feat_csv, index=False)
-            print(f"Wrote {feat_csv}")
+        with step(
+            "write_outputs",
+            component="find_metastable_states",
+            context={"n_segments": n, "n_clusters": clustering.n_clusters},
+        ):
+            seg_rows = []
+            for s in segments:
+                row = {
+                    "traj_file": s.traj_id,
+                    "segment_id": s.segment_id,
+                    "start_frame": s.start_frame,
+                    "end_frame": s.end_frame,
+                    "rep_frame": s.rep_frame,
+                    "n_frames": s.n_frames,
+                    "rmsd_mean": s.rmsd_mean,
+                    "rg_mean": s.rg_mean,
+                    "cluster_label": s.cluster_label,
+                }
+                if s.feature_means:
+                    row.update(s.feature_means)
+                seg_rows.append(row)
+            seg_df = pd.DataFrame(seg_rows)
+            seg_csv = out_dir / "segments_all.csv"
+            seg_df.to_csv(seg_csv, index=False)
+            log_event(
+                "artifact_written",
+                str(seg_csv),
+                component="find_metastable_states",
+                context={"path": str(seg_csv), "n_rows": len(seg_df)},
+            )
+            print(f"Wrote {seg_csv}")
 
-    n = dist_mat.shape[0]
-    dist_df = pd.DataFrame(
-        dist_mat,
-        index=leaf_labels,
-        columns=leaf_labels,
-    )
-    dist_csv = out_dir / "distance_matrix.csv"
-    dist_df.to_csv(dist_csv)
-    print(f"Wrote {dist_csv}")
+            if "features_dfs" in results:
+                for i, feat_df in enumerate(results["features_dfs"]):
+                    traj_stem = traj_paths[i].stem if i < len(traj_paths) else f"traj_{i}"
+                    feat_csv = out_dir / f"{traj_stem}_gsa_features.csv"
+                    feat_df.to_csv(feat_csv, index=False)
+                    log_event(
+                        "artifact_written",
+                        str(feat_csv),
+                        component="find_metastable_states",
+                        context={
+                            "path": str(feat_csv),
+                            "traj_stem": traj_stem,
+                            "n_rows": len(feat_df),
+                        },
+                    )
+                    print(f"Wrote {feat_csv}")
 
-    dendro_path = out_dir / "dendrogram.png"
-    plot_dendrogram(
-        clustering.linkage_matrix,
-        leaf_labels,
-        dendro_path,
-        rmsd_cutoff=clustering.cutoff_distance if args.rmsd_cutoff else None,
-    )
-    print(f"Wrote {dendro_path}")
+            dist_df = pd.DataFrame(
+                dist_mat,
+                index=leaf_labels,
+                columns=leaf_labels,
+            )
+            dist_csv = out_dir / "distance_matrix.csv"
+            dist_df.to_csv(dist_csv)
+            log_event(
+                "artifact_written",
+                str(dist_csv),
+                component="find_metastable_states",
+                context={"path": str(dist_csv), "shape": list(dist_mat.shape)},
+            )
+            print(f"Wrote {dist_csv}")
 
-    summary_text = format_cluster_summary(segments, clustering)
-    summary_path = out_dir / "cluster_summary.txt"
-    summary_path.write_text(summary_text, encoding="utf-8")
-    print()
-    print(summary_text)
-    print()
-    print(f"Wrote {summary_path}")
-    print(f"Done — {clustering.n_clusters} structural type(s) across {n} segment(s).")
+            dendro_path = out_dir / "dendrogram.png"
+            plot_dendrogram(
+                clustering.linkage_matrix,
+                leaf_labels,
+                dendro_path,
+                rmsd_cutoff=clustering.cutoff_distance if args.rmsd_cutoff else None,
+            )
+            log_event(
+                "artifact_written",
+                str(dendro_path),
+                component="find_metastable_states",
+                context={"path": str(dendro_path)},
+            )
+            print(f"Wrote {dendro_path}")
+
+            summary_text = format_cluster_summary(segments, clustering)
+            summary_path = out_dir / "cluster_summary.txt"
+            summary_path.write_text(summary_text, encoding="utf-8")
+            log_event(
+                "artifact_written",
+                str(summary_path),
+                component="find_metastable_states",
+                context={"path": str(summary_path)},
+            )
+            print()
+            print(summary_text)
+            print()
+            print(f"Wrote {summary_path}")
+
+        log_event(
+            "summary",
+            f"{clustering.n_clusters} structural type(s) across {n} segment(s)",
+            component="find_metastable_states",
+            context={
+                "n_clusters": clustering.n_clusters,
+                "n_segments": n,
+                "cutoff_distance": clustering.cutoff_distance,
+            },
+        )
+        print(f"Done — {clustering.n_clusters} structural type(s) across {n} segment(s).")
 
 
 if __name__ == "__main__":
