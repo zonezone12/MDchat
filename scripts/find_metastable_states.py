@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 
+from src.utils.gsa_selections import GSAFeatureSelections
 from src.utils.metastable_states import (
     format_cluster_summary,
     plot_dendrogram,
@@ -75,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--selection",
         default="not water and not resname I and not resname Na+",
-        help="MDAnalysis atom selection for target molecule",
+        help="MDAnalysis atom selection for target molecule (ignored with --use-gsa-features)",
     )
     parser.add_argument(
         "--output-dir",
@@ -135,6 +136,43 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Maximum clusters for auto silhouette selection",
     )
+    parser.add_argument(
+        "--use-gsa-features",
+        action="store_true",
+        help="Segment trajectories using GSA nanocube feature time series",
+    )
+    parser.add_argument(
+        "--gsa-resname",
+        default="MOL",
+        help="GSA monomer residue name when --use-gsa-features (default: MOL)",
+    )
+    parser.add_argument(
+        "--n-monomers",
+        type=int,
+        default=6,
+        help="Number of GSA monomers in the nanocube",
+    )
+    parser.add_argument(
+        "--guest-selection",
+        default=None,
+        help="Guest selection for GSA features (e.g. 'resname IOD')",
+    )
+    parser.add_argument(
+        "--cluster-mode",
+        choices=["rmsd", "features"],
+        default="features",
+        help="Cluster segments by GSA feature vectors or pairwise RMSD (GSA mode only)",
+    )
+    parser.add_argument(
+        "--no-tier2",
+        action="store_true",
+        help="Skip Tier-2 GSA features during extraction",
+    )
+    parser.add_argument(
+        "--no-guest",
+        action="store_true",
+        help="Skip guest GSA features during extraction",
+    )
     return parser.parse_args()
 
 
@@ -153,8 +191,17 @@ def main() -> None:
     for p in traj_paths:
         print(f"  {p}")
     print(f"Selection: {args.selection}")
+    if args.use_gsa_features:
+        print(f"GSA mode: resname={args.gsa_resname}, n_monomers={args.n_monomers}")
+        print(f"Cluster mode: {args.cluster_mode}")
+        if args.guest_selection:
+            print(f"Guest: {args.guest_selection}")
     print(f"Output: {out_dir}")
     print()
+
+    gsa_selections = None
+    if args.use_gsa_features:
+        gsa_selections = GSAFeatureSelections(guest_sel=args.guest_selection)
 
     results = process_trajectory_files(
         args.topology,
@@ -171,6 +218,13 @@ def main() -> None:
         linkage_method=args.linkage,
         rmsd_cutoff=args.rmsd_cutoff,
         k_max=args.k_max,
+        use_gsa_features=args.use_gsa_features,
+        gsa_selections=gsa_selections,
+        gsa_resname=args.gsa_resname,
+        n_monomers=args.n_monomers,
+        include_tier2=not args.no_tier2,
+        include_guest=not args.no_guest,
+        cluster_mode=args.cluster_mode,
     )
 
     segments = results["segments"]
@@ -178,8 +232,9 @@ def main() -> None:
     clustering = results["clustering"]
     leaf_labels = results["leaf_labels"]
 
-    seg_rows = [
-        {
+    seg_rows = []
+    for s in segments:
+        row = {
             "traj_file": s.traj_id,
             "segment_id": s.segment_id,
             "start_frame": s.start_frame,
@@ -190,12 +245,20 @@ def main() -> None:
             "rg_mean": s.rg_mean,
             "cluster_label": s.cluster_label,
         }
-        for s in segments
-    ]
+        if s.feature_means:
+            row.update(s.feature_means)
+        seg_rows.append(row)
     seg_df = pd.DataFrame(seg_rows)
     seg_csv = out_dir / "segments_all.csv"
     seg_df.to_csv(seg_csv, index=False)
     print(f"Wrote {seg_csv}")
+
+    if "features_dfs" in results:
+        for i, feat_df in enumerate(results["features_dfs"]):
+            traj_stem = traj_paths[i].stem if i < len(traj_paths) else f"traj_{i}"
+            feat_csv = out_dir / f"{traj_stem}_gsa_features.csv"
+            feat_df.to_csv(feat_csv, index=False)
+            print(f"Wrote {feat_csv}")
 
     n = dist_mat.shape[0]
     dist_df = pd.DataFrame(

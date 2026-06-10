@@ -8,7 +8,7 @@ and assigns structural-type labels.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -17,7 +17,21 @@ import numpy as np
 from src.TrajectoryIterator import TrajectoryIterator
 from src.TrajectoryMetrics import MetricPassSpec, StackedMetricsObserver
 from src.TrajectoryMetrics.TrajectoryMetrics import rmsd_value_aligned
+from src.utils.gsa_feature_observer import compute_gsa_features
+from src.utils.gsa_selections import GSAFeatureSelections
 from src.utils.ruptures_utils import ChangePointResult, detect_changepoints
+
+# Columns used for multivariate changepoint detection on GSA nanocube trajectories.
+DEFAULT_GSA_SIGNAL_COLUMNS: Tuple[str, ...] = (
+    "assembly_rmsd_to_ref",
+    "assembly_rg",
+    "octahedrality_score",
+    "total_inter_monomer_contacts",
+    "cavity_water_count",
+    "hydrophilic_minus_hydrophobic_radial_distance",
+)
+
+_METADATA_COLUMNS = frozenset({"traj_id", "frame", "time_ps"})
 
 
 @dataclass
@@ -34,6 +48,7 @@ class Segment:
     signal_start: int = 0
     signal_end: int = 0
     cluster_label: int = -1
+    feature_means: Dict[str, float] = field(default_factory=dict)
 
     @property
     def n_frames(self) -> int:
@@ -94,6 +109,193 @@ def compute_metrics_single_pass(
     rg = np.asarray(observer.results["rg"], dtype=np.float64)
     frame_indices = np.arange(n_frames, dtype=np.int64) * stride
     return rmsd, rg, frame_indices
+
+
+def compute_gsa_features_pass(
+    universe: Any,
+    *,
+    selections: Optional[GSAFeatureSelections] = None,
+    gsa_resname: str = "MOL",
+    n_monomers: int = 6,
+    stride: int = 1,
+    ref_frame: int = 0,
+    include_tier2: bool = True,
+    include_guest: bool = True,
+    traj_id: str = "",
+) -> "Any":
+    """
+    Run one GSA feature extraction pass over a trajectory.
+
+    Returns a per-frame DataFrame aligned to subsampled frames.
+    """
+    import pandas as pd
+
+    df = compute_gsa_features(
+        universe,
+        selections=selections,
+        gsa_resname=gsa_resname,
+        n_monomers=n_monomers,
+        include_tier1=True,
+        include_tier2=include_tier2,
+        include_guest=include_guest,
+        ref_frame=ref_frame,
+        traj_id=traj_id,
+        step=stride,
+        n_jobs=1,
+    )
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("compute_gsa_features must return a DataFrame")
+    return df
+
+
+def _gsa_signal_matrix(
+    features_df: Any,
+    signal_columns: Optional[Sequence[str]] = None,
+) -> Tuple[np.ndarray, List[str]]:
+    """Build a (n_frames, n_features) signal array for ruptures."""
+    cols = list(signal_columns) if signal_columns else list(DEFAULT_GSA_SIGNAL_COLUMNS)
+    available = [c for c in cols if c in features_df.columns]
+    if not available:
+        raise ValueError(
+            f"No signal columns found in GSA features. Requested: {cols}, "
+            f"available sample: {list(features_df.columns[:10])}"
+        )
+    mat = features_df[available].to_numpy(dtype=np.float64)
+    # Replace inf with NaN, then column-wise nanmean fill for ruptures stability
+    mat = np.where(np.isfinite(mat), mat, np.nan)
+    col_means = np.nanmean(mat, axis=0)
+    inds = np.where(np.isnan(mat))
+    mat[inds] = np.take(col_means, inds[1])
+    return mat, available
+
+
+def _segment_feature_means(
+    features_df: Any,
+    s_start: int,
+    s_end: int,
+) -> Dict[str, float]:
+    """Mean of numeric GSA columns over a signal-index slice."""
+    import pandas as pd
+
+    numeric_cols = [
+        c for c in features_df.columns
+        if c not in _METADATA_COLUMNS
+        and pd.api.types.is_numeric_dtype(features_df[c])
+    ]
+    slice_df = features_df.iloc[s_start:s_end]
+    means: Dict[str, float] = {}
+    for col in numeric_cols:
+        val = float(np.nanmean(slice_df[col].to_numpy(dtype=np.float64)))
+        if np.isfinite(val):
+            means[col] = val
+    return means
+
+
+def segment_trajectory_gsa(
+    universe: Any,
+    traj_id: str,
+    *,
+    selections: Optional[GSAFeatureSelections] = None,
+    gsa_resname: str = "MOL",
+    n_monomers: int = 6,
+    stride: int = 1,
+    ref_frame: int = 0,
+    signal_columns: Optional[Sequence[str]] = None,
+    include_tier2: bool = True,
+    include_guest: bool = True,
+    method: str = "Pelt",
+    cost_model: str = "rbf",
+    penalty: Optional[float] = None,
+    n_bkps: Optional[int] = None,
+    min_segment_frames: int = 10,
+    jump: int = 5,
+    window_width: int = 100,
+) -> Tuple[List[Segment], Any]:
+    """
+    Segment a trajectory using GSA feature time series (multivariate ruptures).
+
+    Returns segments and the full per-frame features DataFrame.
+    """
+    features_df = compute_gsa_features_pass(
+        universe,
+        selections=selections,
+        gsa_resname=gsa_resname,
+        n_monomers=n_monomers,
+        stride=stride,
+        ref_frame=ref_frame,
+        include_tier2=include_tier2,
+        include_guest=include_guest,
+        traj_id=traj_id,
+    )
+    n_frames = len(features_df)
+    if n_frames == 0:
+        return [], features_df
+
+    signal, _used_cols = _gsa_signal_matrix(features_df, signal_columns)
+    cp_result: ChangePointResult = detect_changepoints(
+        signal,
+        method=method,
+        cost_model=cost_model,
+        penalty=penalty,
+        n_bkps=n_bkps,
+        jump=jump,
+        window_width=window_width,
+    )
+
+    frame_col = features_df["frame"].to_numpy(dtype=np.int64) if "frame" in features_df.columns else np.arange(n_frames) * stride
+
+    segments: List[Segment] = []
+    for seg_id, (s_start, s_end) in enumerate(cp_result.segment_ranges):
+        if s_end <= s_start:
+            continue
+
+        traj_start = int(frame_col[s_start])
+        traj_end = int(frame_col[min(s_end - 1, n_frames - 1)]) + stride
+        if traj_end <= traj_start:
+            continue
+        if (traj_end - traj_start) < min_segment_frames:
+            continue
+
+        rep_signal = (s_start + s_end) // 2
+        rep_frame = int(frame_col[min(rep_signal, n_frames - 1)])
+
+        feat_means = _segment_feature_means(features_df, s_start, s_end)
+        rmsd_mean = feat_means.get("assembly_rmsd_to_ref", float("nan"))
+        rg_mean = feat_means.get("assembly_rg", float("nan"))
+
+        segments.append(
+            Segment(
+                traj_id=traj_id,
+                segment_id=seg_id,
+                start_frame=traj_start,
+                end_frame=traj_end,
+                rep_frame=rep_frame,
+                rmsd_mean=rmsd_mean,
+                rg_mean=rg_mean,
+                signal_start=s_start,
+                signal_end=s_end,
+                feature_means=feat_means,
+            )
+        )
+
+    if not segments and n_frames >= min_segment_frames:
+        feat_means = _segment_feature_means(features_df, 0, n_frames)
+        segments.append(
+            Segment(
+                traj_id=traj_id,
+                segment_id=0,
+                start_frame=int(frame_col[0]),
+                end_frame=int(frame_col[-1]) + stride,
+                rep_frame=int(frame_col[n_frames // 2]),
+                rmsd_mean=feat_means.get("assembly_rmsd_to_ref", float("nan")),
+                rg_mean=feat_means.get("assembly_rg", float("nan")),
+                signal_start=0,
+                signal_end=n_frames,
+                feature_means=feat_means,
+            )
+        )
+
+    return segments, features_df
 
 
 def segment_trajectory(
@@ -384,12 +586,46 @@ def assign_cluster_labels(
 
 
 def build_feature_matrix(segments: Sequence[Segment]) -> np.ndarray:
-    """Simple feature vector per segment: [rmsd_mean, rg_mean, log_duration]."""
+    """Feature vector per segment: GSA means when available, else [rmsd, rg, log_duration]."""
+    if segments and segments[0].feature_means:
+        keys = sorted(segments[0].feature_means.keys())
+        rows = []
+        for s in segments:
+            row = [s.feature_means.get(k, np.nan) for k in keys]
+            dur = max(s.n_frames, 1)
+            row.append(np.log10(float(dur)))
+            rows.append(row)
+        return np.asarray(rows, dtype=np.float64)
+
     rows = []
     for s in segments:
         dur = max(s.n_frames, 1)
         rows.append([s.rmsd_mean, s.rg_mean, np.log10(float(dur))])
     return np.asarray(rows, dtype=np.float64)
+
+
+def compute_pairwise_feature_distance_matrix(
+    feature_matrix: np.ndarray,
+) -> np.ndarray:
+    """Pairwise Euclidean distance on standardized segment feature vectors."""
+    from sklearn.preprocessing import StandardScaler
+
+    n = feature_matrix.shape[0]
+    if n < 2:
+        return np.zeros((n, n), dtype=np.float64)
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(feature_matrix)
+    # Replace any remaining NaN with 0 after scaling
+    X = np.nan_to_num(X, nan=0.0)
+
+    dist = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = float(np.linalg.norm(X[i] - X[j]))
+            dist[i, j] = d
+            dist[j, i] = d
+    return dist
 
 
 def format_cluster_summary(segments: Sequence[Segment], clustering: ClusteringResult) -> str:
@@ -431,38 +667,81 @@ def process_trajectory_files(
     linkage_method: str = "ward",
     rmsd_cutoff: Optional[float] = None,
     k_max: Optional[int] = None,
+    use_gsa_features: bool = False,
+    gsa_selections: Optional[GSAFeatureSelections] = None,
+    gsa_resname: str = "MOL",
+    n_monomers: int = 6,
+    gsa_signal_columns: Optional[Sequence[str]] = None,
+    include_tier2: bool = True,
+    include_guest: bool = True,
+    cluster_mode: str = "rmsd",
 ) -> Dict[str, Any]:
     """
     Full pipeline: segment all trajectories, cluster representatives, return results.
 
-    Returns dict with keys: segments, positions, distance_matrix, clustering, leaf_labels.
+    When *use_gsa_features* is True, segmentation uses multivariate GSA feature
+    time series and *cluster_mode* can be ``'features'`` (segment-mean GSA
+    vectors) or ``'rmsd'`` (pairwise RMSD on representative structures).
+
+    Returns dict with keys: segments, positions, distance_matrix, clustering,
+    leaf_labels, and optionally features_dfs.
     """
     import MDAnalysis as mda
 
     all_segments: List[Segment] = []
     all_positions: List[np.ndarray] = []
+    all_features_dfs: List[Any] = []
 
     top = str(topology)
     for traj_path in trajectory_paths:
         traj_path = Path(traj_path)
         traj_id = traj_path.stem
         u = mda.Universe(top, str(traj_path))
-        segs = segment_trajectory(
-            u,
-            selection,
-            traj_id,
-            stride=stride,
-            ref_frame=ref_frame,
-            signal_metric=signal_metric,
-            method=ruptures_method,
-            cost_model=ruptures_cost,
-            penalty=penalty,
-            n_bkps=n_bkps,
-            min_segment_frames=min_segment_frames,
-        )
+
+        if use_gsa_features:
+            segs, feat_df = segment_trajectory_gsa(
+                u,
+                traj_id,
+                selections=gsa_selections,
+                gsa_resname=gsa_resname,
+                n_monomers=n_monomers,
+                stride=stride,
+                ref_frame=ref_frame,
+                signal_columns=gsa_signal_columns,
+                include_tier2=include_tier2,
+                include_guest=include_guest,
+                method=ruptures_method,
+                cost_model=ruptures_cost,
+                penalty=penalty,
+                n_bkps=n_bkps,
+                min_segment_frames=min_segment_frames,
+            )
+            all_features_dfs.append(feat_df)
+        else:
+            segs = segment_trajectory(
+                u,
+                selection,
+                traj_id,
+                stride=stride,
+                ref_frame=ref_frame,
+                signal_metric=signal_metric,
+                method=ruptures_method,
+                cost_model=ruptures_cost,
+                penalty=penalty,
+                n_bkps=n_bkps,
+                min_segment_frames=min_segment_frames,
+            )
+
         if not segs:
             continue
-        pos, segs = extract_representative_positions(u, selection, segs)
+
+        assembly_sel = (
+            gsa_selections.assembly_sel
+            if gsa_selections and gsa_selections.assembly_sel
+            else f"resname {gsa_resname}"
+        ) if use_gsa_features else selection
+
+        pos, segs = extract_representative_positions(u, assembly_sel, segs)
         all_segments.extend(segs)
         all_positions.append(pos)
 
@@ -470,7 +749,13 @@ def process_trajectory_files(
         raise RuntimeError("No segments extracted from any trajectory.")
 
     positions = np.vstack(all_positions)
-    dist_mat = compute_pairwise_rmsd_matrix(positions)
+
+    if use_gsa_features and cluster_mode == "features":
+        feat_mat = build_feature_matrix(all_segments)
+        dist_mat = compute_pairwise_feature_distance_matrix(feat_mat)
+    else:
+        dist_mat = compute_pairwise_rmsd_matrix(positions)
+
     clustering = cluster_metastable_states(
         dist_mat,
         method=linkage_method,
@@ -483,10 +768,14 @@ def process_trajectory_files(
         f"{s.traj_id}:seg{s.segment_id}" for s in all_segments
     ]
 
-    return {
+    result: Dict[str, Any] = {
         "segments": all_segments,
         "positions": positions,
         "distance_matrix": dist_mat,
         "clustering": clustering,
         "leaf_labels": leaf_labels,
+        "cluster_mode": cluster_mode if use_gsa_features else "rmsd",
     }
+    if all_features_dfs:
+        result["features_dfs"] = all_features_dfs
+    return result
