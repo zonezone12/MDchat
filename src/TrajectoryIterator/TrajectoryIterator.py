@@ -626,6 +626,14 @@ class TrajectoryIterator:
         
         log_queue = _active_log_queue()
         run_id_value = _active_run_id()
+        if log_queue is not None and client is not None:
+            try:
+                from src.utils import run_log
+
+                client.run(run_log.pool_worker_init, log_queue, run_id_value)
+            except Exception:
+                pass
+
         # Submit batches to Dask cluster
         try:
             futures = []
@@ -639,9 +647,7 @@ class TrajectoryIterator:
                     batch_start_idx,
                     self.observers,
                     dimensions,
-                    log_queue,
                     batch_idx,
-                    run_id_value,
                 )
                 futures.append(future)
             
@@ -994,9 +1000,7 @@ class TrajectoryIterator:
                             batch_start_idx,
                             self.observers,
                             dimensions,
-                            log_queue,
                             batch_idx,
-                            run_id_value,
                         )
                         for batch_idx, (batch_start_idx, _, batch_coords, batch_times, batch_frames) in enumerate(batches)
                     ],
@@ -1148,9 +1152,7 @@ def _process_frame_batch_with_coords(
     batch_start_idx: int,
     observers: List[FrameObserver],
     dimensions: Optional[np.ndarray] = None,  # Box dimensions
-    log_queue: Optional[Any] = None,
     batch_idx: int = 0,
-    run_id_value: Optional[str] = None,
 ) -> List[Any]:
     """
     Process a batch of frames in a worker process using pre-extracted coordinates.
@@ -1172,18 +1174,14 @@ def _process_frame_batch_with_coords(
     """
     import numpy as np
 
-    if log_queue is not None:
-        from src.utils.run_log import attach_worker, log_event
+    from src.utils import run_log
 
-        attach_worker(log_queue, run_id_value)
-
+    worker_logging = run_log.logging_enabled()
     wid = _get_worker_id()
     t0 = time.perf_counter()
     frame_indices_sorted = sorted(batch_coords.keys())
-    if log_queue is not None:
-        from src.utils.run_log import log_event
-
-        log_event(
+    if worker_logging:
+        run_log.log_event(
             "batch_start",
             f"Worker batch {batch_idx}",
             component="TrajectoryIterator",
@@ -1289,8 +1287,8 @@ def _process_frame_batch_with_coords(
                 traceback.print_exc()
                 continue
         
-        if log_queue is not None:
-            log_event(
+        if worker_logging:
+            run_log.log_event(
                 "batch_completed",
                 f"Worker batch {batch_idx} done",
                 component="TrajectoryIterator",
@@ -1303,10 +1301,8 @@ def _process_frame_batch_with_coords(
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
-        if log_queue is not None:
-            from src.utils.run_log import log_event
-
-            log_event(
+        if worker_logging:
+            run_log.log_event(
                 "batch_error",
                 str(e),
                 level=logging.ERROR,
