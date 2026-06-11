@@ -29,6 +29,53 @@ from src.utils.gsa_selections import GSAFeatureSelections
 from src.utils.run_log import RunContext, log_event, step
 
 
+_GENERIC_TRAJ_STEMS = frozenset({
+    "mdcrd", "mdcrd_v", "crd", "dcd", "xtc", "trj", "nc", "prod", "equil",
+})
+
+
+def _trajectory_output_id(traj_path: Path) -> str:
+    """Stable CSV basename; disambiguate generic Amber names like ``mdcrd_v``."""
+    stem = traj_path.stem
+    parent = traj_path.parent.name
+    if stem.lower() in _GENERIC_TRAJ_STEMS and parent not in ("", ".", ".."):
+        return f"{parent}_{stem}"
+    return stem
+
+
+def _infer_cube_name(topology: str) -> str | None:
+    """Guess cube/system name from topology file (e.g. ``BHHpH_ca.prmtop`` → ``BHHpH``)."""
+    stem = Path(topology).stem
+    for suffix in ("_ca", "_box", "_wat", "_ion", "_solv"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)] or None
+    return stem or None
+
+
+def _resolve_cube_name(topology: str, cube: str | None) -> str | None:
+    if cube:
+        name = cube.strip()
+        return name or None
+    return _infer_cube_name(topology)
+
+
+def _unique_trajectory_ids(
+    traj_paths: list[Path],
+    cube: str | None = None,
+) -> list[str]:
+    """Assign output IDs; suffix duplicates when two paths still collide."""
+    ids: list[str] = []
+    counts: dict[str, int] = {}
+    for traj_path in traj_paths:
+        base = _trajectory_output_id(traj_path)
+        if cube and not base.startswith(f"{cube}_"):
+            base = f"{cube}_{base}"
+        n = counts.get(base, 0)
+        counts[base] = n + 1
+        ids.append(base if n == 0 else f"{base}_{n}")
+    return ids
+
+
 def _expand_trajectories(patterns: list[str]) -> list[Path]:
     paths: list[Path] = []
     for pat in patterns:
@@ -66,6 +113,12 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         required=True,
         help="Trajectory paths or glob patterns",
+    )
+    parser.add_argument(
+        "--cube",
+        default=None,
+        help="Cube/system name prefix for output CSVs (e.g. BHHpH). "
+        "Default: inferred from topology (BHHpH_ca.prmtop → BHHpH).",
     )
     parser.add_argument(
         "--output-dir",
@@ -153,14 +206,19 @@ def main() -> None:
         guest_sel=args.guest_selection,
     )
 
+    cube_name = _resolve_cube_name(args.topology, args.cube)
+
     with RunContext.from_namespace(args, name="compute_gsa_features") as run:
         print(f"Run log: {run.run_dir}")
+        if cube_name:
+            print(f"Cube prefix: {cube_name}")
         log_event(
             "config",
             "compute_gsa_features configuration",
             component="compute_gsa_features",
             context={
                 "topology": args.topology,
+                "cube": cube_name,
                 "n_trajectories": len(traj_paths),
                 "output_dir": str(out_dir),
                 "gsa_resname": args.gsa_resname,
@@ -170,8 +228,8 @@ def main() -> None:
         )
 
         top = str(args.topology)
-        for traj_path in traj_paths:
-            traj_id = traj_path.stem
+        traj_ids = _unique_trajectory_ids(traj_paths, cube=cube_name)
+        for traj_path, traj_id in zip(traj_paths, traj_ids):
             with step(
                 f"trajectory:{traj_id}",
                 component="compute_gsa_features",
