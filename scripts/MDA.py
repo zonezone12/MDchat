@@ -17,8 +17,8 @@ from MDAnalysis.analysis import gnm
 import matplotlib.pyplot as plt
 
 import MDAnalysis as mda
-prmtop=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_ca.prmtop'
-crd=r'C:\Users\zonezone\Desktop\YCU_research\BMMpM_mdcrd_v'
+prmtop=r'traj\BMMpM_ca.prmtop'
+crd=r'traj\BMMpM_891249_mdcrd_v.trj'
 first_u= mda.Universe(prmtop, crd,format="TRJ")
 
 
@@ -35,7 +35,11 @@ print(sub_centers)
 
 
 from src.Plotter import Plotter
-Plotter().plot_residue_endpoints(first_u, 'resid 1', 'BMMpM_endpoints.png')
+Plotter().plot_residue_endpoints(
+    first_u, 'resid 1', 'BMMpM_endpoints',
+    highlight_center_benzene=True,
+    highlight_methyl_endpoints=True,
+)
 
 from src.utils.guest_in import guest_entering
 # For lightweight distance calculations, sequential processing is typically fastest

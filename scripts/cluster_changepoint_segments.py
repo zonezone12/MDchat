@@ -29,13 +29,18 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+from src.utils.cluster_inspection import (
+    state_transitions_from_dataframe,
+    write_all_k_cluster_results,
+    write_cluster_inspection,
+)
 from src.utils.metastable_states import (
     Segment,
     assign_cluster_labels,
     cluster_metastable_states,
-    compute_pairwise_feature_distance_matrix,
     format_cluster_summary,
     plot_dendrogram,
+    prepare_feature_clustering,
 )
 from src.utils.run_log import RunContext, log_event, step
 
@@ -196,8 +201,14 @@ def cluster_one_group(
     out_dir: Path,
     *,
     linkage: str,
-    k_max: int,
+    n_clusters: int,
+    silhouette_k_max: int,
+    all_k_min: int,
+    all_k_max: int,
+    save_all_k: bool,
     distance_cutoff: Optional[float],
+    auto_select_k: bool,
+    k_max: int,
     skip_pca: bool,
 ) -> pd.DataFrame:
     """Cluster segments for one feature group; write per-group artifacts."""
@@ -211,16 +222,21 @@ def cluster_one_group(
         return pd.DataFrame()
 
     feature_matrix, feature_names = build_feature_matrix(df, group)
-    dist_mat = compute_pairwise_feature_distance_matrix(feature_matrix)
+    feat_input = prepare_feature_clustering(feature_matrix)
     clustering = cluster_metastable_states(
-        dist_mat,
+        feat_input.distance_matrix,
+        scaled_features=feat_input.scaled_features,
         method=linkage,
+        n_clusters=n_clusters if distance_cutoff is None and not auto_select_k else None,
         rmsd_cutoff=distance_cutoff,
+        auto_select_k=auto_select_k,
         k_max=k_max,
     )
 
     segments = _segments_from_df(sub)
     assign_cluster_labels(segments, clustering)
+
+    base_segments = _segments_from_df(sub)
 
     leaf_labels = [f"{s.traj_id}:seg{s.segment_id}" for s in segments]
     sub["leaf_label"] = leaf_labels
@@ -232,7 +248,9 @@ def cluster_one_group(
 
     sub.to_csv(group_dir / "segments_clustered.csv", index=False)
 
-    pd.DataFrame(dist_mat, index=leaf_labels, columns=leaf_labels).to_csv(
+    pd.DataFrame(
+        feat_input.distance_matrix, index=leaf_labels, columns=leaf_labels
+    ).to_csv(
         group_dir / "distance_matrix.csv"
     )
 
@@ -259,10 +277,41 @@ def cluster_one_group(
             title=f"PCA — {group} segments (k={clustering.n_clusters})",
         )
 
+    write_cluster_inspection(
+        group_dir,
+        segments,
+        clustering.labels,
+        feat_input.distance_matrix,
+        clustering.linkage_matrix,
+        chosen_k=clustering.n_clusters,
+        feature_matrix=feature_matrix,
+        feature_names=feature_names,
+        leaf_labels=leaf_labels,
+        silhouette_k_max=silhouette_k_max,
+        group_label=group,
+    )
+
+    use_fixed_k = distance_cutoff is None and not auto_select_k
+    if save_all_k and use_fixed_k:
+        write_all_k_cluster_results(
+            group_dir,
+            base_segments,
+            feat_input.distance_matrix,
+            clustering.linkage_matrix,
+            k_min=all_k_min,
+            k_max=all_k_max,
+            chosen_k=n_clusters,
+            linkage_method=clustering.method,
+            feature_matrix=feature_matrix,
+            feature_names=feature_names,
+            leaf_labels=leaf_labels,
+            group_label=group,
+        )
+
     log_event(
         "info",
         f"group={group}: {len(sub)} segments → {clustering.n_clusters} clusters "
-        f"(silhouette={clustering.silhouette:.3f})",
+        f"({clustering.selection_mode}, silhouette={clustering.silhouette:.3f})",
         component="cluster_changepoint_segments",
     )
     return sub
@@ -286,6 +335,21 @@ def write_cohort_outputs(
         .sort_values(["group", "cluster_label"])
     )
     counts.to_csv(out_dir / "cluster_counts_by_group.csv", index=False)
+
+    trans_dir = out_dir / "transitions"
+    trans_dir.mkdir(parents=True, exist_ok=True)
+    for group, grp_df in all_clustered.groupby("group"):
+        n_cl = int(grp_df["cluster_label"].max()) + 1
+        paths, summary, count_df, prob_df = state_transitions_from_dataframe(
+            grp_df,
+            n_clusters=n_cl,
+        )
+        group_trans = trans_dir / group
+        group_trans.mkdir(parents=True, exist_ok=True)
+        paths.to_csv(group_trans / "trajectory_state_paths.csv", index=False)
+        summary.to_csv(group_trans / "trajectory_state_summary.csv", index=False)
+        count_df.to_csv(group_trans / "state_transition_matrix.csv")
+        prob_df.to_csv(group_trans / "state_transition_prob.csv")
 
     # Wide composition: one row per trajectory, columns per group×segment cluster
     rows: list[dict] = []
@@ -321,18 +385,58 @@ def parse_args() -> argparse.Namespace:
         choices=list(DEFAULT_GROUPS),
         help="Feature groups to cluster (default: all four)",
     )
-    parser.add_argument("--linkage", default="ward", help="SciPy linkage method")
+    parser.add_argument(
+        "--linkage",
+        default="ward",
+        help="SciPy linkage method (ward on scaled features; average/complete/weighted for precomputed distances)",
+    )
+    parser.add_argument(
+        "--n-clusters",
+        "--k",
+        type=int,
+        default=5,
+        dest="n_clusters",
+        help="Fixed number of clusters (default: 5)",
+    )
+    parser.add_argument(
+        "--silhouette-k-max",
+        type=int,
+        default=10,
+        help="Upper k for silhouette curve at group root (does not select k)",
+    )
+    parser.add_argument(
+        "--all-k-min",
+        type=int,
+        default=2,
+        help="Minimum k when saving all-k results (default: 2)",
+    )
+    parser.add_argument(
+        "--all-k-max",
+        type=int,
+        default=None,
+        help="Maximum k to save under by_k/ (default: --silhouette-k-max)",
+    )
+    parser.add_argument(
+        "--no-save-all-k",
+        action="store_true",
+        help="Skip writing full inspection artifacts for every k under by_k/",
+    )
+    parser.add_argument(
+        "--auto-select-k",
+        action="store_true",
+        help="Legacy: pick k by highest silhouette instead of --n-clusters",
+    )
     parser.add_argument(
         "--k-max",
         type=int,
         default=10,
-        help="Max clusters for silhouette selection",
+        help="Max k when --auto-select-k is set",
     )
     parser.add_argument(
         "--distance-cutoff",
         type=float,
         default=None,
-        help="Fixed distance cutoff for fcluster (omit for auto silhouette)",
+        help="Fixed distance cutoff for fcluster (overrides --n-clusters)",
     )
     parser.add_argument(
         "--skip-pca",
@@ -350,6 +454,7 @@ def main() -> None:
 
     with RunContext.from_namespace(args, name="cluster_changepoint_segments"):
         df = load_segment_stats(changepoints_dir)
+        all_k_max = args.all_k_max if args.all_k_max is not None else args.silhouette_k_max
         log_event(
             "info",
             f"Loaded {len(df)} segment rows from {changepoints_dir}",
@@ -364,8 +469,14 @@ def main() -> None:
                     group,
                     out_dir,
                     linkage=args.linkage,
-                    k_max=args.k_max,
+                    n_clusters=args.n_clusters,
+                    silhouette_k_max=args.silhouette_k_max,
+                    all_k_min=args.all_k_min,
+                    all_k_max=all_k_max,
+                    save_all_k=not args.no_save_all_k,
                     distance_cutoff=args.distance_cutoff,
+                    auto_select_k=args.auto_select_k,
+                    k_max=args.k_max,
                     skip_pca=args.skip_pca,
                 )
                 if not part.empty:

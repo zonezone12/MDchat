@@ -28,7 +28,12 @@ import numpy as np
 import pandas as pd
 
 from src.utils.gsa_selections import GSAFeatureSelections
+from src.utils.cluster_inspection import (
+    write_all_k_cluster_results,
+    write_cluster_inspection,
+)
 from src.utils.metastable_states import (
+    build_feature_matrix,
     format_cluster_summary,
     plot_dendrogram,
     process_trajectory_files,
@@ -123,19 +128,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--linkage",
         default="ward",
-        help="SciPy hierarchical linkage method",
+        help="Linkage method: ward on scaled GSA features (cluster-mode=features); "
+        "average/complete/weighted for RMSD distance matrices",
     )
     parser.add_argument(
         "--rmsd-cutoff",
         type=float,
         default=None,
-        help="RMSD distance cutoff for fcluster (Å); omit for auto silhouette",
+        help="RMSD distance cutoff for fcluster (Å); overrides --n-clusters",
+    )
+    parser.add_argument(
+        "--n-clusters",
+        "--k",
+        type=int,
+        default=5,
+        dest="n_clusters",
+        help="Fixed number of clusters (default: 5)",
+    )
+    parser.add_argument(
+        "--silhouette-k-max",
+        type=int,
+        default=10,
+        help="Upper k for silhouette curve (does not select k)",
+    )
+    parser.add_argument(
+        "--all-k-min",
+        type=int,
+        default=2,
+        help="Minimum k when saving all-k results (default: 2)",
+    )
+    parser.add_argument(
+        "--all-k-max",
+        type=int,
+        default=None,
+        help="Maximum k to save under inspection/by_k/ (default: --silhouette-k-max)",
+    )
+    parser.add_argument(
+        "--no-save-all-k",
+        action="store_true",
+        help="Skip writing full inspection artifacts for every k",
+    )
+    parser.add_argument(
+        "--auto-select-k",
+        action="store_true",
+        help="Legacy: pick k by highest silhouette instead of --n-clusters",
     )
     parser.add_argument(
         "--k-max",
         type=int,
         default=10,
-        help="Maximum clusters for auto silhouette selection",
+        help="Max k when --auto-select-k is set",
     )
     parser.add_argument(
         "--use-gsa-features",
@@ -238,6 +280,8 @@ def main() -> None:
                 min_segment_frames=args.min_segment_frames,
                 linkage_method=args.linkage,
                 rmsd_cutoff=args.rmsd_cutoff,
+                n_clusters=args.n_clusters,
+                auto_select_k=args.auto_select_k,
                 k_max=args.k_max,
                 use_gsa_features=args.use_gsa_features,
                 gsa_selections=gsa_selections,
@@ -333,6 +377,59 @@ def main() -> None:
                 context={"path": str(dendro_path)},
             )
             print(f"Wrote {dendro_path}")
+
+            feat_mat = build_feature_matrix(segments)
+            if segments and segments[0].feature_means:
+                feat_names = sorted(segments[0].feature_means.keys()) + ["log10_n_frames"]
+            else:
+                feat_names = ["rmsd_mean", "rg_mean", "log10_n_frames"]
+            insp_dir = out_dir / "inspection"
+            write_cluster_inspection(
+                insp_dir,
+                segments,
+                clustering.labels,
+                dist_mat,
+                clustering.linkage_matrix,
+                chosen_k=clustering.n_clusters,
+                feature_matrix=feat_mat,
+                feature_names=feat_names,
+                leaf_labels=leaf_labels,
+                silhouette_k_max=args.silhouette_k_max,
+            )
+            log_event(
+                "artifact_written",
+                str(insp_dir),
+                component="find_metastable_states",
+                context={"path": str(insp_dir)},
+            )
+            print(f"Wrote cluster inspection artifacts under {insp_dir}")
+
+            use_fixed_k = args.rmsd_cutoff is None and not args.auto_select_k
+            if not args.no_save_all_k and use_fixed_k:
+                import copy
+
+                all_k_max = (
+                    args.all_k_max
+                    if args.all_k_max is not None
+                    else args.silhouette_k_max
+                )
+                base_segments = [copy.copy(s) for s in segments]
+                for s in base_segments:
+                    s.cluster_label = -1
+                write_all_k_cluster_results(
+                    insp_dir,
+                    base_segments,
+                    dist_mat,
+                    clustering.linkage_matrix,
+                    k_min=args.all_k_min,
+                    k_max=all_k_max,
+                    chosen_k=args.n_clusters,
+                    linkage_method=clustering.method,
+                    feature_matrix=feat_mat,
+                    feature_names=feat_names,
+                    leaf_labels=leaf_labels,
+                )
+                print(f"Wrote all-k results under {insp_dir / 'by_k'}")
 
             summary_text = format_cluster_summary(segments, clustering)
             summary_path = out_dir / "cluster_summary.txt"

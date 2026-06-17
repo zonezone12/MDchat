@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import warnings
+from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple, Any, TYPE_CHECKING
+from typing import List, Optional, Dict, Tuple, Any, Sequence, TYPE_CHECKING
 
 import numpy as np
 from rdkit import Chem
@@ -212,6 +213,24 @@ class RingCenterCalculator:
         
         smarts = self.COMMON_PATTERNS[pattern_name]
         return self.match_smarts_pattern(mol, smarts, name=pattern_name)
+
+    def find_center_benzene_ring(
+        self,
+        mol: Chem.Mol,
+        positions: np.ndarray,
+    ) -> Optional[SubstructureInfo]:
+        """Return the benzene ring whose center is closest to the molecule COM."""
+        benzenes = self.match_common_pattern(mol, "benzene")
+        if not benzenes:
+            return None
+
+        com = np.mean(positions, axis=0)
+        return min(
+            benzenes,
+            key=lambda ring: np.linalg.norm(
+                self.calculate_substructure_center(positions, ring.rdkit_indices) - com
+            ),
+        )
     
     @staticmethod
     def calculate_substructure_center(
@@ -299,7 +318,7 @@ class RingCenterCalculator:
             normal_vector=normal,
             radius=radius
         )
-    
+
     def find_and_map_substructures(
         self,
         mol: Chem.Mol,
@@ -321,28 +340,146 @@ class RingCenterCalculator:
         """
         substructures = []
         
-        # Auto-detect rings
         if include_rings:
             rings = self.find_all_rings(mol)
             substructures.extend(rings)
         
-        # Match SMARTS patterns
         if smarts_patterns:
             for smarts in smarts_patterns:
                 matches = self.match_smarts_pattern(mol, smarts)
                 substructures.extend(matches)
         
-        # Map RDKit indices to MDAnalysis indices
-        # RDKit and MDAnalysis typically share the same atom ordering within a residue
-        # when the molecule is converted, but we need to use the selection's indices
         mda_atom_indices = mda_selection.indices
         
         for sub in substructures:
-            # Map RDKit local indices to MDAnalysis global indices
             mda_indices = tuple(mda_atom_indices[i] for i in sub.rdkit_indices)
             sub.mda_indices = mda_indices
         
         return substructures
+
+
+def filter_endpoints_to_methyl_atoms(
+    mol: Chem.Mol,
+    endpoint_rdkit_indices: Sequence[int],
+    *,
+    ring_calculator: Optional[RingCenterCalculator] = None,
+) -> List[int]:
+    """
+    Resolve type-4 methyl carbons from EndpointsFinder output.
+
+    1. Endpoints that directly match ``[CH3]``.
+    2. Methyl carbons bonded to any endpoint heavy atom (benzylic endpoints).
+    """
+    calc = ring_calculator or RingCenterCalculator()
+    methyl_matches = calc.match_common_pattern(mol, "methyl")
+    methyl_atoms = {idx for match in methyl_matches for idx in match.rdkit_indices}
+    endpoint_set = set(endpoint_rdkit_indices)
+
+    direct = sorted(i for i in endpoint_rdkit_indices if i in methyl_atoms)
+    if direct:
+        return direct
+
+    bonded: List[int] = []
+    for idx in methyl_atoms:
+        atom = mol.GetAtomWithIdx(idx)
+        for nbr in atom.GetNeighbors():
+            if nbr.GetIdx() in endpoint_set:
+                bonded.append(idx)
+                break
+    return sorted(set(bonded))
+
+
+def all_methyl_atom_indices(
+    mol: Chem.Mol,
+    *,
+    ring_calculator: Optional[RingCenterCalculator] = None,
+) -> List[int]:
+    """All ``[CH3]`` carbon indices in *mol* (RDKit local indices)."""
+    calc = ring_calculator or RingCenterCalculator()
+    methyl_matches = calc.match_common_pattern(mol, "methyl")
+    return sorted({idx for match in methyl_matches for idx in match.rdkit_indices})
+
+
+def bond_steps_from_atoms(
+    mol: Chem.Mol,
+    source_rdkit_indices: Sequence[int],
+) -> List[int]:
+    """Graph distance from the nearest *source* atom to every atom in *mol*."""
+    n_atoms = mol.GetNumAtoms()
+    visited = [-1] * n_atoms
+    queue: deque[Tuple[int, int]] = deque()
+
+    for atom_idx in source_rdkit_indices:
+        if 0 <= atom_idx < n_atoms and visited[atom_idx] == -1:
+            visited[atom_idx] = 0
+            queue.append((atom_idx, 0))
+
+    while queue:
+        atom_idx, depth = queue.popleft()
+        for nbr in mol.GetAtomWithIdx(atom_idx).GetNeighbors():
+            j = nbr.GetIdx()
+            if visited[j] == -1:
+                visited[j] = depth + 1
+                queue.append((j, depth + 1))
+
+    return visited
+
+
+def select_central_methyl_atoms(
+    mol: Chem.Mol,
+    positions: np.ndarray,
+    n: int = 3,
+    *,
+    center_ring_rdkit_indices: Optional[Sequence[int]] = None,
+    ring_calculator: Optional[RingCenterCalculator] = None,
+    endpoint_rdkit_indices: Optional[Sequence[int]] = None,
+    use_endpoint_filter: bool = True,
+) -> List[int]:
+    """
+    Select *n* methyl carbons nearest the central benzene in bond-graph distance.
+
+    Candidates are endpoint-linked methyls (``filter_endpoints_to_methyl_atoms``)
+    when *endpoint_rdkit_indices* is provided and *use_endpoint_filter* is True;
+    otherwise all ``[CH3]`` carbons in the molecule.
+
+    Methyls at the minimum bond-step count from the center benzene are kept.
+    If that yields more than *n*, ties break by 3D distance to the ring centroid.
+    """
+    calc = ring_calculator or RingCenterCalculator()
+
+    if center_ring_rdkit_indices is None:
+        center_ring = calc.find_center_benzene_ring(mol, positions)
+        if center_ring is None:
+            raise ValueError("No central benzene ring found for methyl selection.")
+        center_ring_rdkit_indices = center_ring.rdkit_indices
+
+    if use_endpoint_filter and endpoint_rdkit_indices is not None:
+        candidates = filter_endpoints_to_methyl_atoms(
+            mol, endpoint_rdkit_indices, ring_calculator=calc
+        )
+    else:
+        candidates = all_methyl_atom_indices(mol, ring_calculator=calc)
+
+    if not candidates:
+        raise ValueError("No methyl candidates found for central methyl selection.")
+
+    steps = bond_steps_from_atoms(mol, center_ring_rdkit_indices)
+    candidate_steps = [steps[i] for i in candidates if steps[i] >= 0]
+    if not candidate_steps:
+        raise ValueError("No methyl candidates reachable from the central benzene ring.")
+
+    min_steps = min(candidate_steps)
+    at_min = [i for i in candidates if steps[i] == min_steps]
+    if len(at_min) <= n:
+        return sorted(at_min)
+
+    ring_center = calc.calculate_substructure_center(
+        positions, tuple(center_ring_rdkit_indices)
+    )
+    return sorted(
+        at_min,
+        key=lambda i: np.linalg.norm(positions[i] - ring_center),
+    )[:n]
 
 
 class SubstructureCenterObserver(FrameObserver):

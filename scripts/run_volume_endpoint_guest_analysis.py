@@ -409,7 +409,10 @@ def main():
                     plotter.plot_volume_change(volume, args.out_prefix)
                     #plot residue endpoints
                     print("\nPlotting residue endpoints...")
-                    plotter.plot_residue_endpoints(u, endpoint_observer, args.endpoint_residues, args.out_prefix)
+                    plotter.plot_residue_endpoints(
+                        u, args.endpoint_residues, args.out_prefix,
+                        endpoint_observer=endpoint_observer,
+                    )
                    #plot guest entry/exit timeline
                     print("\nPlotting guest entry/exit timeline...")
                     plotter.plot_guest_entry_exit_timeline(guest_stats, args.out_prefix)

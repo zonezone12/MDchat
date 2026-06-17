@@ -65,6 +65,20 @@ class ClusteringResult:
     cutoff_distance: float
     silhouette: float
     method: str
+    selection_mode: str = "fixed_k"
+
+
+@dataclass
+class FeatureClusteringInput:
+    """Standardized feature rows and their pairwise Euclidean distance matrix."""
+
+    scaled_features: np.ndarray
+    distance_matrix: np.ndarray
+
+
+# Ward linkage in SciPy requires Euclidean geometry; use these on precomputed
+# non-Euclidean distances (RMSD, contact maps, mixed metrics).
+_PRECOMPUTED_LINKAGE_METHODS = frozenset({"average", "complete", "weighted", "single"})
 
 
 def _effective_n_frames(n_traj_frames: int, stride: int) -> int:
@@ -459,17 +473,36 @@ def compute_pairwise_rmsd_matrix(positions: np.ndarray) -> np.ndarray:
 def cluster_metastable_states(
     distance_matrix: np.ndarray,
     *,
+    scaled_features: Optional[np.ndarray] = None,
     method: str = "ward",
+    n_clusters: Optional[int] = None,
     k_min: int = 2,
     k_max: Optional[int] = None,
     rmsd_cutoff: Optional[float] = None,
+    auto_select_k: bool = False,
 ) -> ClusteringResult:
     """
-    Hierarchical clustering on a precomputed distance matrix.
+    Hierarchical clustering for metastable segment groups.
 
-    If *rmsd_cutoff* is given, ``fcluster`` uses that distance threshold.
-    Otherwise the number of clusters is chosen by best silhouette score
-    over ``k_min`` … ``k_max``.
+    For standardized feature vectors, pass *scaled_features* and use
+    ``method='ward'`` — SciPy Ward is applied as
+    ``linkage(scaled_features, method='ward')``.
+
+    For precomputed non-Euclidean distances (RMSD, contact maps, etc.),
+    omit *scaled_features* and use ``average``, ``complete``, or
+    ``weighted``. If ``ward`` is requested without *scaled_features*, it is
+    replaced with ``average``.
+
+    Cluster count selection (first match wins):
+
+    1. *rmsd_cutoff* — ``fcluster`` distance threshold
+    2. *n_clusters* — fixed ``maxclust`` cut (default mode in CLI scripts)
+    3. *auto_select_k=True* — pick k with highest silhouette in
+       ``k_min`` … ``k_max`` (legacy; off by default)
+
+    Silhouette on the returned result always uses *distance_matrix* when
+    k ≥ 2. Use :func:`src.utils.cluster_inspection.silhouette_scores_by_k`
+    to plot the full k curve without auto-selecting.
     """
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import squareform
@@ -485,59 +518,158 @@ def cluster_metastable_states(
             cutoff_distance=0.0,
             silhouette=-1.0,
             method=method,
+            selection_mode="trivial",
         )
 
-    condensed = squareform(distance_matrix, checks=False)
-    Z = linkage(condensed, method=method)
+    linkage_method = method
+    if scaled_features is not None:
+        if scaled_features.shape[0] != n:
+            raise ValueError(
+                f"scaled_features rows ({scaled_features.shape[0]}) != "
+                f"distance_matrix size ({n})"
+            )
+        if linkage_method == "ward":
+            Z = linkage(scaled_features, method="ward")
+        else:
+            condensed = squareform(distance_matrix, checks=False)
+            Z = linkage(condensed, method=linkage_method)
+    else:
+        if linkage_method == "ward":
+            linkage_method = "average"
+        if linkage_method not in _PRECOMPUTED_LINKAGE_METHODS:
+            raise ValueError(
+                f"Linkage method {linkage_method!r} requires scaled feature "
+                f"vectors; for a precomputed distance matrix use one of "
+                f"{sorted(_PRECOMPUTED_LINKAGE_METHODS)}"
+            )
+        condensed = squareform(distance_matrix, checks=False)
+        Z = linkage(condensed, method=linkage_method)
+
+    def _silhouette(labels_arr: np.ndarray) -> float:
+        if len(set(labels_arr)) < 2:
+            return -1.0
+        try:
+            return float(
+                silhouette_score(distance_matrix, labels_arr, metric="precomputed")
+            )
+        except Exception:
+            return -1.0
 
     if rmsd_cutoff is not None:
-        labels = fcluster(Z, t=rmsd_cutoff, criterion="distance")
-        labels = labels - 1
-        n_clusters = len(set(labels))
-        sil = -1.0
-        if n_clusters >= 2:
-            try:
-                sil = float(silhouette_score(distance_matrix, labels, metric="precomputed"))
-            except Exception:
-                sil = -1.0
+        labels = fcluster(Z, t=rmsd_cutoff, criterion="distance") - 1
+        n_cl = len(set(labels))
         return ClusteringResult(
             linkage_matrix=Z,
             labels=labels.astype(int),
-            n_clusters=n_clusters,
+            n_clusters=n_cl,
             cutoff_distance=float(rmsd_cutoff),
-            silhouette=sil,
-            method=method,
+            silhouette=_silhouette(labels),
+            method=linkage_method,
+            selection_mode="distance_cutoff",
         )
 
-    k_max_eff = k_max if k_max is not None else min(10, n - 1)
-    k_max_eff = max(k_min, k_max_eff)
+    if n_clusters is not None:
+        k_eff = max(1, min(int(n_clusters), n))
+        labels = fcluster(Z, t=k_eff, criterion="maxclust") - 1
+        n_cl = len(set(labels))
+        cutoff = (
+            float(Z[-(k_eff - 1), 2])
+            if k_eff > 1 and Z.shape[0] >= k_eff - 1
+            else 0.0
+        )
+        return ClusteringResult(
+            linkage_matrix=Z,
+            labels=labels.astype(int),
+            n_clusters=n_cl,
+            cutoff_distance=cutoff,
+            silhouette=_silhouette(labels),
+            method=linkage_method,
+            selection_mode="fixed_k",
+        )
 
-    best_k, best_labels, best_sil = k_min, None, -1.0
-    for k in range(k_min, k_max_eff + 1):
-        labels_k = fcluster(Z, t=k, criterion="maxclust") - 1
-        if len(set(labels_k)) < 2:
-            continue
+    if auto_select_k:
+        k_max_eff = k_max if k_max is not None else min(10, n - 1)
+        k_max_eff = max(k_min, k_max_eff)
+
+        best_k, best_labels, best_sil = k_min, None, -1.0
+        for k in range(k_min, k_max_eff + 1):
+            labels_k = fcluster(Z, t=k, criterion="maxclust") - 1
+            if len(set(labels_k)) < 2:
+                continue
+            sil = _silhouette(labels_k)
+            if sil > best_sil:
+                best_sil, best_k, best_labels = sil, k, labels_k
+
+        if best_labels is None:
+            best_labels = np.zeros(n, dtype=int)
+            best_k = 1
+            best_sil = -1.0
+
+        cutoff = (
+            float(Z[-(best_k - 1), 2])
+            if best_k > 1 and Z.shape[0] >= best_k - 1
+            else 0.0
+        )
+        return ClusteringResult(
+            linkage_matrix=Z,
+            labels=best_labels.astype(int),
+            n_clusters=best_k,
+            cutoff_distance=cutoff,
+            silhouette=best_sil,
+            method=linkage_method,
+            selection_mode="auto_silhouette",
+        )
+
+    raise ValueError(
+        "Specify n_clusters for fixed-k clustering, rmsd_cutoff for "
+        "distance-based cuts, or auto_select_k=True for legacy silhouette selection"
+    )
+
+
+def labels_at_k(linkage_matrix: np.ndarray, k: int) -> np.ndarray:
+    """Cluster labels from an existing linkage matrix at fixed *k*."""
+    from scipy.cluster.hierarchy import fcluster
+
+    n = linkage_matrix.shape[0] + 1
+    k_eff = max(1, min(int(k), n))
+    return (fcluster(linkage_matrix, t=k_eff, criterion="maxclust") - 1).astype(int)
+
+
+def clustering_result_at_k(
+    distance_matrix: np.ndarray,
+    linkage_matrix: np.ndarray,
+    k: int,
+    *,
+    method: str = "ward",
+) -> ClusteringResult:
+    """Build a :class:`ClusteringResult` for one k without re-running linkage."""
+    from sklearn.metrics import silhouette_score
+
+    labels = labels_at_k(linkage_matrix, k)
+    n = distance_matrix.shape[0]
+    k_eff = max(1, min(int(k), n))
+    n_cl = len(set(labels))
+    cutoff = (
+        float(linkage_matrix[-(k_eff - 1), 2])
+        if k_eff > 1 and linkage_matrix.shape[0] >= k_eff - 1
+        else 0.0
+    )
+    sil = -1.0
+    if n_cl >= 2:
         try:
-            sil = silhouette_score(distance_matrix, labels_k, metric="precomputed")
+            sil = float(
+                silhouette_score(distance_matrix, labels, metric="precomputed")
+            )
         except Exception:
-            continue
-        if sil > best_sil:
-            best_sil, best_k, best_labels = sil, k, labels_k
-
-    if best_labels is None:
-        best_labels = np.zeros(n, dtype=int)
-        best_k = 1
-        best_sil = -1.0
-
-    cutoff = float(Z[-(best_k - 1), 2]) if best_k > 1 and Z.shape[0] >= best_k - 1 else 0.0
-
+            sil = -1.0
     return ClusteringResult(
-        linkage_matrix=Z,
-        labels=best_labels.astype(int),
-        n_clusters=best_k,
+        linkage_matrix=linkage_matrix,
+        labels=labels,
+        n_clusters=n_cl,
         cutoff_distance=cutoff,
-        silhouette=best_sil,
+        silhouette=sil,
         method=method,
+        selection_mode="fixed_k",
     )
 
 
@@ -608,20 +740,20 @@ def build_feature_matrix(segments: Sequence[Segment]) -> np.ndarray:
     return np.asarray(rows, dtype=np.float64)
 
 
-def compute_pairwise_feature_distance_matrix(
-    feature_matrix: np.ndarray,
-) -> np.ndarray:
-    """Pairwise Euclidean distance on standardized segment feature vectors."""
+def standardize_feature_matrix(feature_matrix: np.ndarray) -> np.ndarray:
+    """Column-standardize feature rows; remaining NaN values become 0."""
     from sklearn.preprocessing import StandardScaler
-
-    n = feature_matrix.shape[0]
-    if n < 2:
-        return np.zeros((n, n), dtype=np.float64)
 
     scaler = StandardScaler()
     X = scaler.fit_transform(feature_matrix)
-    # Replace any remaining NaN with 0 after scaling
-    X = np.nan_to_num(X, nan=0.0)
+    return np.nan_to_num(X, nan=0.0)
+
+
+def pairwise_euclidean_distance_matrix(X: np.ndarray) -> np.ndarray:
+    """Symmetric pairwise Euclidean distances between rows of *X*."""
+    n = X.shape[0]
+    if n < 2:
+        return np.zeros((n, n), dtype=np.float64)
 
     dist = np.zeros((n, n), dtype=np.float64)
     for i in range(n):
@@ -632,13 +764,37 @@ def compute_pairwise_feature_distance_matrix(
     return dist
 
 
+def prepare_feature_clustering(feature_matrix: np.ndarray) -> FeatureClusteringInput:
+    """Return standardized features and their pairwise Euclidean distance matrix."""
+    X = standardize_feature_matrix(feature_matrix)
+    return FeatureClusteringInput(
+        scaled_features=X,
+        distance_matrix=pairwise_euclidean_distance_matrix(X),
+    )
+
+
+def compute_pairwise_feature_distance_matrix(
+    feature_matrix: np.ndarray,
+) -> np.ndarray:
+    """Pairwise Euclidean distance on standardized segment feature vectors."""
+    return prepare_feature_clustering(feature_matrix).distance_matrix
+
+
 def format_cluster_summary(segments: Sequence[Segment], clustering: ClusteringResult) -> str:
     """Human-readable summary of structural types."""
+    mode_desc = {
+        "fixed_k": f"fixed k={clustering.n_clusters}",
+        "distance_cutoff": f"distance cutoff={clustering.cutoff_distance:.4f}",
+        "auto_silhouette": "auto silhouette selection",
+        "trivial": "single segment",
+    }.get(clustering.selection_mode, clustering.selection_mode)
+
     lines = [
         f"Structural types identified: {clustering.n_clusters}",
         f"Clustering method: {clustering.method}",
-        f"Auto silhouette score: {clustering.silhouette:.4f}",
-        f"Cutoff distance: {clustering.cutoff_distance:.4f} Å",
+        f"Selection mode: {mode_desc}",
+        f"Silhouette score (chosen k): {clustering.silhouette:.4f}",
+        f"Linkage merge height at cut: {clustering.cutoff_distance:.4f}",
         "",
         "Per-cluster membership:",
     ]
@@ -670,6 +826,8 @@ def process_trajectory_files(
     min_segment_frames: int = 10,
     linkage_method: str = "ward",
     rmsd_cutoff: Optional[float] = None,
+    n_clusters: int = 5,
+    auto_select_k: bool = False,
     k_max: Optional[int] = None,
     use_gsa_features: bool = False,
     gsa_selections: Optional[GSAFeatureSelections] = None,
@@ -756,16 +914,22 @@ def process_trajectory_files(
 
     positions = np.vstack(all_positions)
 
+    scaled_features: Optional[np.ndarray] = None
     if use_gsa_features and cluster_mode == "features":
         feat_mat = build_feature_matrix(all_segments)
-        dist_mat = compute_pairwise_feature_distance_matrix(feat_mat)
+        feat_input = prepare_feature_clustering(feat_mat)
+        dist_mat = feat_input.distance_matrix
+        scaled_features = feat_input.scaled_features
     else:
         dist_mat = compute_pairwise_rmsd_matrix(positions)
 
     clustering = cluster_metastable_states(
         dist_mat,
+        scaled_features=scaled_features,
         method=linkage_method,
+        n_clusters=n_clusters if rmsd_cutoff is None and not auto_select_k else None,
         rmsd_cutoff=rmsd_cutoff,
+        auto_select_k=auto_select_k,
         k_max=k_max,
     )
     assign_cluster_labels(all_segments, clustering)
@@ -782,6 +946,8 @@ def process_trajectory_files(
         "leaf_labels": leaf_labels,
         "cluster_mode": cluster_mode if use_gsa_features else "rmsd",
     }
+    if scaled_features is not None:
+        result["scaled_features"] = scaled_features
     if all_features_dfs:
         result["features_dfs"] = all_features_dfs
     return result

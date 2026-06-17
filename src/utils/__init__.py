@@ -5,6 +5,10 @@ from .rdkit_utils import (
     RingMetrics,
     RingCenterCalculator,
     SubstructureCenterObserver,
+    bond_steps_from_atoms,
+    select_central_methyl_atoms,
+    filter_endpoints_to_methyl_atoms,
+    all_methyl_atom_indices,
 )
 from .plotly_molecule import make_molecule_components, plot_molecule
 from .gsa_selections import GSAFeatureSelections, resolve_selections
@@ -18,6 +22,10 @@ __all__ = [
     "RingMetrics",
     "RingCenterCalculator",
     "SubstructureCenterObserver",
+    "bond_steps_from_atoms",
+    "select_central_methyl_atoms",
+    "filter_endpoints_to_methyl_atoms",
+    "all_methyl_atom_indices",
     "make_molecule_components",
     "plot_molecule",
     "GSAFeatureSelections",

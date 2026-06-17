@@ -79,6 +79,7 @@ except ImportError:
 # Endpoint finder (now in EndpointAnalyzer module)
 from src.EndpointAnalyzer import EndpointsFinder, EndpointAnalyzer  # type: ignore
 from src.EndpointAnalyzer import EndpointAnalyzerObserver  # type: ignore
+from src.utils.rdkit_utils import RingCenterCalculator, select_central_methyl_atoms  # type: ignore
 
 # Optional plotly for 3D visualization
 try:
@@ -1941,17 +1942,25 @@ class Plotter:
     def plot_residue_endpoints(
         self,
         u: mda.Universe,
-        endpoint_observer: Optional[EndpointAnalyzerObserver] = None,
         residue_sel: Union[str, List[str]] = "resid 1",
         out_prefix: str = "residue_endpoints",
+        *,
+        endpoint_observer: Optional[EndpointAnalyzerObserver] = None,
+        highlight_center_benzene: bool = False,
+        highlight_methyl_endpoints: bool = False,
+        n_central_methyls: int = 3,
     ) -> None:
         """Plot the endpoints of a residue or multiple residues.
         
         Args:
             u: MDAnalysis Universe
-            endpoint_observer: Optional EndpointAnalyzerObserver. If provided, uses stored_ep_indices for labeling
             residue_sel: Single residue selection string or list of residue selection strings
-            out_prefix: Output file prefix
+            out_prefix: Output file prefix (``.png`` is appended automatically)
+            endpoint_observer: Optional EndpointAnalyzerObserver. If provided, uses stored_ep_indices for labeling
+            highlight_center_benzene: If True, also highlight the central benzene ring (green)
+            highlight_methyl_endpoints: If True, highlight central type-4 methyl carbons
+                selected by bond-step distance from the central benzene (orange)
+            n_central_methyls: Number of central methyls to highlight (default 3)
         """
         if not HAS_MATPLOTLIB or plt is None:
             warnings.warn("matplotlib not available. Skipping residue endpoint plots.")
@@ -1960,6 +1969,11 @@ class Plotter:
         ef = EndpointsFinder() if EndpointsFinder is not None else None  # type: ignore[call-arg]
         if ef is None:
             raise RuntimeError("EndpointsFinder is not available for plotting.")
+        ring_calc = (
+            RingCenterCalculator()
+            if highlight_center_benzene or highlight_methyl_endpoints
+            else None
+        )
 
         # Handle both string and list inputs
         if isinstance(residue_sel, str):
@@ -2032,6 +2046,46 @@ class Plotter:
             
             # Create mapping for labeling (RDKit index -> MDAnalysis universe index)
             rdkit_to_universe = {rdkit_idx: int(sel[rdkit_idx].id) for rdkit_idx in highlight_atoms}
+
+            center_benzene_atoms: List[int] = []
+            mda_center_benzene_indices: List[int] = []
+            center_ring = (
+                ring_calc.find_center_benzene_ring(mol, sel.positions)
+                if ring_calc is not None
+                else None
+            )
+            if highlight_center_benzene and center_ring is not None:
+                center_benzene_atoms = list(center_ring.rdkit_indices)
+                mda_center_benzene_indices = [
+                    int(sel[rdkit_idx].id) for rdkit_idx in center_benzene_atoms
+                ]
+
+            methyl_atoms: List[int] = []
+            mda_methyl_indices: List[int] = []
+            if highlight_methyl_endpoints:
+                if center_ring is None:
+                    warnings.warn(
+                        f"No central benzene ring for {sel_str}; "
+                        "skipping methyl endpoint highlights."
+                    )
+                else:
+                    try:
+                        methyl_atoms = select_central_methyl_atoms(
+                            mol,
+                            sel.positions,
+                            n_central_methyls,
+                            center_ring_rdkit_indices=center_ring.rdkit_indices,
+                            ring_calculator=ring_calc,
+                            endpoint_rdkit_indices=highlight_atoms,
+                        )
+                        mda_methyl_indices = [
+                            int(sel[rdkit_idx].id) for rdkit_idx in methyl_atoms
+                        ]
+                    except ValueError as exc:
+                        warnings.warn(
+                            f"Central methyl selection failed for {sel_str}: {exc}"
+                        )
+            methyl_atom_set = set(methyl_atoms)
             
             # Try to use rdMolDraw2D for better coordinate control
             try:
@@ -2053,11 +2107,22 @@ class Plotter:
                 drawer = rdMolDraw2D.MolDraw2DCairo(800, 600)
                 drawer.SetDrawOptions(drawer.drawOptions())
                 
-                # Set up highlight colors
+                # Set up highlight colors (red = endpoints, green = central benzene, orange = methyl)
                 highlight_colors = {atom_idx: (1.0, 0.0, 0.0) for atom_idx in highlight_atoms}
+                for atom_idx in center_benzene_atoms:
+                    highlight_colors[atom_idx] = (0.0, 0.7, 0.0)
+                for atom_idx in methyl_atoms:
+                    highlight_colors[atom_idx] = (1.0, 0.5, 0.0)
+                all_highlight_atoms = list(dict.fromkeys(
+                    highlight_atoms + center_benzene_atoms + methyl_atoms
+                ))
                 
                 # Draw molecule
-                drawer.DrawMolecule(m2d, highlightAtoms=highlight_atoms, highlightAtomColors=highlight_colors)
+                drawer.DrawMolecule(
+                    m2d,
+                    highlightAtoms=all_highlight_atoms,
+                    highlightAtomColors=highlight_colors,
+                )
                 drawer.FinishDrawing()
                 
                 # Get the image
@@ -2066,8 +2131,14 @@ class Plotter:
                 
             except (ImportError, AttributeError):
                 # Fallback to MolToImage if rdMolDraw2D is not available
+                fallback_highlight = list(dict.fromkeys(
+                    highlight_atoms + center_benzene_atoms + methyl_atoms
+                ))
                 img = Draw.MolToImage(
-                    m2d, size=(800, 600), highlightAtoms=highlight_atoms, highlightColor=(1, 0, 0)
+                    m2d,
+                    size=(800, 600),
+                    highlightAtoms=fallback_highlight,
+                    highlightColor=(1, 0, 0),
                 )
             
             # Calculate coordinate transformation
@@ -2100,6 +2171,8 @@ class Plotter:
             # highlight_atoms and mda_endpoint_indices are now aligned
             index=0
             for rdkit_idx, universe_idx in zip(highlight_atoms, mda_endpoint_indices):
+                if rdkit_idx in methyl_atom_set:
+                    continue
                 if rdkit_idx < len(xy):
                     x, y = xy[rdkit_idx]
                     
@@ -2120,6 +2193,38 @@ class Plotter:
                         arrowprops=dict(arrowstyle='->', color='blue', lw=2, connectionstyle='arc3,rad=0.1')
                     )
                     index+=1
+            for rdkit_idx, universe_idx in zip(center_benzene_atoms, mda_center_benzene_indices):
+                if rdkit_idx < len(xy):
+                    x, y = xy[rdkit_idx]
+                    x_pixel = x * scale + offset_x
+                    y_pixel = -y * scale + offset_y
+                    ax.annotate(
+                        f"B:{universe_idx}",
+                        xy=(x_pixel, y_pixel),
+                        xytext=(8, 8),
+                        textcoords='offset points',
+                        fontsize=12,
+                        fontweight='bold',
+                        color='darkgreen',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.8, edgecolor='darkgreen', linewidth=1.5),
+                        arrowprops=dict(arrowstyle='->', color='darkgreen', lw=1.5, connectionstyle='arc3,rad=0.1')
+                    )
+            for rdkit_idx, universe_idx in zip(methyl_atoms, mda_methyl_indices):
+                if rdkit_idx < len(xy):
+                    x, y = xy[rdkit_idx]
+                    x_pixel = x * scale + offset_x
+                    y_pixel = -y * scale + offset_y
+                    ax.annotate(
+                        f"M:{universe_idx}",
+                        xy=(x_pixel, y_pixel),
+                        xytext=(-8, -8),
+                        textcoords='offset points',
+                        fontsize=12,
+                        fontweight='bold',
+                        color='darkorange',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='moccasin', alpha=0.8, edgecolor='darkorange', linewidth=1.5),
+                        arrowprops=dict(arrowstyle='->', color='darkorange', lw=1.5, connectionstyle='arc3,rad=0.1')
+                    )
             # Set title
             title = f"Endpoints: {sel_str}"
             if n_residues > 1:

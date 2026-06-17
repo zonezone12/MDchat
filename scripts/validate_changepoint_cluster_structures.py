@@ -132,9 +132,9 @@ def _cluster_labels_fixed_k(
     dist_mat: np.ndarray,
     k: int,
     *,
-    method: str = "ward",
+    method: str = "average",
 ) -> np.ndarray:
-    """Hierarchical clustering with a fixed number of clusters."""
+    """Hierarchical clustering with a fixed number of clusters on a precomputed distance matrix."""
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import squareform
 
@@ -142,7 +142,8 @@ def _cluster_labels_fixed_k(
     if n < 2:
         return np.zeros(n, dtype=int)
     k_eff = max(1, min(k, n))
-    Z = linkage(squareform(dist_mat, checks=False), method=method)
+    linkage_method = "average" if method == "ward" else method
+    Z = linkage(squareform(dist_mat, checks=False), method=linkage_method)
     return (fcluster(Z, t=k_eff, criterion="maxclust") - 1).astype(int)
 
 

@@ -14,9 +14,11 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.utils.cluster_inspection import write_all_k_cluster_results, write_cluster_inspection
 from src.utils.metastable_states import (
     Segment,
     assign_cluster_labels,
+    build_feature_matrix,
     cluster_metastable_states,
     compute_pairwise_rmsd_matrix,
     format_cluster_summary,
@@ -28,9 +30,44 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Merge parallel segment outputs and cluster.")
     p.add_argument("--work-dir", required=True, help="Directory with *_segments.csv and *_positions.npz")
     p.add_argument("--output-dir", required=True, help="Final results directory")
-    p.add_argument("--linkage", default="ward")
+    p.add_argument(
+        "--linkage",
+        default="average",
+        help="SciPy linkage method for RMSD distance matrix (average, complete, or weighted)",
+    )
     p.add_argument("--rmsd-cutoff", type=float, default=None)
-    p.add_argument("--k-max", type=int, default=10)
+    p.add_argument(
+        "--n-clusters",
+        "--k",
+        type=int,
+        default=5,
+        dest="n_clusters",
+        help="Fixed number of clusters (default: 5)",
+    )
+    p.add_argument(
+        "--silhouette-k-max",
+        type=int,
+        default=10,
+        help="Upper k for silhouette curve",
+    )
+    p.add_argument("--all-k-min", type=int, default=2)
+    p.add_argument(
+        "--all-k-max",
+        type=int,
+        default=None,
+        help="Max k to save under inspection/by_k/ (default: --silhouette-k-max)",
+    )
+    p.add_argument(
+        "--no-save-all-k",
+        action="store_true",
+        help="Skip writing full inspection artifacts for every k",
+    )
+    p.add_argument(
+        "--auto-select-k",
+        action="store_true",
+        help="Legacy: pick k by highest silhouette",
+    )
+    p.add_argument("--k-max", type=int, default=10, help="Max k when --auto-select-k")
     return p.parse_args()
 
 
@@ -82,11 +119,17 @@ def main() -> None:
     segments, positions_list, leaf_labels = _load_segments(work_dir)
     positions = np.vstack(positions_list)
 
+    import copy
+
+    base_segments = [copy.copy(s) for s in segments]
+
     dist_mat = compute_pairwise_rmsd_matrix(positions)
     clustering = cluster_metastable_states(
         dist_mat,
         method=args.linkage,
+        n_clusters=args.n_clusters if args.rmsd_cutoff is None and not args.auto_select_k else None,
         rmsd_cutoff=args.rmsd_cutoff,
+        auto_select_k=args.auto_select_k,
         k_max=args.k_max,
     )
     assign_cluster_labels(segments, clustering)
@@ -124,8 +167,46 @@ def main() -> None:
     summary_path = out_dir / "cluster_summary.txt"
     summary_path.write_text(summary_text, encoding="utf-8")
 
+    feat_mat = build_feature_matrix(segments)
+    feat_names = ["rmsd_mean", "rg_mean", "log10_n_frames"]
+    insp_dir = out_dir / "inspection"
+    write_cluster_inspection(
+        insp_dir,
+        segments,
+        clustering.labels,
+        dist_mat,
+        clustering.linkage_matrix,
+        chosen_k=clustering.n_clusters,
+        feature_matrix=feat_mat,
+        feature_names=feat_names,
+        leaf_labels=leaf_labels,
+        silhouette_k_max=args.silhouette_k_max,
+    )
+
+    use_fixed_k = args.rmsd_cutoff is None and not args.auto_select_k
+    if not args.no_save_all_k and use_fixed_k:
+        all_k_max = (
+            args.all_k_max if args.all_k_max is not None else args.silhouette_k_max
+        )
+        write_all_k_cluster_results(
+            insp_dir,
+            base_segments,
+            dist_mat,
+            clustering.linkage_matrix,
+            k_min=args.all_k_min,
+            k_max=all_k_max,
+            chosen_k=args.n_clusters,
+            linkage_method=clustering.method,
+            feature_matrix=feat_mat,
+            feature_names=feat_names,
+            leaf_labels=leaf_labels,
+        )
+
     print(summary_text)
     print(f"\nWrote {seg_csv}, {dist_csv}, {dendro_path}, {summary_path}")
+    print(f"Wrote cluster inspection artifacts under {insp_dir}")
+    if not args.no_save_all_k and use_fixed_k:
+        print(f"Wrote all-k results under {insp_dir / 'by_k'}")
 
 
 if __name__ == "__main__":
