@@ -126,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--n-jobs",
         type=int,
-        default=1,
+        default=8,
         dest="n_jobs",
         help="Parallel TrajectoryIterator workers per trajectory",
     )
