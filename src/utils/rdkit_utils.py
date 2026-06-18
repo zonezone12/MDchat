@@ -482,6 +482,46 @@ def select_central_methyl_atoms(
     )[:n]
 
 
+def select_endpoint_type4_atoms(
+    endpoint_rdkit_indices: Sequence[int],
+    center_ring_rdkit_indices: Sequence[int],
+    *,
+    n: int,
+    exclude_center_benzene: bool = True,
+    positions: Optional[np.ndarray] = None,
+) -> List[int]:
+    """
+    Pick type-4 beads directly from EndpointsFinder output.
+
+    When *exclude_center_benzene* is True, atoms belonging to the central
+    benzene ring (already used for type-1 centroids) are removed first.
+    If more than *n* candidates remain, the farthest from the ring centroid
+    are kept (requires *positions*).
+    """
+    ring_set = set(center_ring_rdkit_indices)
+    candidates = sorted(set(endpoint_rdkit_indices))
+    if exclude_center_benzene:
+        candidates = [i for i in candidates if i not in ring_set]
+
+    if len(candidates) == n:
+        return candidates
+    if len(candidates) > n:
+        if positions is not None and len(center_ring_rdkit_indices) > 0:
+            center = positions[list(center_ring_rdkit_indices)].mean(axis=0)
+            candidates = sorted(
+                candidates,
+                key=lambda i: float(np.linalg.norm(positions[i] - center)),
+                reverse=True,
+            )[:n]
+            return sorted(candidates)
+        return candidates[:n]
+    raise ValueError(
+        f"Endpoint type-4 selection found {len(candidates)} atoms after "
+        f"filtering (exclude_center_benzene={exclude_center_benzene}); "
+        f"expected {n}. Raw endpoint count: {len(set(endpoint_rdkit_indices))}."
+    )
+
+
 class SubstructureCenterObserver(FrameObserver):
     """
     Observer for tracking ring/substructure centers and metrics over a trajectory.

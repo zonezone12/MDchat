@@ -34,6 +34,7 @@ from src.utils.gsa_selections import GSAFeatureSelections, resolve_selections
 from src.utils.rdkit_utils import (
     RingCenterCalculator,
     select_central_methyl_atoms,
+    select_endpoint_type4_atoms,
 )
 
 # Imamura paper defaults (6-monomer nanocube, 18 methyl beads).
@@ -71,13 +72,17 @@ class ImamuraBeadSpec:
     Bead definitions for Imamura distance features.
 
     Type-1 beads are the geometric centers of each monomer's central benzene ring
-    (one bead per monomer). Type-4 beads are methyl carbons at residue endpoints.
+    (one bead per monomer). Type-4 beads are methyl carbons or endpoint atoms
+    depending on :attr:`type4_source`.
     """
 
     type1_ring_groups: Optional[List[Tuple[int, ...]]] = None
     type4_atom_ids: Optional[Tuple[int, ...]] = None
     type1_selection: Optional[str] = None
     type4_selection: Optional[str] = None
+    type4_source: str = "methyl"
+    endpoint_extend_ring: bool = True
+    endpoint_exclude_center_benzene: bool = True
 
     @property
     def uses_ring_centroids(self) -> bool:
@@ -154,24 +159,55 @@ def bead_positions_from_spec(universe: Any, bead_spec: ImamuraBeadSpec) -> Tuple
     return type1, type4
 
 
+@dataclass
+class ImamuraBeadResolutionOptions:
+    """Auto-bead resolution knobs for RDKit + EndpointAnalyzer mode."""
+
+    type4_source: str = "methyl"
+    endpoint_extend_ring: bool = True
+    endpoint_exclude_center_benzene: bool = True
+    type4_per_monomer: int = 3
+
+
+def make_imamura_endpoints_finder(
+    *,
+    extend_to_ring_atoms: bool = True,
+) -> Any:
+    """Construct :class:`EndpointsFinder` for Imamura type-4 bead picking."""
+    from src.EndpointAnalyzer import EndpointsFinder
+
+    return EndpointsFinder(extend_to_ring_atoms=extend_to_ring_atoms)
+
+
 def resolve_monomer_imamura_beads(
     universe: Any,
     mon_sel: str,
     *,
     ring_calc: Optional[RingCenterCalculator] = None,
     endpoints_finder: Optional[Any] = None,
+    resolution: Optional[ImamuraBeadResolutionOptions] = None,
     n_methyl_per_monomer: int = 3,
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """
     Per-monomer Imamura beads via RDKit substructure + endpoint analysis.
 
     Type-1 uses the geometric center of :meth:`RingCenterCalculator.find_center_benzene_ring`.
-    Type-4 uses bond-step methyl selection (:func:`select_central_methyl_atoms`).
-    """
-    from src.EndpointAnalyzer import EndpointAnalyzer, EndpointsFinder
 
+    Type-4 source (``resolution.type4_source``):
+
+    * ``methyl`` — bond-step methyl selection (:func:`select_central_methyl_atoms`)
+    * ``endpoint`` — raw :class:`EndpointsFinder` output (optionally excluding
+      the central benzene ring when ``endpoint_exclude_center_benzene`` is True)
+    """
+    from src.EndpointAnalyzer import EndpointAnalyzer
+
+    opts = resolution or ImamuraBeadResolutionOptions(type4_per_monomer=n_methyl_per_monomer)
+    n_type4 = opts.type4_per_monomer
     ring_calc = ring_calc or RingCenterCalculator()
-    endpoints_finder = endpoints_finder or EndpointsFinder()
+    if endpoints_finder is None:
+        endpoints_finder = make_imamura_endpoints_finder(
+            extend_to_ring_atoms=opts.endpoint_extend_ring,
+        )
 
     sel = universe.select_atoms(mon_sel)
     if len(sel) == 0:
@@ -192,24 +228,36 @@ def resolve_monomer_imamura_beads(
     )
     rdkit_for_mda = {int(sel.atoms[i].id): i for i in range(len(sel))}
     ep_rdkit = [rdkit_for_mda[mid] for mid in ep_mda_ids if mid in rdkit_for_mda]
-    methyl_rdkit = select_central_methyl_atoms(
-        mol,
-        sel.positions,
-        n_methyl_per_monomer,
-        center_ring_rdkit_indices=center_ring.rdkit_indices,
-        ring_calculator=ring_calc,
-        endpoint_rdkit_indices=ep_rdkit,
-    )
 
-    if len(methyl_rdkit) != n_methyl_per_monomer:
+    if opts.type4_source == "methyl":
+        type4_rdkit = select_central_methyl_atoms(
+            mol,
+            sel.positions,
+            n_type4,
+            center_ring_rdkit_indices=center_ring.rdkit_indices,
+            ring_calculator=ring_calc,
+            endpoint_rdkit_indices=ep_rdkit,
+        )
+        if len(type4_rdkit) != n_type4:
+            raise ValueError(
+                f"Monomer '{mon_sel}': methyl selection yielded "
+                f"{len(type4_rdkit)} atoms; expected {n_type4}."
+            )
+    elif opts.type4_source == "endpoint":
+        type4_rdkit = select_endpoint_type4_atoms(
+            ep_rdkit,
+            center_ring.rdkit_indices,
+            n=n_type4,
+            exclude_center_benzene=opts.endpoint_exclude_center_benzene,
+            positions=sel.positions,
+        )
+    else:
         raise ValueError(
-            f"Monomer '{mon_sel}': bond-step methyl selection yielded "
-            f"{len(methyl_rdkit)} atoms; expected {n_methyl_per_monomer}. "
-            "Pass --type4-selection explicitly if topology differs."
+            f"Unknown type4_source {opts.type4_source!r}; use 'methyl' or 'endpoint'"
         )
 
-    methyl_mda_ids = tuple(int(sel[i].id) for i in methyl_rdkit)
-    return ring_mda_ids, methyl_mda_ids
+    type4_mda_ids = tuple(int(sel[i].id) for i in type4_rdkit)
+    return ring_mda_ids, type4_mda_ids
 
 
 def resolve_imamura_bead_spec(
@@ -223,19 +271,24 @@ def resolve_imamura_bead_spec(
     bead_mode: str = "rdkit",
     type1_atom_name: str = "B1",
     type4_atom_name: str = "B4",
+    resolution: Optional[ImamuraBeadResolutionOptions] = None,
 ) -> ImamuraBeadSpec:
     """
     Build :class:`ImamuraBeadSpec` for type-1 and type-4 Imamura beads.
 
     Default ``bead_mode='rdkit'`` uses central benzene ring centroids (type-1)
-    and methyl-filtered endpoints (type-4). ``bead_mode='cg'`` uses CG bead
-    names per monomer.
+    and type-4 beads from ``resolution`` (methyl-filtered or raw endpoints).
+    ``bead_mode='cg'`` uses CG bead names per monomer.
     """
     if explicit_type1 and explicit_type4:
         return ImamuraBeadSpec(
             type1_selection=explicit_type1,
             type4_selection=explicit_type4,
         )
+
+    opts = resolution or ImamuraBeadResolutionOptions(
+        type4_per_monomer=n_methyl_per_monomer,
+    )
 
     sel = resolve_selections(
         universe,
@@ -258,10 +311,10 @@ def resolve_imamura_bead_spec(
                     f"(name {type1_atom_name}); expected 1."
                 )
             type1_ids.append(str(t1[0].index))
-            if len(t4) != n_methyl_per_monomer:
+            if len(t4) != opts.type4_per_monomer:
                 raise ValueError(
                     f"Monomer '{mon_sel}' has {len(t4)} type-4 atoms "
-                    f"(name {type4_atom_name}); expected {n_methyl_per_monomer}."
+                    f"(name {type4_atom_name}); expected {opts.type4_per_monomer}."
                 )
             type4_ids.extend(str(a.index) for a in t4)
         return ImamuraBeadSpec(
@@ -272,27 +325,31 @@ def resolve_imamura_bead_spec(
     if bead_mode != "rdkit":
         raise ValueError(f"Unknown bead_mode {bead_mode!r}; use 'rdkit' or 'cg'")
 
-    from src.EndpointAnalyzer import EndpointsFinder
-
     ring_calc = RingCenterCalculator()
-    ep_finder = EndpointsFinder()
+    ep_finder = make_imamura_endpoints_finder(
+        extend_to_ring_atoms=opts.endpoint_extend_ring,
+    )
     type1_groups: List[Tuple[int, ...]] = []
     type4_ids: List[int] = []
 
     for mon_sel in monomer_sels:
-        ring_ids, methyl_ids = resolve_monomer_imamura_beads(
+        ring_ids, type4_monomer_ids = resolve_monomer_imamura_beads(
             universe,
             mon_sel,
             ring_calc=ring_calc,
             endpoints_finder=ep_finder,
+            resolution=opts,
             n_methyl_per_monomer=n_methyl_per_monomer,
         )
         type1_groups.append(ring_ids)
-        type4_ids.extend(methyl_ids)
+        type4_ids.extend(type4_monomer_ids)
 
     return ImamuraBeadSpec(
         type1_ring_groups=type1_groups,
         type4_atom_ids=tuple(type4_ids),
+        type4_source=opts.type4_source,
+        endpoint_extend_ring=opts.endpoint_extend_ring,
+        endpoint_exclude_center_benzene=opts.endpoint_exclude_center_benzene,
     )
 
 
@@ -323,6 +380,9 @@ def write_imamura_bead_spec(
             "mode": "ring_centroids",
             "type1_ring_groups": [list(g) for g in bead_spec.type1_ring_groups or []],
             "type4_atom_ids": list(bead_spec.type4_atom_ids or ()),
+            "type4_source": bead_spec.type4_source,
+            "endpoint_extend_ring": bead_spec.endpoint_extend_ring,
+            "endpoint_exclude_center_benzene": bead_spec.endpoint_exclude_center_benzene,
         }
     else:
         payload = {
@@ -470,7 +530,7 @@ def plot_imamura_bead_spec(
     output_path: Union[str, Path],
     *,
     dpi: int = 150,
-    title: str = "Imamura auto-beads (green=type-1 benzene, orange=type-4 methyl)",
+    title: Optional[str] = None,
 ) -> Path:
     """
     Save a multi-panel PNG of resolved Imamura type-1 and type-4 beads per monomer.
@@ -480,6 +540,12 @@ def plot_imamura_bead_spec(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    type4_kind = "methyl" if bead_spec.type4_source == "methyl" else "endpoint"
+    if title is None:
+        title = (
+            f"Imamura auto-beads (green=type-1 benzene, orange=type-4 {type4_kind})"
+        )
 
     n = len(monomer_selections)
     if n == 0:
@@ -511,7 +577,11 @@ def plot_imamura_bead_spec(
 
     legend_handles = [
         Patch(facecolor=(0.0, 0.7, 0.0), edgecolor="darkgreen", label="Type-1 (central benzene)"),
-        Patch(facecolor=(1.0, 0.5, 0.0), edgecolor="darkorange", label="Type-4 (methyl)"),
+        Patch(
+            facecolor=(1.0, 0.5, 0.0),
+            edgecolor="darkorange",
+            label=f"Type-4 ({type4_kind})",
+        ),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2, fontsize=10)
     fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
@@ -1094,6 +1164,104 @@ def plot_macrostate_dendrogram(
     return output_path
 
 
+def microstate_pca_centroids(labeled_df: "Any") -> "Any":
+    """Per-microcluster mean PC coordinates, macro label, and frame count."""
+    import pandas as pd
+
+    required = {"micro_label", "macro_label", "PC1", "PC2"}
+    missing = required - set(labeled_df.columns)
+    if missing:
+        raise ValueError(f"labeled_df missing columns: {sorted(missing)}")
+
+    pc_cols = [c for c in labeled_df.columns if c.startswith("PC")]
+    agg: Dict[str, tuple] = {
+        "macro_label": ("macro_label", "first"),
+        "n_frames": ("micro_label", "size"),
+    }
+    for col in pc_cols:
+        agg[col] = (col, "mean")
+
+    return (
+        labeled_df.groupby("micro_label", as_index=False)
+        .agg(**agg)
+        .sort_values("micro_label")
+        .reset_index(drop=True)
+    )
+
+
+def plot_imamura_pca_microstates(
+    labeled_df: "Any",
+    output_path: Union[str, Path],
+    *,
+    explained_variance_ratio: Optional[np.ndarray] = None,
+    pc_x: str = "PC1",
+    pc_y: str = "PC2",
+    title: str = "Imamura microclusters in PCA space",
+    annotate: bool = False,
+) -> Path:
+    """
+    Scatter PC1 vs PC2 for microcluster centroids, colored by macrostate label.
+
+    Each point is the mean PCA coordinate of one MiniBatchKMeans microcluster;
+    color encodes the Ward-merged macrostate.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    centroids = microstate_pca_centroids(labeled_df)
+    if centroids.empty:
+        raise ValueError("No microcluster centroids to plot.")
+
+    n_macro = int(centroids["macro_label"].max()) + 1
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    sizes = np.clip(centroids["n_frames"].to_numpy(dtype=float), 1.0, None)
+    size_pts = 20.0 + 180.0 * (sizes / sizes.max())
+
+    scatter = ax.scatter(
+        centroids[pc_x],
+        centroids[pc_y],
+        c=centroids["macro_label"],
+        s=size_pts,
+        cmap="tab20" if n_macro <= 20 else "nipy_spectral",
+        vmin=0,
+        vmax=max(n_macro - 1, 1),
+        alpha=0.85,
+        edgecolors="0.25",
+        linewidths=0.4,
+    )
+
+    if annotate:
+        for _, row in centroids.iterrows():
+            ax.annotate(
+                str(int(row["micro_label"])),
+                (row[pc_x], row[pc_y]),
+                fontsize=6,
+                ha="center",
+                va="center",
+                color="0.15",
+            )
+
+    xlabel, ylabel = pc_x, pc_y
+    if explained_variance_ratio is not None and len(explained_variance_ratio) >= 2:
+        xlabel = f"{pc_x} ({explained_variance_ratio[0]:.1%} var.)"
+        ylabel = f"{pc_y} ({explained_variance_ratio[1]:.1%} var.)"
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Macrostate label")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def write_imamura_artifacts(
     output_dir: Union[str, Path],
     feature_result: ImamuraFeatureResult,
@@ -1148,6 +1316,23 @@ def write_imamura_artifacts(
     micro_macro.to_csv(mm_path, index=False)
     written["micro_to_macro"] = mm_path
 
+    n_states = cfg.n_macrostates
+    micro_pca = microstate_pca_centroids(labeled)
+    micro_pca_path = output_dir / "micro_pca_centroids.csv"
+    micro_pca.to_csv(micro_pca_path, index=False)
+    written["micro_pca_centroids"] = micro_pca_path
+
+    pca_micro = plot_imamura_pca_microstates(
+        labeled,
+        output_dir / "pca_microstates.png",
+        explained_variance_ratio=clustering.explained_variance_ratio,
+        title=(
+            f"Imamura microclusters (PC1 vs PC2, "
+            f"{len(micro_pca)} micros → {cfg.n_macrostates} macrostates)"
+        ),
+    )
+    written["pca_microstates"] = pca_micro
+
     trans = transitions.long_df.rename(
         columns={"from_state": "from_cluster", "to_state": "to_cluster"}
     )
@@ -1163,7 +1348,6 @@ def write_imamura_artifacts(
     transitions.prob_df.to_csv(p_path)
     written["transition_prob"] = p_path
 
-    n_states = cfg.n_macrostates
     heat = plot_transition_heatmap(
         trans,
         n_states,

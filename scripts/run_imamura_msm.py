@@ -25,6 +25,12 @@ python scripts/run_imamura_msm.py \\
     --auto-beads --gsa-resname MOL \\
     --format TRJ \\
     --output-dir output/imamura_msm
+
+Use raw endpoint atoms instead of methyl filtering:
+python scripts/run_imamura_msm.py ... --auto-beads --type4-source endpoint
+
+Exclude benzene ring expansion when finding endpoints:
+python scripts/run_imamura_msm.py ... --auto-beads --no-endpoint-extend-ring
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from src.utils.imamura_msm import (
     DEFAULT_N_TYPE4_BEADS,
     DEFAULT_PCA_COMPONENTS,
     DEFAULT_TRANSITION_LAG_NS,
+    ImamuraBeadResolutionOptions,
     ImamuraMSMConfig,
     cluster_imamura_features,
     count_lagged_transitions,
@@ -145,8 +152,42 @@ def parse_args() -> argparse.Namespace:
     bead.add_argument(
         "--auto-beads",
         action="store_true",
-        help="Derive type-1 (central benzene centroid) and type-4 (methyl "
-        "endpoints) from RDKit substructure + EndpointAnalyzer",
+        help="Derive type-1 (central benzene centroid) and type-4 beads from "
+        "RDKit substructure + EndpointAnalyzer",
+    )
+    bead.add_argument(
+        "--type4-source",
+        choices=["methyl", "endpoint"],
+        default="methyl",
+        help="Type-4 bead source when --auto-beads: methyl (bond-step filter) "
+        "or endpoint (raw EndpointsFinder output)",
+    )
+    bead.add_argument(
+        "--endpoint-extend-ring",
+        dest="endpoint_extend_ring",
+        action="store_true",
+        default=True,
+        help="Extend EndpointsFinder hits to full substituent rings (default)",
+    )
+    bead.add_argument(
+        "--no-endpoint-extend-ring",
+        dest="endpoint_extend_ring",
+        action="store_false",
+        help="Use hull endpoints only (do not expand to ring atoms)",
+    )
+    bead.add_argument(
+        "--endpoint-exclude-center-benzene",
+        dest="endpoint_exclude_center_benzene",
+        action="store_true",
+        default=True,
+        help="When --type4-source endpoint, drop central benzene ring atoms "
+        "already used for type-1 (default)",
+    )
+    bead.add_argument(
+        "--no-endpoint-exclude-center-benzene",
+        dest="endpoint_exclude_center_benzene",
+        action="store_false",
+        help="Keep central benzene ring atoms in endpoint type-4 selection",
     )
     bead.add_argument(
         "--bead-mode",
@@ -249,6 +290,15 @@ def _build_config(args: argparse.Namespace) -> ImamuraMSMConfig:
     )
 
 
+def _bead_resolution_options(args: argparse.Namespace) -> ImamuraBeadResolutionOptions:
+    return ImamuraBeadResolutionOptions(
+        type4_source=args.type4_source,
+        endpoint_extend_ring=args.endpoint_extend_ring,
+        endpoint_exclude_center_benzene=args.endpoint_exclude_center_benzene,
+        type4_per_monomer=args.methyl_per_monomer,
+    )
+
+
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.output_dir)
@@ -284,6 +334,7 @@ def main() -> None:
             auto_tooth=False,
         )
         monomer_sels = resolved.monomer_selections
+        bead_resolution = _bead_resolution_options(args)
 
         if args.auto_beads or not (args.type1_selection and args.type4_selection):
             with step("resolve_bead_selections"):
@@ -297,6 +348,7 @@ def main() -> None:
                     bead_mode=args.bead_mode,
                     type1_atom_name=args.type1_atom_name,
                     type4_atom_name=args.type4_atom_name,
+                    resolution=bead_resolution,
                 )
                 bead_spec.validate(
                     n_type1=args.n_type1_beads,
@@ -312,13 +364,25 @@ def main() -> None:
                 )
                 print(f"  Wrote {bead_plot}")
                 if bead_spec.uses_ring_centroids:
+                    type4_desc = (
+                        "methyl atoms"
+                        if bead_spec.type4_source == "methyl"
+                        else "endpoint atoms"
+                    )
                     print(
                         f"  type-1: {len(bead_spec.type1_ring_groups or [])} benzene "
                         "ring centroids"
                     )
                     print(
-                        f"  type-4: {len(bead_spec.type4_atom_ids or ())} methyl atoms"
+                        f"  type-4 ({bead_spec.type4_source}): "
+                        f"{len(bead_spec.type4_atom_ids or ())} {type4_desc}"
                     )
+                    if bead_spec.type4_source == "endpoint":
+                        print(
+                            f"  endpoint_extend_ring={bead_spec.endpoint_extend_ring}, "
+                            f"exclude_center_benzene="
+                            f"{bead_spec.endpoint_exclude_center_benzene}"
+                        )
                 else:
                     print(f"  type-1: {bead_spec.type1_selection}")
                     print(f"  type-4: {bead_spec.type4_selection}")
@@ -394,6 +458,7 @@ def main() -> None:
                     bead_mode=args.bead_mode,
                     type1_atom_name=args.type1_atom_name,
                     type4_atom_name=args.type4_atom_name,
+                    resolution=bead_resolution,
                 )
                 feature_result.bead_spec = bead_spec
         else:
