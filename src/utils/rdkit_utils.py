@@ -482,6 +482,83 @@ def select_central_methyl_atoms(
     )[:n]
 
 
+def select_type4_by_centroid_distance(
+    candidate_rdkit_indices: Sequence[int],
+    center_ring_rdkit_indices: Sequence[int],
+    positions: np.ndarray,
+    n: int,
+    *,
+    farthest: bool = True,
+) -> List[int]:
+    """
+    Keep *n* candidates ranked by 3D distance to the central benzene centroid.
+
+    By default the farthest atoms are kept (outer substituents in the assembled cube).
+    """
+    candidates = sorted(set(candidate_rdkit_indices))
+    if len(candidates) < n:
+        raise ValueError(
+            f"Centroid type-4 selection found {len(candidates)} candidates; expected {n}."
+        )
+    if len(candidates) == n:
+        return candidates
+
+    center = positions[list(center_ring_rdkit_indices)].mean(axis=0)
+    ranked = sorted(
+        candidates,
+        key=lambda i: float(np.linalg.norm(positions[i] - center)),
+        reverse=farthest,
+    )
+    return sorted(ranked[:n])
+
+
+def select_type4_by_bond_distance(
+    mol: Chem.Mol,
+    candidate_rdkit_indices: Sequence[int],
+    center_ring_rdkit_indices: Sequence[int],
+    positions: np.ndarray,
+    n: int,
+    *,
+    outermost: bool = True,
+    ring_calculator: Optional[RingCenterCalculator] = None,
+) -> List[int]:
+    """
+    Keep *n* candidates ranked by bond-graph distance from the central benzene.
+
+    *outermost=True* keeps atoms at the maximum bond-step (hull-style endpoints).
+    *outermost=False* keeps atoms at the minimum bond-step (nearest substituent methyls).
+    Ties break by 3D distance to the ring centroid.
+    """
+    candidates = sorted(set(candidate_rdkit_indices))
+    if len(candidates) < n:
+        raise ValueError(
+            f"Bond-step type-4 selection found {len(candidates)} candidates; expected {n}."
+        )
+    if len(candidates) == n:
+        return candidates
+
+    steps = bond_steps_from_atoms(mol, center_ring_rdkit_indices)
+    reachable = [i for i in candidates if steps[i] >= 0]
+    if not reachable:
+        raise ValueError("No type-4 candidates reachable from the central benzene ring.")
+
+    step_values = [steps[i] for i in reachable]
+    target_step = max(step_values) if outermost else min(step_values)
+    at_target = [i for i in reachable if steps[i] == target_step]
+    if len(at_target) <= n:
+        return sorted(at_target)
+
+    calc = ring_calculator or RingCenterCalculator()
+    ring_center = calc.calculate_substructure_center(
+        positions, tuple(center_ring_rdkit_indices)
+    )
+    return sorted(
+        at_target,
+        key=lambda i: float(np.linalg.norm(positions[i] - ring_center)),
+        reverse=True,
+    )[:n]
+
+
 def select_endpoint_type4_atoms(
     endpoint_rdkit_indices: Sequence[int],
     center_ring_rdkit_indices: Sequence[int],
@@ -503,22 +580,22 @@ def select_endpoint_type4_atoms(
     if exclude_center_benzene:
         candidates = [i for i in candidates if i not in ring_set]
 
-    if len(candidates) == n:
-        return candidates
-    if len(candidates) > n:
-        if positions is not None and len(center_ring_rdkit_indices) > 0:
-            center = positions[list(center_ring_rdkit_indices)].mean(axis=0)
-            candidates = sorted(
-                candidates,
-                key=lambda i: float(np.linalg.norm(positions[i] - center)),
-                reverse=True,
-            )[:n]
-            return sorted(candidates)
-        return candidates[:n]
-    raise ValueError(
-        f"Endpoint type-4 selection found {len(candidates)} atoms after "
-        f"filtering (exclude_center_benzene={exclude_center_benzene}); "
-        f"expected {n}. Raw endpoint count: {len(set(endpoint_rdkit_indices))}."
+    if positions is None:
+        if len(candidates) == n:
+            return candidates
+        if len(candidates) > n:
+            return candidates[:n]
+        raise ValueError(
+            f"Endpoint type-4 selection found {len(candidates)} atoms after "
+            f"filtering (exclude_center_benzene={exclude_center_benzene}); "
+            f"expected {n}. Raw endpoint count: {len(set(endpoint_rdkit_indices))}."
+        )
+
+    return select_type4_by_centroid_distance(
+        candidates,
+        center_ring_rdkit_indices,
+        positions,
+        n,
     )
 
 

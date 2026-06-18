@@ -54,6 +54,7 @@ from src.utils.imamura_msm import (
     DEFAULT_PCA_COMPONENTS,
     DEFAULT_TRANSITION_LAG_NS,
     ImamuraBeadResolutionOptions,
+    ImamuraBeadSpec,
     ImamuraMSMConfig,
     cluster_imamura_features,
     count_lagged_transitions,
@@ -159,8 +160,16 @@ def parse_args() -> argparse.Namespace:
         "--type4-source",
         choices=["methyl", "endpoint"],
         default="methyl",
-        help="Type-4 bead source when --auto-beads: methyl (bond-step filter) "
+        help="Type-4 bead source when --auto-beads: methyl (CH3 filter) "
         "or endpoint (raw EndpointsFinder output)",
+    )
+    bead.add_argument(
+        "--type4-rank",
+        choices=["bond", "centroid3d"],
+        default="bond",
+        help="How to pick type4_per_monomer beads from candidates: bond (graph "
+        "distance from central benzene; default) or centroid3d (3D distance "
+        "from central ring centroid, farthest kept)",
     )
     bead.add_argument(
         "--endpoint-extend-ring",
@@ -198,10 +207,19 @@ def parse_args() -> argparse.Namespace:
     bead.add_argument("--gsa-resname", default="MOL", help="GSA residue name for --auto-beads")
     bead.add_argument("--n-monomers", type=int, default=6)
     bead.add_argument(
+        "--type4-per-monomer",
+        type=int,
+        default=None,
+        dest="type4_per_monomer",
+        help="Cap type-4 beads per monomer for methyl source (default 3). "
+        "For endpoint source all filtered endpoints are kept unless this is set.",
+    )
+    bead.add_argument(
         "--methyl-per-monomer",
         type=int,
-        default=3,
-        help="Expected methyl (type-4) beads per monomer (default 3)",
+        default=None,
+        dest="type4_per_monomer",
+        help=argparse.SUPPRESS,
     )
     bead.add_argument(
         "--type1-atom-name",
@@ -293,10 +311,24 @@ def _build_config(args: argparse.Namespace) -> ImamuraMSMConfig:
 def _bead_resolution_options(args: argparse.Namespace) -> ImamuraBeadResolutionOptions:
     return ImamuraBeadResolutionOptions(
         type4_source=args.type4_source,
+        type4_rank=args.type4_rank,
         endpoint_extend_ring=args.endpoint_extend_ring,
         endpoint_exclude_center_benzene=args.endpoint_exclude_center_benzene,
-        type4_per_monomer=args.methyl_per_monomer,
+        type4_per_monomer=args.type4_per_monomer,
     )
+
+
+def _sync_resolved_type4_bead_count(
+    config: ImamuraMSMConfig,
+    bead_spec: ImamuraBeadSpec,
+) -> None:
+    """Match feature dimensions to auto-resolved type-4 bead count."""
+    if not bead_spec.uses_ring_centroids:
+        return
+    resolved = len(bead_spec.type4_atom_ids or ())
+    if resolved and resolved != config.n_type4_beads:
+        print(f"  n_type4_beads: {config.n_type4_beads} -> {resolved}")
+        config.n_type4_beads = resolved
 
 
 def main() -> None:
@@ -344,15 +376,15 @@ def main() -> None:
                     explicit_type4=args.type4_selection,
                     gsa_resname=args.gsa_resname,
                     n_monomers=args.n_monomers,
-                    n_methyl_per_monomer=args.methyl_per_monomer,
                     bead_mode=args.bead_mode,
                     type1_atom_name=args.type1_atom_name,
                     type4_atom_name=args.type4_atom_name,
                     resolution=bead_resolution,
                 )
+                _sync_resolved_type4_bead_count(config, bead_spec)
                 bead_spec.validate(
-                    n_type1=args.n_type1_beads,
-                    n_type4=args.n_type4_beads,
+                    n_type1=config.n_type1_beads,
+                    n_type4=config.n_type4_beads,
                 )
                 bead_path = write_imamura_bead_spec(bead_spec, out_dir / "bead_spec.json")
                 print(f"  Wrote {bead_path}")
@@ -374,15 +406,14 @@ def main() -> None:
                         "ring centroids"
                     )
                     print(
-                        f"  type-4 ({bead_spec.type4_source}): "
+                        f"  type-4 ({bead_spec.type4_source}, rank={bead_spec.type4_rank}): "
                         f"{len(bead_spec.type4_atom_ids or ())} {type4_desc}"
                     )
-                    if bead_spec.type4_source == "endpoint":
-                        print(
-                            f"  endpoint_extend_ring={bead_spec.endpoint_extend_ring}, "
-                            f"exclude_center_benzene="
-                            f"{bead_spec.endpoint_exclude_center_benzene}"
-                        )
+                    print(
+                        f"  endpoint_extend_ring={bead_spec.endpoint_extend_ring}, "
+                        f"exclude_center_benzene="
+                        f"{bead_spec.endpoint_exclude_center_benzene}"
+                    )
                 else:
                     print(f"  type-1: {bead_spec.type1_selection}")
                     print(f"  type-4: {bead_spec.type4_selection}")
@@ -454,12 +485,12 @@ def main() -> None:
                     explicit_type4=args.type4_selection,
                     gsa_resname=args.gsa_resname,
                     n_monomers=args.n_monomers,
-                    n_methyl_per_monomer=args.methyl_per_monomer,
                     bead_mode=args.bead_mode,
                     type1_atom_name=args.type1_atom_name,
                     type4_atom_name=args.type4_atom_name,
                     resolution=bead_resolution,
                 )
+                _sync_resolved_type4_bead_count(config, bead_spec)
                 feature_result.bead_spec = bead_spec
         else:
             with step("extract_imamura_features"):

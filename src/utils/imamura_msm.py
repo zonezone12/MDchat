@@ -33,8 +33,10 @@ from src.utils.cluster_inspection import (
 from src.utils.gsa_selections import GSAFeatureSelections, resolve_selections
 from src.utils.rdkit_utils import (
     RingCenterCalculator,
-    select_central_methyl_atoms,
-    select_endpoint_type4_atoms,
+    all_methyl_atom_indices,
+    filter_endpoints_to_methyl_atoms,
+    select_type4_by_bond_distance,
+    select_type4_by_centroid_distance,
 )
 
 # Imamura paper defaults (6-monomer nanocube, 18 methyl beads).
@@ -83,6 +85,7 @@ class ImamuraBeadSpec:
     type4_source: str = "methyl"
     endpoint_extend_ring: bool = True
     endpoint_exclude_center_benzene: bool = True
+    type4_rank: str = "bond"
 
     @property
     def uses_ring_centroids(self) -> bool:
@@ -166,7 +169,20 @@ class ImamuraBeadResolutionOptions:
     type4_source: str = "methyl"
     endpoint_extend_ring: bool = True
     endpoint_exclude_center_benzene: bool = True
-    type4_per_monomer: int = 3
+    type4_rank: str = "bond"
+    type4_per_monomer: Optional[int] = None
+
+    def effective_type4_per_monomer(self) -> Optional[int]:
+        """
+        Per-monomer type-4 bead cap.
+
+        * ``methyl`` — default 3 when unset.
+        * ``endpoint`` — ``None`` keeps all endpoint candidates; an explicit
+          positive integer trims with ``type4_rank``.
+        """
+        if self.type4_source == "endpoint":
+            return self.type4_per_monomer
+        return self.type4_per_monomer if self.type4_per_monomer is not None else 3
 
 
 def make_imamura_endpoints_finder(
@@ -179,6 +195,29 @@ def make_imamura_endpoints_finder(
     return EndpointsFinder(extend_to_ring_atoms=extend_to_ring_atoms)
 
 
+def _type4_methyl_candidates(
+    mol: Any,
+    endpoint_rdkit_indices: Sequence[int],
+    *,
+    ring_calculator: RingCenterCalculator,
+) -> List[int]:
+    """Methyl carbons linked to endpoints (fallback: all ``[CH3]`` in the monomer)."""
+    candidates = filter_endpoints_to_methyl_atoms(
+        mol, endpoint_rdkit_indices, ring_calculator=ring_calculator
+    )
+    if candidates:
+        return candidates
+    return all_methyl_atom_indices(mol, ring_calculator=ring_calculator)
+
+
+def _exclude_center_ring_atoms(
+    candidates: Sequence[int],
+    center_ring_rdkit_indices: Sequence[int],
+) -> List[int]:
+    ring_set = set(center_ring_rdkit_indices)
+    return [i for i in candidates if i not in ring_set]
+
+
 def resolve_monomer_imamura_beads(
     universe: Any,
     mon_sel: str,
@@ -186,7 +225,6 @@ def resolve_monomer_imamura_beads(
     ring_calc: Optional[RingCenterCalculator] = None,
     endpoints_finder: Optional[Any] = None,
     resolution: Optional[ImamuraBeadResolutionOptions] = None,
-    n_methyl_per_monomer: int = 3,
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """
     Per-monomer Imamura beads via RDKit substructure + endpoint analysis.
@@ -195,14 +233,21 @@ def resolve_monomer_imamura_beads(
 
     Type-4 source (``resolution.type4_source``):
 
-    * ``methyl`` — bond-step methyl selection (:func:`select_central_methyl_atoms`)
+    * ``methyl`` — methyl carbons from endpoint-linked ``[CH3]`` groups
     * ``endpoint`` — raw :class:`EndpointsFinder` output (optionally excluding
       the central benzene ring when ``endpoint_exclude_center_benzene`` is True)
+
+    Trim to ``effective_type4_per_monomer()`` beads when that value is set.
+    For ``endpoint`` source with no cap, **all** filtered endpoint atoms are kept.
+
+    * ``bond`` — bond-graph distance from central benzene (nearest for methyl,
+      outermost for endpoint)
+    * ``centroid3d`` — 3D distance from the central ring centroid (farthest kept)
     """
     from src.EndpointAnalyzer import EndpointAnalyzer
 
-    opts = resolution or ImamuraBeadResolutionOptions(type4_per_monomer=n_methyl_per_monomer)
-    n_type4 = opts.type4_per_monomer
+    opts = resolution or ImamuraBeadResolutionOptions()
+    n_type4 = opts.effective_type4_per_monomer()
     ring_calc = ring_calc or RingCenterCalculator()
     if endpoints_finder is None:
         endpoints_finder = make_imamura_endpoints_finder(
@@ -230,30 +275,52 @@ def resolve_monomer_imamura_beads(
     ep_rdkit = [rdkit_for_mda[mid] for mid in ep_mda_ids if mid in rdkit_for_mda]
 
     if opts.type4_source == "methyl":
-        type4_rdkit = select_central_methyl_atoms(
-            mol,
-            sel.positions,
-            n_type4,
-            center_ring_rdkit_indices=center_ring.rdkit_indices,
-            ring_calculator=ring_calc,
-            endpoint_rdkit_indices=ep_rdkit,
+        candidates = _type4_methyl_candidates(
+            mol, ep_rdkit, ring_calculator=ring_calc
         )
-        if len(type4_rdkit) != n_type4:
-            raise ValueError(
-                f"Monomer '{mon_sel}': methyl selection yielded "
-                f"{len(type4_rdkit)} atoms; expected {n_type4}."
-            )
     elif opts.type4_source == "endpoint":
-        type4_rdkit = select_endpoint_type4_atoms(
-            ep_rdkit,
-            center_ring.rdkit_indices,
-            n=n_type4,
-            exclude_center_benzene=opts.endpoint_exclude_center_benzene,
-            positions=sel.positions,
-        )
+        candidates = list(ep_rdkit)
     else:
         raise ValueError(
             f"Unknown type4_source {opts.type4_source!r}; use 'methyl' or 'endpoint'"
+        )
+
+    if opts.endpoint_exclude_center_benzene:
+        candidates = _exclude_center_ring_atoms(
+            candidates, center_ring.rdkit_indices
+        )
+
+    if not candidates:
+        raise ValueError(f"Monomer '{mon_sel}': no type-4 candidates after filtering.")
+
+    if n_type4 is None:
+        type4_rdkit = sorted(set(candidates))
+    elif opts.type4_rank == "centroid3d":
+        type4_rdkit = select_type4_by_centroid_distance(
+            candidates,
+            center_ring.rdkit_indices,
+            sel.positions,
+            n_type4,
+        )
+    elif opts.type4_rank == "bond":
+        type4_rdkit = select_type4_by_bond_distance(
+            mol,
+            candidates,
+            center_ring.rdkit_indices,
+            sel.positions,
+            n_type4,
+            outermost=opts.type4_source == "endpoint",
+            ring_calculator=ring_calc,
+        )
+    else:
+        raise ValueError(
+            f"Unknown type4_rank {opts.type4_rank!r}; use 'bond' or 'centroid3d'"
+        )
+
+    if n_type4 is not None and len(type4_rdkit) != n_type4:
+        raise ValueError(
+            f"Monomer '{mon_sel}': type-4 selection yielded "
+            f"{len(type4_rdkit)} atoms; expected {n_type4}."
         )
 
     type4_mda_ids = tuple(int(sel[i].id) for i in type4_rdkit)
@@ -267,7 +334,6 @@ def resolve_imamura_bead_spec(
     explicit_type4: Optional[str] = None,
     gsa_resname: str = "MOL",
     n_monomers: int = 6,
-    n_methyl_per_monomer: int = 3,
     bead_mode: str = "rdkit",
     type1_atom_name: str = "B1",
     type4_atom_name: str = "B4",
@@ -286,9 +352,8 @@ def resolve_imamura_bead_spec(
             type4_selection=explicit_type4,
         )
 
-    opts = resolution or ImamuraBeadResolutionOptions(
-        type4_per_monomer=n_methyl_per_monomer,
-    )
+    opts = resolution or ImamuraBeadResolutionOptions()
+    type4_limit = opts.effective_type4_per_monomer()
 
     sel = resolve_selections(
         universe,
@@ -311,10 +376,10 @@ def resolve_imamura_bead_spec(
                     f"(name {type1_atom_name}); expected 1."
                 )
             type1_ids.append(str(t1[0].index))
-            if len(t4) != opts.type4_per_monomer:
+            if type4_limit is not None and len(t4) != type4_limit:
                 raise ValueError(
                     f"Monomer '{mon_sel}' has {len(t4)} type-4 atoms "
-                    f"(name {type4_atom_name}); expected {opts.type4_per_monomer}."
+                    f"(name {type4_atom_name}); expected {type4_limit}."
                 )
             type4_ids.extend(str(a.index) for a in t4)
         return ImamuraBeadSpec(
@@ -339,7 +404,6 @@ def resolve_imamura_bead_spec(
             ring_calc=ring_calc,
             endpoints_finder=ep_finder,
             resolution=opts,
-            n_methyl_per_monomer=n_methyl_per_monomer,
         )
         type1_groups.append(ring_ids)
         type4_ids.extend(type4_monomer_ids)
@@ -350,6 +414,7 @@ def resolve_imamura_bead_spec(
         type4_source=opts.type4_source,
         endpoint_extend_ring=opts.endpoint_extend_ring,
         endpoint_exclude_center_benzene=opts.endpoint_exclude_center_benzene,
+        type4_rank=opts.type4_rank,
     )
 
 
@@ -383,6 +448,7 @@ def write_imamura_bead_spec(
             "type4_source": bead_spec.type4_source,
             "endpoint_extend_ring": bead_spec.endpoint_extend_ring,
             "endpoint_exclude_center_benzene": bead_spec.endpoint_exclude_center_benzene,
+            "type4_rank": bead_spec.type4_rank,
         }
     else:
         payload = {
@@ -450,15 +516,17 @@ def _draw_monomer_bead_panel(
     methyl_rdkit = [mda_to_rdkit[i] for i in methyl_mda_ids if i in mda_to_rdkit]
 
     highlight_colors: Dict[int, Tuple[float, float, float]] = {}
+    ring_set = set(ring_rdkit)
     for idx in ring_rdkit:
         highlight_colors[idx] = (0.0, 0.7, 0.0)
     for idx in methyl_rdkit:
-        highlight_colors[idx] = (1.0, 0.5, 0.0)
-    all_highlight = list(dict.fromkeys(ring_rdkit + methyl_rdkit))
+        if idx not in ring_set:
+            highlight_colors[idx] = (1.0, 0.5, 0.0)
+    all_highlight = list(highlight_colors.keys())
 
     img = None
     try:
-        from rdkit.Chem import rdMolDraw2D
+        from rdkit.Chem.Draw import rdMolDraw2D
         import io
 
         from PIL import Image
@@ -472,12 +540,31 @@ def _draw_monomer_bead_panel(
         drawer.FinishDrawing()
         img = Image.open(io.BytesIO(drawer.GetDrawingText()))
     except Exception:
+        # Fallback: single-color highlight (cannot distinguish T1 vs T4).
+        ring_only = [i for i in all_highlight if i in ring_rdkit]
+        t4_only = [i for i in all_highlight if i in methyl_rdkit and i not in ring_rdkit]
         img = Draw.MolToImage(
             m2d,
             size=(800, 600),
-            highlightAtoms=all_highlight,
-            highlightColor=(1.0, 0.5, 0.0),
+            highlightAtoms=ring_only or all_highlight,
+            highlightColor=(0.0, 0.7, 0.0),
         )
+        if t4_only:
+            from PIL import Image
+            import numpy as np
+
+            base = np.array(img.convert("RGBA"))
+            overlay = np.array(
+                Draw.MolToImage(
+                    m2d,
+                    size=(800, 600),
+                    highlightAtoms=t4_only,
+                    highlightColor=(1.0, 0.5, 0.0),
+                ).convert("RGBA")
+            )
+            mask = overlay[:, :, 3] > 0
+            base[mask] = overlay[mask]
+            img = Image.fromarray(base)
 
     ax.imshow(img, extent=[0, 800, 600, 0])
     ax.axis("off")
@@ -1148,13 +1235,11 @@ def plot_macrostate_dendrogram(
 
     fig, ax = plt.subplots(figsize=(10, 5))
     if linkage_matrix.size:
-        dendrogram(
-            linkage_matrix,
-            ax=ax,
-            truncate_mode="lastp" if linkage_matrix.shape[0] > n_labels else None,
-            p=n_labels if linkage_matrix.shape[0] > n_labels else None,
-            color_threshold=None,
-        )
+        dendro_kwargs: Dict[str, Any] = {"color_threshold": None}
+        if linkage_matrix.shape[0] > n_labels:
+            dendro_kwargs["truncate_mode"] = "lastp"
+            dendro_kwargs["p"] = n_labels
+        dendrogram(linkage_matrix, ax=ax, **dendro_kwargs)
     ax.set_title(title)
     ax.set_xlabel("Microcluster index")
     ax.set_ylabel("Ward distance")
