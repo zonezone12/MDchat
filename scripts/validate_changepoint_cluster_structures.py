@@ -9,12 +9,14 @@ distinct metastable states.
 Designed for HPC: point --topology and --trajectory-dir at cluster paths, run
 after uploading changepoint cluster CSVs from local analysis.
 
-Example (on HPC)
-----------------
+Example (on HPC, nested .bak layout)
+------------------------------------
 python scripts/validate_changepoint_cluster_structures.py \\
-    --clusters-dir output/changepoints/clusters \\
+    --clusters-dir output/changepoints/clusters/BMMpM/gsa/by_k/k_04/k_04 \\
     --topology /path/on/hpc/traj/BMMpM_ca.prmtop \\
-    --trajectory-dir /path/on/hpc/traj \\
+    --trajectory-dir /path/on/hpc/traj/BMMpM.bak \\
+    --trajectory-layout nested \\
+    --trajectory-filename mdcrd_v \\
     --selection "resname MOL" \\
     --groups gsa iodine na_water combined \\
     --output-dir output/changepoints/structure_validation
@@ -46,16 +48,85 @@ DEFAULT_GROUPS = ("gsa", "iodine", "na_water", "combined")
 _TRAJ_EXTENSIONS = (".trj", ".xtc", ".dcd", ".nc", ".crd")
 
 
-def _resolve_trajectory(trajectory_dir: Path, traj_id: str) -> Path:
+def _traj_folder_names(traj_id: str, traj_filename: str) -> list[str]:
+    """
+    Candidate per-trajectory subfolder names under --trajectory-dir.
+
+    For traj_id ``BMMpM_278943_mdcrd_v`` and filename ``mdcrd_v``, tries:
+    - ``BMMpM_278943_mdcrd_v`` (full id)
+    - ``BMMpM_278943`` (strip _mdcrd_v)
+    - ``278943`` (numeric variant folder, as in HPC .bak layout)
+    """
+    candidates = [traj_id]
+    suffix = f"_{traj_filename}"
+    if traj_id.endswith(suffix):
+        candidates.append(traj_id[: -len(suffix)])
+
+    parts = traj_id.split("_")
+    if len(parts) >= 3:
+        if parts[1].isdigit():
+            candidates.append(parts[1])
+        if len(parts) >= 4 and parts[2] == "re" and parts[1].isdigit():
+            candidates.append(f"{parts[1]}_re")
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in candidates:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _resolve_trajectory(
+    trajectory_dir: Path,
+    traj_id: str,
+    *,
+    layout: str = "nested",
+    traj_filename: str = "mdcrd_v",
+) -> Path:
     """Map traj_id to an on-disk trajectory file."""
-    for ext in _TRAJ_EXTENSIONS:
-        candidate = trajectory_dir / f"{traj_id}{ext}"
-        if candidate.is_file():
-            return candidate
+    tried: list[Path] = []
+
+    def _check(path: Path) -> Optional[Path]:
+        tried.append(path)
+        return path if path.is_file() else None
+
+    if layout in ("flat", "auto"):
+        for ext in _TRAJ_EXTENSIONS:
+            found = _check(trajectory_dir / f"{traj_id}{ext}")
+            if found:
+                return found
+
+    if layout in ("nested", "auto"):
+        for folder in _traj_folder_names(traj_id, traj_filename):
+            base = trajectory_dir / folder / traj_filename
+            found = _check(base)
+            if found:
+                return found
+            for ext in _TRAJ_EXTENSIONS:
+                found = _check(Path(f"{base}{ext}"))
+                if found:
+                    return found
+
+    tried_str = "\n  ".join(str(p) for p in tried)
     raise FileNotFoundError(
-        f"No trajectory for {traj_id!r} under {trajectory_dir} "
-        f"(tried {', '.join(_TRAJ_EXTENSIONS)})"
+        f"No trajectory for {traj_id!r} under {trajectory_dir}\n"
+        f"Tried:\n  {tried_str}"
     )
+
+
+def _load_universe(
+    topology: Path,
+    traj_path: Path,
+    traj_format: Optional[str],
+) -> "mda.Universe":
+    import MDAnalysis as mda
+
+    kwargs: dict = {}
+    if traj_format and traj_path.suffix == "":
+        kwargs["format"] = traj_format
+    return mda.Universe(str(topology), str(traj_path), **kwargs)
 
 
 def _segments_from_df(df: pd.DataFrame) -> list[Segment]:
@@ -88,10 +159,11 @@ def extract_positions_multi_trajectory(
     topology: Path,
     trajectory_dir: Path,
     selection: str,
+    trajectory_layout: str = "nested",
+    trajectory_filename: str = "mdcrd_v",
+    trajectory_format: Optional[str] = "TRJ",
 ) -> np.ndarray:
     """Extract rep-frame coordinates; one universe load per unique traj_id."""
-    import MDAnalysis as mda
-
     if not segments:
         raise ValueError("No segments to extract")
 
@@ -103,8 +175,13 @@ def extract_positions_multi_trajectory(
     positions = np.empty((len(segments), 0, 3), dtype=np.float64)
 
     for traj_id, indexed_segs in by_traj.items():
-        traj_path = _resolve_trajectory(trajectory_dir, traj_id)
-        u = mda.Universe(str(topology), str(traj_path))
+        traj_path = _resolve_trajectory(
+            trajectory_dir,
+            traj_id,
+            layout=trajectory_layout,
+            traj_filename=trajectory_filename,
+        )
+        u = _load_universe(topology, traj_path, trajectory_format)
         seg_list = [s for _, s in indexed_segs]
         pos, _ = extract_representative_positions(u, selection, seg_list)
 
@@ -274,6 +351,9 @@ def validate_group(
     output_dir: Path,
     linkage: str,
     max_segments: Optional[int],
+    trajectory_layout: str,
+    trajectory_filename: str,
+    trajectory_format: Optional[str],
 ) -> dict:
     """Run structural validation for one feature group."""
     seg_csv = clusters_dir / group / "segments_clustered.csv"
@@ -294,6 +374,9 @@ def validate_group(
         topology=topology,
         trajectory_dir=trajectory_dir,
         selection=selection,
+        trajectory_layout=trajectory_layout,
+        trajectory_filename=trajectory_filename,
+        trajectory_format=trajectory_format,
     )
     dist_mat = compute_pairwise_rmsd_matrix(positions)
 
@@ -431,7 +514,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trajectory-dir",
         required=True,
-        help="Directory containing {traj_id}.trj (or .xtc, .dcd, .nc)",
+        help="Base directory for trajectories (e.g. traj/BMMpM.bak for nested layout)",
+    )
+    parser.add_argument(
+        "--trajectory-layout",
+        default="nested",
+        choices=("nested", "flat", "auto"),
+        help="nested: {trajectory-dir}/{folder}/mdcrd_v; flat: {trajectory-dir}/{traj_id}.trj; "
+        "auto: try both (default: nested)",
+    )
+    parser.add_argument(
+        "--trajectory-filename",
+        default="mdcrd_v",
+        help="Trajectory basename inside each per-run subfolder (default: mdcrd_v)",
+    )
+    parser.add_argument(
+        "--trajectory-format",
+        default="TRJ",
+        help="MDAnalysis format for extensionless trajectories (default: TRJ; empty to auto-detect)",
     )
     parser.add_argument(
         "--selection",
@@ -479,6 +579,8 @@ def main() -> None:
         print(f"Trajectory directory not found: {trajectory_dir}", file=sys.stderr)
         sys.exit(1)
 
+    traj_format = args.trajectory_format.strip() or None
+
     with RunContext.from_namespace(args, name="validate_changepoint_cluster_structures"):
         summary_rows: list[dict] = []
         for group in args.groups:
@@ -493,6 +595,9 @@ def main() -> None:
                         output_dir=output_dir,
                         linkage=args.linkage,
                         max_segments=args.max_segments,
+                        trajectory_layout=args.trajectory_layout,
+                        trajectory_filename=args.trajectory_filename,
+                        trajectory_format=traj_format,
                     )
                     summary_rows.append(row)
                 except FileNotFoundError as exc:
