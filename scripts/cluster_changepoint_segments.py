@@ -26,10 +26,10 @@ sys.path.insert(0, str(ROOT))
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
 from src.utils.cluster_inspection import (
+    plot_pca_clusters,
+    plot_pca_clusters_by_k,
     state_transitions_from_dataframe,
     write_all_k_cluster_results,
     write_cluster_inspection,
@@ -122,6 +122,45 @@ def build_feature_matrix(
     return mat, feature_names
 
 
+def build_feature_matrix_from_segments_df(
+    df: pd.DataFrame,
+) -> tuple[np.ndarray, list[str]]:
+    """Rebuild the clustering feature matrix from a segments_clustered.csv slice."""
+    if "features_used" in df.columns and df["features_used"].notna().any():
+        feature_names = [
+            c for c in df["features_used"].iloc[0].split(";") if c
+        ]
+    else:
+        group = str(df["group"].iloc[0]) if "group" in df.columns else "gsa"
+        bases = _summary_feature_columns(group)
+        keep = [c for c in bases if c in df.columns and df[c].notna().any()]
+        feature_names = keep + ["log10_n_frames"]
+
+    cols: list[np.ndarray] = []
+    for name in feature_names:
+        if name == "log10_n_frames":
+            vals = np.log10(
+                np.maximum(df["n_frames"].to_numpy(dtype=np.float64), 1.0)
+            )
+        elif name in df.columns:
+            vals = df[name].to_numpy(dtype=np.float64)
+        else:
+            raise ValueError(f"Missing feature column {name!r} in segments table")
+        cols.append(vals)
+
+    mat = np.column_stack(cols) if cols else np.empty((len(df), 0))
+    if mat.size > 0:
+        for j in range(mat.shape[1]):
+            col_vals = mat[:, j]
+            finite = col_vals[np.isfinite(col_vals)]
+            fill = float(np.median(finite)) if len(finite) else 0.0
+            bad = ~np.isfinite(col_vals)
+            if bad.any():
+                mat[bad, j] = fill
+
+    return mat, feature_names
+
+
 def _segments_from_df(df: pd.DataFrame) -> list[Segment]:
     segments: list[Segment] = []
     for _, row in df.iterrows():
@@ -144,55 +183,6 @@ def _segments_from_df(df: pd.DataFrame) -> list[Segment]:
             )
         )
     return segments
-
-
-def plot_pca_clusters(
-    feature_matrix: np.ndarray,
-    labels: np.ndarray,
-    leaf_labels: list[str],
-    output_path: Path,
-    *,
-    title: str,
-) -> None:
-    """2D PCA scatter colored by cluster label."""
-    n = feature_matrix.shape[0]
-    if n < 3:
-        return
-
-    scaler = StandardScaler()
-    X = scaler.fit_transform(feature_matrix)
-    X = np.nan_to_num(X, nan=0.0)
-
-    n_comp = min(2, X.shape[1], n - 1)
-    pca = PCA(n_components=n_comp)
-    coords = pca.fit_transform(X)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    unique_labels = sorted(set(int(l) for l in labels))
-    cmap = plt.cm.tab10
-    for lab in unique_labels:
-        mask = labels == lab
-        ax.scatter(
-            coords[mask, 0],
-            coords[mask, 1] if n_comp > 1 else np.zeros(mask.sum()),
-            label=f"cluster {lab}",
-            alpha=0.7,
-            s=40,
-            c=[cmap(lab % 10)],
-        )
-
-    var = pca.explained_variance_ratio_
-    xlabel = f"PC1 ({var[0]:.1%} var)" if len(var) > 0 else "PC1"
-    ylabel = f"PC2 ({var[1]:.1%} var)" if len(var) > 1 else "PC2"
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(alpha=0.2)
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
 
 
 def cluster_one_group(
@@ -306,6 +296,7 @@ def cluster_one_group(
             feature_names=feature_names,
             leaf_labels=leaf_labels,
             group_label=group,
+            include_pca_by_k=not skip_pca,
         )
 
     log_event(
@@ -443,6 +434,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip PCA scatter plots",
     )
+    parser.add_argument(
+        "--pca-by-k-only",
+        action="store_true",
+        help="Only write pca_clusters.png under existing by_k/k_XX/ folders "
+        "(no re-clustering)",
+    )
     return parser.parse_args()
 
 
@@ -460,6 +457,42 @@ def main() -> None:
             f"Loaded {len(df)} segment rows from {changepoints_dir}",
             component="cluster_changepoint_segments",
         )
+
+        if args.pca_by_k_only:
+            for group in args.groups:
+                group_dir = out_dir / group
+                if not (group_dir / "by_k").is_dir():
+                    log_event(
+                        "warning",
+                        f"No by_k/ under {group_dir}, skipping",
+                        component="cluster_changepoint_segments",
+                    )
+                    continue
+                seg_csv = group_dir / "segments_clustered.csv"
+                if not seg_csv.is_file():
+                    log_event(
+                        "warning",
+                        f"Missing {seg_csv}, skipping",
+                        component="cluster_changepoint_segments",
+                    )
+                    continue
+                with step(f"pca-by-k group={group}"):
+                    seg_df = pd.read_csv(seg_csv)
+                    feature_matrix, _ = build_feature_matrix_from_segments_df(seg_df)
+                    written = plot_pca_clusters_by_k(
+                        group_dir,
+                        feature_matrix,
+                        group_label=group,
+                    )
+                    log_event(
+                        "info",
+                        f"group={group}: wrote {len(written)} PCA plots under by_k/",
+                        component="cluster_changepoint_segments",
+                    )
+            print("\nPCA plots:")
+            for path in sorted(out_dir.rglob("by_k/k_*/pca_clusters.png")):
+                print(f"  {path}")
+            return
 
         clustered_parts: list[pd.DataFrame] = []
         for group in args.groups:

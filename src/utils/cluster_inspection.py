@@ -87,6 +87,109 @@ def plot_silhouette_by_k(
     return output_path
 
 
+def plot_pca_clusters(
+    feature_matrix: np.ndarray,
+    labels: np.ndarray,
+    leaf_labels: Sequence[str],
+    output_path: Union[str, Path],
+    *,
+    title: str,
+) -> Optional[Path]:
+    """2D PCA scatter colored by cluster label."""
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    n = feature_matrix.shape[0]
+    if n < 3:
+        return None
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(feature_matrix)
+    X = np.nan_to_num(X, nan=0.0)
+
+    n_comp = min(2, X.shape[1], n - 1)
+    pca = PCA(n_components=n_comp)
+    coords = pca.fit_transform(X)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    unique_labels = sorted(set(int(lab) for lab in labels))
+    cmap = plt.cm.tab10
+    for lab in unique_labels:
+        mask = labels == lab
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1] if n_comp > 1 else np.zeros(mask.sum()),
+            label=f"cluster {lab}",
+            alpha=0.7,
+            s=40,
+            c=[cmap(lab % 10)],
+        )
+
+    var = pca.explained_variance_ratio_
+    xlabel = f"PC1 ({var[0]:.1%} var)" if len(var) > 0 else "PC1"
+    ylabel = f"PC2 ({var[1]:.1%} var)" if len(var) > 1 else "PC2"
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return output_path
+
+
+def plot_pca_clusters_by_k(
+    group_dir: Union[str, Path],
+    feature_matrix: np.ndarray,
+    *,
+    group_label: str = "",
+) -> Dict[str, Path]:
+    """
+    Write ``pca_clusters.png`` under each ``by_k/k_XX/`` that has
+    ``segments_clustered.csv``.
+    """
+    import pandas as pd
+
+    group_dir = Path(group_dir)
+    by_k_dir = group_dir / "by_k"
+    if not by_k_dir.is_dir():
+        return {}
+
+    written: Dict[str, Path] = {}
+    for k_dir in sorted(by_k_dir.glob("k_*")):
+        seg_csv = k_dir / "segments_clustered.csv"
+        if not seg_csv.is_file():
+            continue
+
+        seg_df = pd.read_csv(seg_csv)
+        if len(seg_df) != feature_matrix.shape[0]:
+            raise ValueError(
+                f"Row count mismatch for {seg_csv}: {len(seg_df)} segments vs "
+                f"{feature_matrix.shape[0]} feature rows"
+            )
+
+        labels = seg_df["cluster_label"].to_numpy(dtype=int)
+        leaf_labels = seg_df["leaf_label"].astype(str).tolist()
+        k = int(k_dir.name.split("_", 1)[1])
+        title_suffix = f" — {group_label}" if group_label else ""
+        out = plot_pca_clusters(
+            feature_matrix,
+            labels,
+            leaf_labels,
+            k_dir / "pca_clusters.png",
+            title=f"PCA{title_suffix} segments (k={k})",
+        )
+        if out is not None:
+            written[k_dir.name] = out
+
+    return written
+
+
 def cluster_population_table(segments: Sequence[Segment]) -> "pd.DataFrame":
     """Segment counts and trajectory coverage per cluster."""
     import pandas as pd
@@ -680,6 +783,7 @@ def write_all_k_cluster_results(
     feature_names: Optional[Sequence[str]] = None,
     leaf_labels: Optional[Sequence[str]] = None,
     group_label: str = "",
+    include_pca_by_k: bool = True,
 ) -> Dict[str, Path]:
     """
     Save full inspection artifacts for every k in ``k_min`` … ``k_max``.
@@ -752,6 +856,18 @@ def write_all_k_cluster_results(
             seg_path = k_dir / "segments_clustered.csv"
             pd.DataFrame(seg_rows).to_csv(seg_path, index=False)
             written[f"k_{k:02d}/segments_clustered"] = seg_path
+
+        if include_pca_by_k and feature_matrix is not None and leaf_labels is not None:
+            title_suffix = f" — {group_label}" if group_label else ""
+            pca_out = plot_pca_clusters(
+                feature_matrix,
+                result.labels,
+                leaf_labels,
+                k_dir / "pca_clusters.png",
+                title=f"PCA{title_suffix} segments (k={k})",
+            )
+            if pca_out is not None:
+                written[f"k_{k:02d}/pca_clusters"] = pca_out
 
     comp_df = pd.DataFrame(comparison_rows)
     comp_path = by_k_dir / "k_comparison.csv"
