@@ -20,6 +20,19 @@ python scripts/validate_changepoint_cluster_structures.py \\
     --selection "resname MOL" \\
     --groups gsa iodine na_water combined \\
     --output-dir output/changepoints/structure_validation
+    
+    
+
+python MDchat/scripts/validate_changepoint_cluster_structures.py \
+    --clusters-dir  output/changepoints/clusters/${CUBE} \
+    --topology ${CUBE}_ca.prmtop \
+    --trajectory-dir ${TRAJ_DIR} \
+    --trajectory-layout nested \
+    --trajectory-filename mdcrd_v \
+    --selection "resname MOL" \
+    --groups gsa iodine na_water combined \
+    --output-dir output/changepoints/structure_validation/${CUBE}
+
 """
 
 from __future__ import annotations

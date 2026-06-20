@@ -845,6 +845,11 @@ def detect_formation_frame(
     )
 
 
+def _trajectory_id(traj_path: Path) -> str:
+    """Identify a trajectory by its containing folder (e.g. ``BMMpM/run_000/mdcrd_v`` → ``run_000``)."""
+    folder = traj_path.parent.name
+    return folder if folder else traj_path.stem
+
 def detect_formation_frames(
     topology: Union[str, Path],
     trajectory_paths: Sequence[Union[str, Path]],
@@ -877,7 +882,7 @@ def detect_formation_frames(
             sustain_frames=sustain_frames,
             stride=stride,
         )
-        out[traj_path.stem] = frame
+        out[_trajectory_id(traj_path)] = frame
     return out
 
 
@@ -1000,7 +1005,7 @@ def extract_imamura_features_multi(
 
     for traj_path in trajectory_paths:
         traj_path = Path(traj_path)
-        traj_id = traj_path.stem
+        traj_id = _trajectory_id(traj_path)
         kwargs: Dict[str, Any] = {}
         if traj_format:
             kwargs["format"] = traj_format
