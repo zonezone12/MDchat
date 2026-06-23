@@ -283,7 +283,7 @@ def parse_args() -> argparse.Namespace:
     msm.add_argument(
         "--dt-ps",
         type=float,
-        default=None,
+        default=1,
         help="Override trajectory spacing in ps (auto-detected if omitted)",
     )
     msm.add_argument(

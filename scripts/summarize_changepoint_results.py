@@ -11,6 +11,7 @@ Reads CSVs produced by ``changepoint_feature_groups.py`` and writes:
   plots/cohort_breakpoints_all_trajectories.png
   plots/cohort_traces_normalized_all_trajectories.png
   plots/timeline_{traj_id}.png
+  plots/timeline_cluster_{label}_{traj_id}.png  (from cluster_representatives.csv)
 
 Timeline default panels
 -----------------------
@@ -25,9 +26,13 @@ groups: ``n_guest_inside_cavity`` (guest location) and ``cavity_ion_count``
 
 Example
 -------
-python scripts/summarize_changepoint_results.py \\
-    --changepoints-dir output/changepoints \\
+python scripts/summarize_changepoint_results.py \
+    --changepoints-dir output/changepoints \
     --features-dir output/gsa_features
+    
+python scripts/summarize_changepoint_results.py \
+--cluster-representatives-csv output\changepoints\clusters\BMMpM\iodine\cluster_representatives.csv \
+--plot-dir output\changepoints\clusters\BMMpM\iodine
 """
 
 from __future__ import annotations
@@ -323,6 +328,76 @@ def plot_breakpoint_histogram(changepoints_dir: Path, plot_dir: Path) -> Path:
     return out
 
 
+def _discover_cluster_representatives_csvs(changepoints_dir: Path) -> list[Path]:
+    """Find cluster_representatives.csv under {changepoints_dir}/clusters/."""
+    clusters_root = changepoints_dir
+    if not clusters_root.is_dir():
+        return []
+    return sorted(clusters_root.glob("**/cluster_representatives.csv"))
+
+
+def _resolve_cluster_representatives_csvs(
+    changepoints_dir: Path,
+    explicit_paths: Optional[list[str]],
+) -> list[Path]:
+    if explicit_paths:
+        return [Path(p) for p in explicit_paths]
+    return _discover_cluster_representatives_csvs(changepoints_dir)
+
+
+def _load_cluster_representatives(csv_paths: list[Path]) -> pd.DataFrame:
+    """Load and stack one or more cluster_representatives.csv files."""
+    required = {"traj_id", "cluster_label", "segment_id", "start_frame", "end_frame"}
+    frames: list[pd.DataFrame] = []
+    for csv_path in csv_paths:
+        if not csv_path.exists():
+            log_event(
+                "warning",
+                f"Skipping missing cluster representatives CSV: {csv_path}",
+                component="summarize_changepoint_results",
+            )
+            continue
+        df = pd.read_csv(csv_path)
+        missing = required - set(df.columns)
+        if missing:
+            log_event(
+                "warning",
+                f"Skipping {csv_path}: missing columns {sorted(missing)}",
+                component="summarize_changepoint_results",
+            )
+            continue
+        tagged = df.copy()
+        tagged["source_csv"] = str(csv_path)
+        frames.append(tagged)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _frame_to_time_ps(df: pd.DataFrame, frame: int) -> Optional[float]:
+    """Map a simulation frame index to time (ps) using feature CSV columns."""
+    if "frame" in df.columns:
+        match = df.loc[df["frame"] == frame, "time_ps"]
+        if len(match):
+            return float(match.iloc[0])
+    if "time_ps" in df.columns and 0 <= frame < len(df):
+        return float(df["time_ps"].iloc[frame])
+    return None
+
+
+def _segment_time_bounds(
+    df: pd.DataFrame,
+    start_frame: int,
+    end_frame: int,
+    rep_frame: Optional[int] = None,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return (start_ps, end_ps, rep_ps) for a segment frame range."""
+    start_ps = _frame_to_time_ps(df, int(start_frame))
+    end_ps = _frame_to_time_ps(df, int(end_frame))
+    rep_ps = _frame_to_time_ps(df, int(rep_frame)) if rep_frame is not None else None
+    return start_ps, end_ps, rep_ps
+
+
 def _default_timeline_trajectories(changepoints_dir: Path) -> list[str]:
     cmp = pd.read_csv(changepoints_dir / "changepoint_timing_comparison.csv")
     iod_gsa = cmp[
@@ -348,6 +423,11 @@ def plot_timeline(
     features_dir: Path,
     plot_dir: Path,
     panels: list[tuple[str, str]],
+    cluster_label: Optional[int] = None,
+    segment_id: Optional[int] = None,
+    segment_start_ps: Optional[float] = None,
+    segment_end_ps: Optional[float] = None,
+    rep_time_ps: Optional[float] = None,
 ) -> Optional[Path]:
     feat_path = features_dir / f"{traj_id}_gsa_features.csv"
     if not feat_path.exists():
@@ -367,26 +447,109 @@ def plot_timeline(
     if len(panels) == 1:
         axes = [axes]
 
+    highlight_segment = (
+        segment_start_ps is not None
+        and segment_end_ps is not None
+        and np.isfinite(segment_start_ps)
+        and np.isfinite(segment_end_ps)
+    )
+
     for ax, (col, ylabel) in zip(axes, panels):
         if col not in df.columns:
             ax.set_ylabel(ylabel)
             ax.text(0.5, 0.5, f"missing column: {col}", transform=ax.transAxes, ha="center")
             continue
-        ax.plot(time, df[col], color="0.3", lw=0.8)
+        if highlight_segment:
+            ax.axvspan(
+                segment_start_ps,
+                segment_end_ps,
+                color="#ffdf80",
+                alpha=0.25,
+                zorder=1,
+            )
+        ax.plot(time, df[col], color="0.3", lw=0.8, zorder=2)
         for grp in GROUPS:
             for _, row in bsub[bsub["group"] == grp].iterrows():
-                ax.axvline(row["time_ps"], color=GROUP_COLORS[grp], alpha=0.7, lw=1.2, ls="--")
+                ax.axvline(
+                    row["time_ps"],
+                    color=GROUP_COLORS[grp],
+                    alpha=0.7,
+                    lw=1.2,
+                    ls="--",
+                    zorder=3,
+                )
+        if rep_time_ps is not None and np.isfinite(rep_time_ps):
+            ax.axvline(rep_time_ps, color="0.15", alpha=0.9, lw=1.0, ls=":", zorder=4)
         ax.set_ylabel(ylabel)
 
     axes[-1].set_xlabel("Time (ps)")
     handles = [Line2D([0], [0], color=GROUP_COLORS[g], ls="--", label=g) for g in GROUPS]
+    if highlight_segment:
+        handles.append(
+            Line2D([0], [0], color="#ffdf80", alpha=0.6, lw=6, label="cluster medoid segment")
+        )
+    if rep_time_ps is not None and np.isfinite(rep_time_ps):
+        handles.append(Line2D([0], [0], color="0.15", ls=":", label="medoid frame"))
     fig.legend(handles=handles, loc="upper right")
-    fig.suptitle(f"Breakpoints overlay: {traj_id}", y=1.02)
+    if cluster_label is not None and segment_id is not None:
+        title = (
+            f"Cluster {cluster_label} medoid (seg {segment_id}): {traj_id}"
+        )
+        out_name = f"timeline_cluster_{cluster_label}_{traj_id}.png"
+    else:
+        title = f"Breakpoints overlay: {traj_id}"
+        out_name = f"timeline_{traj_id}.png"
+    fig.suptitle(title, y=1.02)
     fig.tight_layout()
-    out = plot_dir / f"timeline_{traj_id}.png"
+    out = plot_dir / out_name
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out
+
+
+def plot_cluster_representative_timelines(
+    reps: pd.DataFrame,
+    *,
+    changepoints_dir: Path,
+    features_dir: Path,
+    plot_dir: Path,
+    panels: list[tuple[str, str]],
+) -> list[str]:
+    """Plot breakpoint timelines for each row in cluster_representatives.csv."""
+    written: list[str] = []
+    for _, row in reps.iterrows():
+        traj_id = str(row["traj_id"])
+        feat_path = features_dir / f"{traj_id}_gsa_features.csv"
+        if not feat_path.exists():
+            log_event(
+                "warning",
+                f"Skipping cluster rep timeline for {traj_id}: missing {feat_path.name}",
+                component="summarize_changepoint_results",
+            )
+            continue
+        df = pd.read_csv(feat_path, usecols=lambda c: c in ("frame", "time_ps"))
+        rep_frame = int(row["rep_frame"]) if "rep_frame" in row and pd.notna(row["rep_frame"]) else None
+        start_ps, end_ps, rep_ps = _segment_time_bounds(
+            df,
+            int(row["start_frame"]),
+            int(row["end_frame"]),
+            rep_frame,
+        )
+        out = plot_timeline(
+            traj_id,
+            changepoints_dir=changepoints_dir,
+            features_dir=features_dir,
+            plot_dir=plot_dir,
+            panels=panels,
+            cluster_label=int(row["cluster_label"]),
+            segment_id=int(row["segment_id"]),
+            segment_start_ps=start_ps,
+            segment_end_ps=end_ps,
+            rep_time_ps=rep_ps,
+        )
+        if out is not None:
+            written.append(out.name)
+    return written
 
 
 def parse_args() -> argparse.Namespace:
@@ -423,6 +586,20 @@ def parse_args() -> argparse.Namespace:
         "--skip-individual-timelines",
         action="store_true",
         help="Skip per-trajectory timeline_*.png plots",
+    )
+    parser.add_argument(
+        "--cluster-representatives-csv",
+        nargs="*",
+        default=None,
+        help=(
+            "cluster_representatives.csv path(s) for medoid-segment timeline plots "
+            "(default: auto-discover under {changepoints-dir}/clusters/**/)"
+        ),
+    )
+    parser.add_argument(
+        "--skip-cluster-rep-timelines",
+        action="store_true",
+        help="Skip timeline plots derived from cluster_representatives.csv",
     )
     return parser.parse_args()
 
@@ -479,9 +656,29 @@ def main() -> None:
                 if out is not None:
                     written.append(out.name)
 
+        cluster_written: list[str] = []
+        if not args.skip_cluster_rep_timelines:
+            rep_csvs = _resolve_cluster_representatives_csvs(
+                changepoints_dir,
+                args.cluster_representatives_csv,
+            )
+            reps = _load_cluster_representatives(rep_csvs)
+            if len(reps):
+                cluster_written = plot_cluster_representative_timelines(
+                    reps,
+                    changepoints_dir=changepoints_dir,
+                    features_dir=features_dir,
+                    plot_dir=plot_dir,
+                    panels=DEFAULT_TIMELINE_PANELS,
+                )
+                written.extend(cluster_written)
+
         log_event(
             "info",
-            f"Cohort plots written; {len(written)} individual timeline plot(s)",
+            (
+                f"Cohort plots written; {len(written)} timeline plot(s) "
+                f"({len(cluster_written)} cluster medoid)"
+            ),
             component="summarize_changepoint_results",
         )
 
