@@ -24,6 +24,7 @@ python scripts/sweep_changepoint_penalty.py \\
 python scripts/sweep_changepoint_penalty.py \\
     --input-dir output/gsa_features \\
     --output-dir output/changepoints/penalty_sweep \\
+    --method Pelt --cost-model rbf --min-size 10 --jump 5 --tolerance-frames 50 \\
     --run-final --final-output-dir output/changepoints
 """
 
@@ -50,6 +51,14 @@ from changepoint_feature_groups import (
     process_csv,
 )
 from src.utils.run_log import RunContext, log_event, step
+
+# Detection settings forwarded to changepoint_feature_groups (defaults match that script).
+DEFAULT_METHOD = "Pelt"
+DEFAULT_COST_MODEL = "rbf"
+DEFAULT_MIN_SIZE = 10
+DEFAULT_JUMP = 5
+DEFAULT_TOLERANCE_FRAMES = 50
+DEFAULT_FEATURE_GROUPS = ["gsa", "iodine", "na_water", "combined"]
 
 # Headline segment metrics for regime-direction checks (early vs late segments).
 _REGIME_COLS: dict[str, list[str]] = {
@@ -331,33 +340,36 @@ def _plot_sweep(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
 
 
 def _invoke_changepoint_feature_groups(
-  args: argparse.Namespace,
-  penalty: float,
-  output_dir: Path,
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    penalty: float,
+    method: str = DEFAULT_METHOD,
+    cost_model: str = DEFAULT_COST_MODEL,
+    min_size: int = DEFAULT_MIN_SIZE,
+    jump: int = DEFAULT_JUMP,
+    tolerance_frames: int = DEFAULT_TOLERANCE_FRAMES,
 ) -> int:
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "changepoint_feature_groups.py"),
         "--input-dir",
-        str(args.input_dir),
+        str(input_dir),
         "--output-dir",
         str(output_dir),
         "--method",
-        args.method,
+        method,
         "--cost-model",
-        args.cost_model,
+        cost_model,
         "--penalty",
         str(penalty),
         "--min-size",
-        str(args.min_size),
+        str(min_size),
         "--jump",
-        str(args.jump),
+        str(jump),
         "--tolerance-frames",
-        str(args.tolerance_frames),
-        *("--groups", *args.groups),
+        str(tolerance_frames),
     ]
-    if args.no_normalize:
-        cmd.append("--no-normalize")
     log_event(
         "info",
         f"Running changepoint_feature_groups.py at penalty={penalty:.4g}",
@@ -383,18 +395,37 @@ def parse_args() -> argparse.Namespace:
         default="output/changepoints/penalty_sweep",
         help="Sweep summaries and plots (default: output/changepoints/penalty_sweep)",
     )
-    p.add_argument("--method", default="Pelt")
-    p.add_argument("--cost-model", default="rbf")
-    p.add_argument("--min-size", type=int, default=10)
-    p.add_argument("--jump", type=int, default=5)
-    p.add_argument("--tolerance-frames", type=int, default=50)
     p.add_argument(
-        "--groups",
-        nargs="+",
-        default=["gsa", "iodine", "na_water", "combined"],
-        choices=["gsa", "iodine", "na_water", "combined"],
+        "--method",
+        default=DEFAULT_METHOD,
+        help="Ruptures search method (default: Pelt)",
     )
-    p.add_argument("--no-normalize", action="store_true")
+    p.add_argument(
+        "--cost-model",
+        default=DEFAULT_COST_MODEL,
+        help="Ruptures cost function (default: rbf)",
+    )
+    p.add_argument(
+        "--min-size",
+        type=int,
+        default=DEFAULT_MIN_SIZE,
+        help="Minimum segment length in frames (default: 10)",
+    )
+    p.add_argument(
+        "--jump",
+        type=int,
+        default=DEFAULT_JUMP,
+        help="Ruptures subsample step for speed (default: 5)",
+    )
+    p.add_argument(
+        "--tolerance-frames",
+        type=int,
+        default=DEFAULT_TOLERANCE_FRAMES,
+        help=(
+            "Frame tolerance for timing comparison; breakpoints within ±N are "
+            "'shared' (default: 50)"
+        ),
+    )
     p.add_argument(
         "--n-penalties",
         type=int,
@@ -471,12 +502,11 @@ def main() -> None:
         csv_files = csv_files[: args.max_trajectories]
 
     n_signal = len(pd.read_csv(csv_files[0]))
-    normalize = not args.no_normalize
 
     if args.penalty_min is not None and args.penalty_max is not None:
         penalties = np.geomspace(args.penalty_min, args.penalty_max, num=args.n_penalties)
     else:
-        penalties = _default_penalty_grid(n_signal, normalize, args.n_penalties)
+        penalties = _default_penalty_grid(n_signal, normalize=True, n_points=args.n_penalties)
         if args.penalty_min is not None:
             penalties = penalties[penalties >= args.penalty_min]
         if args.penalty_max is not None:
@@ -484,7 +514,7 @@ def main() -> None:
 
     ref_penalty = args.reference_penalty
     if ref_penalty is None:
-        ref_penalty = _auto_penalty(n_signal, normalize)
+        ref_penalty = _auto_penalty(n_signal, normalize=True)
     if ref_penalty is None:
         ref_penalty = float(np.log(max(n_signal, 2)))
 
@@ -511,8 +541,8 @@ def main() -> None:
                     min_size=args.min_size,
                     jump=args.jump,
                     tolerance_frames=args.tolerance_frames,
-                    groups=args.groups,
-                    normalize=normalize,
+                    groups=DEFAULT_FEATURE_GROUPS,
+                    normalize=True,
                 )
                 regime_dirs_by_penalty[float(pen)] = regime_dirs
 
@@ -537,7 +567,7 @@ def main() -> None:
                         float(np.mean(timing_jaccards)) if timing_jaccards else float("nan")
                     ),
                 }
-                for grp in args.groups:
+                for grp in DEFAULT_FEATURE_GROUPS:
                     row[f"n_bkps_{grp}"] = int(
                         len(bkp_df[bkp_df["group"] == grp]) if not bkp_df.empty else 0
                     )
@@ -642,7 +672,14 @@ def main() -> None:
 
         if args.run_final and rec_penalty is not None:
             rc = _invoke_changepoint_feature_groups(
-                args, rec_penalty, Path(args.final_output_dir)
+                input_dir=input_dir,
+                output_dir=Path(args.final_output_dir),
+                penalty=rec_penalty,
+                method=args.method,
+                cost_model=args.cost_model,
+                min_size=args.min_size,
+                jump=args.jump,
+                tolerance_frames=args.tolerance_frames,
             )
             if rc != 0:
                 sys.exit(rc)
