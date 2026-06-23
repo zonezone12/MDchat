@@ -11,8 +11,11 @@ scores:
   * segment-regime consistency (do headline segment trends keep the same sign?)
 
 Writes CSV summaries and optional plots under --output-dir, then prints a
-recommended penalty range. Use ``--run-final`` to invoke
-``changepoint_feature_groups.py`` at the midpoint of the best stable range.
+recommended penalty from the **elbow** of total breakpoints vs penalty
+(max distance from the chord on log-penalty). Cross-group Jaccard and timing
+metrics are recorded as diagnostics for interpreting the four parallel group
+runs, not as primary selection criteria. Optional stable-range bands (slow
+count drift + high timing Jaccard) are listed when found.
 
 Example
 -------
@@ -218,70 +221,138 @@ def _median_pair_jaccard(cmp_df: pd.DataFrame, grp_a: str, grp_b: str) -> float:
     return float(sub["jaccard"].median())
 
 
+def _annotate_count_change(summary: pd.DataFrame) -> pd.DataFrame:
+    """Add step-to-step relative change in cohort breakpoint totals."""
+    out = summary.copy()
+    counts = out["total_breakpoints"].astype(float)
+    out["count_rel_change"] = counts.pct_change().abs()
+    return out
+
+
+def _find_penalty_elbow(summary: pd.DataFrame) -> dict[str, float]:
+    """Elbow on log10(penalty) vs cohort total breakpoints.
+
+    Uses the point farthest from the chord joining the first and last grid
+    points (standard knee heuristic on a decreasing curve).
+    """
+    if len(summary) < 3:
+        return {}
+
+    penalties = summary["penalty"].to_numpy(dtype=float)
+    counts = summary["total_breakpoints"].to_numpy(dtype=float)
+    x = np.log10(penalties)
+    y = counts
+
+    x_norm = (x - x.min()) / (x.max() - x.min()) if x.max() > x.min() else x
+    y_norm = (y - y.min()) / (y.max() - y.min()) if y.max() > y.min() else y
+
+    x0, y0 = x_norm[0], y_norm[0]
+    x1, y1 = x_norm[-1], y_norm[-1]
+    dx, dy = x1 - x0, y1 - y0
+    denom = np.hypot(dx, dy)
+    if denom == 0:
+        return {}
+
+    distances = np.array(
+        [
+            abs(dy * x_norm[i] - dx * y_norm[i] + x1 * y0 - y1 * x0) / denom
+            for i in range(len(x_norm))
+        ]
+    )
+    # Prefer an interior knee; endpoints are artifacts of the grid.
+    interior = np.arange(1, len(distances) - 1)
+    idx = int(interior[np.argmax(distances[interior])])
+
+    return {
+        "elbow_penalty": float(penalties[idx]),
+        "elbow_total_breakpoints": float(counts[idx]),
+        "elbow_score": float(distances[idx]),
+        "elbow_grid_index": float(idx),
+    }
+
+
 def _find_stable_plateaus(
     summary: pd.DataFrame,
     *,
     min_plateau_steps: int,
     timing_threshold: float,
     regime_threshold: float,
+    count_change_threshold: float,
 ) -> pd.DataFrame:
-    """Contiguous penalty ranges with flat counts and high stability metrics."""
+    """Optional robust band: high timing stability and slow count drift.
+
+    Cross-group Jaccard is reported per range but not required to pass.
+    Primary penalty selection uses the breakpoint-count elbow instead.
+    """
     if len(summary) < min_plateau_steps:
         return pd.DataFrame()
 
-    rows: list[dict] = []
-    n = len(summary)
-    penalties = summary["penalty"].to_numpy(dtype=float)
-    total_bkps = summary["total_breakpoints"].to_numpy(dtype=int)
+    df = _annotate_count_change(summary)
+    timing_ok = df["timing_jaccard_vs_prev"].fillna(1.0) >= timing_threshold
+    count_ok = df["count_rel_change"].fillna(0.0) <= count_change_threshold
+    stable = timing_ok & count_ok
 
+    rows: list[dict] = []
+    n = len(df)
     i = 0
     while i < n:
+        if not stable.iloc[i]:
+            i += 1
+            continue
         j = i + 1
-        while j < n and total_bkps[j] == total_bkps[i]:
+        while j < n and stable.iloc[j]:
             j += 1
         length = j - i
         if length >= min_plateau_steps:
-            block = summary.iloc[i:j]
-            timing_ok = (
-                block["timing_jaccard_vs_prev"].dropna() >= timing_threshold
-            ).all()
-            regime_ok = (
-                block["regime_agreement_vs_ref"].dropna() >= regime_threshold
-            ).all()
-            if timing_ok and regime_ok:
-                rows.append(
-                    {
-                        "penalty_min": float(penalties[i]),
-                        "penalty_max": float(penalties[j - 1]),
-                        "penalty_mid": float(np.sqrt(penalties[i] * penalties[j - 1])),
-                        "n_penalty_steps": length,
-                        "total_breakpoints": int(total_bkps[i]),
-                        "median_timing_jaccard": float(
-                            block["timing_jaccard_vs_prev"].median()
-                        ),
-                        "median_regime_agreement": float(
-                            block["regime_agreement_vs_ref"].median()
-                        ),
-                        "median_jaccard_gsa_combined": float(
-                            block["median_jaccard_gsa_combined"].median()
-                        ),
-                    }
-                )
-        i = j
+            block = df.iloc[i:j]
+            rows.append(
+                {
+                    "penalty_min": float(block["penalty"].iloc[0]),
+                    "penalty_max": float(block["penalty"].iloc[-1]),
+                    "penalty_mid": float(
+                        np.sqrt(block["penalty"].iloc[0] * block["penalty"].iloc[-1])
+                    ),
+                    "n_penalty_steps": length,
+                    "total_breakpoints_min": int(block["total_breakpoints"].min()),
+                    "total_breakpoints_max": int(block["total_breakpoints"].max()),
+                    "median_timing_jaccard": float(
+                        block["timing_jaccard_vs_prev"].median()
+                    ),
+                    "median_regime_agreement": float(
+                        block["regime_agreement_vs_ref"].median()
+                    ),
+                    "median_jaccard_gsa_combined": float(
+                        block["median_jaccard_gsa_combined"].median()
+                    ),
+                    "median_count_rel_change": float(
+                        block["count_rel_change"].median()
+                    ),
+                    "passes_regime_threshold": bool(
+                        (block["regime_agreement_vs_ref"] >= regime_threshold).all()
+                    ),
+                }
+            )
+        i = j if j > i else i + 1
 
     if not rows:
         return pd.DataFrame()
 
     out = pd.DataFrame(rows)
+    regime_weight = out["median_regime_agreement"].fillna(0).clip(0, 1)
     out["stability_score"] = (
         out["n_penalty_steps"]
         * out["median_timing_jaccard"].fillna(0)
-        * out["median_regime_agreement"].fillna(0)
+        * (0.5 + 0.5 * regime_weight)
     )
     return out.sort_values("stability_score", ascending=False)
 
 
-def _plot_sweep(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
+def _plot_sweep(
+    summary: pd.DataFrame,
+    plot_dir: Path,
+    *,
+    elbow: Optional[dict[str, float]] = None,
+) -> list[Path]:
     plot_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
@@ -310,6 +381,13 @@ def _plot_sweep(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
         if col == "total_breakpoints":
             for val in y.unique():
                 ax.axhline(val, color="0.85", lw=0.8, zorder=0)
+            if elbow and "elbow_penalty" in elbow:
+                ep = elbow["elbow_penalty"]
+                eb = elbow.get("elbow_total_breakpoints")
+                ax.axvline(ep, color="#d62728", ls="--", lw=1.2, alpha=0.85, label="elbow")
+                if eb is not None:
+                    ax.scatter([ep], [eb], color="#d62728", s=60, zorder=5)
+                ax.legend(loc="upper right", fontsize=8)
     axes[1, 0].set_xlabel("Penalty")
     axes[1, 1].set_xlabel("Penalty")
     fig.suptitle("Changepoint penalty sensitivity")
@@ -460,19 +538,31 @@ def parse_args() -> argparse.Namespace:
         "--timing-threshold",
         type=float,
         default=0.75,
-        help="Min timing Jaccard vs previous step inside a plateau (default: 0.75)",
+        help="Min timing Jaccard vs previous step inside a stable range (default: 0.75)",
+    )
+    p.add_argument(
+        "--count-change-threshold",
+        type=float,
+        default=0.35,
+        help=(
+            "Max step-to-step relative change in cohort breakpoint totals "
+            "inside a stable range (default: 0.35)"
+        ),
     )
     p.add_argument(
         "--regime-threshold",
         type=float,
         default=0.85,
-        help="Min regime-direction agreement inside a plateau (default: 0.85)",
+        help=(
+            "Regime-direction agreement threshold (reported as passes_regime_threshold; "
+            "default: 0.85)"
+        ),
     )
     p.add_argument(
         "--min-plateau-steps",
         type=int,
         default=3,
-        help="Minimum consecutive equal-count penalty steps for a plateau (default: 3)",
+        help="Minimum consecutive structurally stable penalty steps (default: 3)",
     )
     p.add_argument(
         "--run-final",
@@ -599,39 +689,52 @@ def main() -> None:
         summary["regime_agreement_vs_ref"] = summary["penalty"].map(
             lambda p: _regime_agreement(ref_regime_dirs, regime_dirs_by_penalty[float(p)])
         )
+        summary = _annotate_count_change(summary)
         detail = pd.DataFrame(detail_rows)
         plateaus = _find_stable_plateaus(
             summary,
             min_plateau_steps=args.min_plateau_steps,
             timing_threshold=args.timing_threshold,
             regime_threshold=args.regime_threshold,
+            count_change_threshold=args.count_change_threshold,
         )
+        elbow = _find_penalty_elbow(summary)
 
         summary_path = output_dir / "penalty_sweep_summary.csv"
         detail_path = output_dir / "penalty_sweep_by_trajectory.csv"
         plateaus_path = output_dir / "penalty_stable_ranges.csv"
+        elbow_path = output_dir / "penalty_elbow.csv"
         summary.to_csv(summary_path, index=False)
         detail.to_csv(detail_path, index=False)
         plateaus.to_csv(plateaus_path, index=False)
+        if elbow:
+            pd.DataFrame([elbow]).to_csv(elbow_path, index=False)
+        else:
+            pd.DataFrame(columns=["elbow_penalty"]).to_csv(elbow_path, index=False)
 
         rec_penalty: Optional[float] = None
         rec_range: Optional[tuple[float, float]] = None
-        if not plateaus.empty:
+        if elbow:
+            rec_penalty = float(elbow["elbow_penalty"])
+        elif not plateaus.empty:
             best = plateaus.iloc[0]
             rec_penalty = float(best["penalty_mid"])
             rec_range = (float(best["penalty_min"]), float(best["penalty_max"]))
         else:
-            # Fallback: penalty closest to reference with highest regime agreement.
             sub = summary.copy()
             sub["ref_dist"] = (sub["penalty"] - ref_penalty).abs()
             sub = sub.sort_values(["ref_dist", "regime_agreement_vs_ref"], ascending=[True, False])
             rec_penalty = float(sub.iloc[0]["penalty"])
             log_event(
                 "warning",
-                "No stable plateau found; falling back to penalty nearest reference "
-                f"with best regime agreement ({rec_penalty:.4g})",
+                "No elbow or stable band found; falling back to penalty nearest "
+                f"log(n) reference ({rec_penalty:.4g})",
                 component="sweep_changepoint_penalty",
             )
+
+        if not plateaus.empty and rec_range is None:
+            best = plateaus.iloc[0]
+            rec_range = (float(best["penalty_min"]), float(best["penalty_max"]))
 
         rec_path = output_dir / "penalty_recommendation.txt"
         lines = [
@@ -643,30 +746,48 @@ def main() -> None:
             f"Penalty grid: {penalties[0]:.6g} … {penalties[-1]:.6g} ({len(penalties)} steps)",
             "",
         ]
+        if elbow:
+            lines.extend(
+                [
+                    "Primary selection: elbow on total breakpoints vs penalty",
+                    f"  Recommended penalty: {elbow['elbow_penalty']:.6g}",
+                    f"  Cohort breakpoints at elbow: {int(elbow['elbow_total_breakpoints'])}",
+                    "",
+                    "The elbow is where further increasing the penalty yields diminishing",
+                    "reduction in breakpoint count (bias–variance knee on the sweep curve).",
+                ]
+            )
         if rec_range is not None:
             lines.extend(
                 [
-                    f"Recommended stable range: [{rec_range[0]:.6g}, {rec_range[1]:.6g}]",
-                    f"Recommended midpoint penalty: {rec_penalty:.6g}",
                     "",
-                    "Inside this range, cohort breakpoint totals are flat, timing vs the",
-                    "previous penalty step stays high, and headline segment trends (early vs",
-                    "late) keep the same direction as at the reference penalty.",
+                    f"Optional robust band (timing-stable, slow count drift): "
+                    f"[{rec_range[0]:.6g}, {rec_range[1]:.6g}]",
+                    f"  Band midpoint: {float(np.sqrt(rec_range[0] * rec_range[1])):.6g}",
                 ]
             )
-        else:
+        if not elbow and rec_penalty is not None:
             lines.append(f"Recommended penalty (fallback): {rec_penalty:.6g}")
+        lines.extend(
+            [
+                "",
+                "Cross-group Jaccard (gsa↔combined, gsa↔iodine, …) is reported in",
+                "penalty_sweep_summary.csv for interpretation only: each feature group",
+                "is segmented independently, so agreement checks whether cage, guest,",
+                "and solvent changepoints coincide — it does not define the penalty.",
+            ]
+        )
         if not plateaus.empty:
-            lines.extend(["", "Stable plateaus (ranked):", plateaus.to_string(index=False)])
+            lines.extend(["", "Robust bands (ranked):", plateaus.to_string(index=False)])
         rec_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         if not args.no_plots:
-            _plot_sweep(summary, output_dir / "plots")
+            _plot_sweep(summary, output_dir / "plots", elbow=elbow or None)
 
         log_event(
             "info",
             f"Wrote {summary_path.name}, {detail_path.name}, {plateaus_path.name}, "
-            f"{rec_path.name}",
+            f"{elbow_path.name}, {rec_path.name}",
             component="sweep_changepoint_penalty",
         )
 
@@ -684,7 +805,7 @@ def main() -> None:
             if rc != 0:
                 sys.exit(rc)
 
-    print(f"\nRecommended penalty: {rec_penalty:.6g}")
+    print(f"\nRecommended penalty (elbow): {rec_penalty:.6g}")
     if rec_range is not None:
         print(f"Stable range: [{rec_range[0]:.6g}, {rec_range[1]:.6g}]")
     print(f"\nOutputs in {output_dir}:")
