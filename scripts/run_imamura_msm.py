@@ -5,7 +5,7 @@ Pipeline
 --------
 1. Truncate each trajectory at nanocube formation (optional).
 2. Build 168-D sorted inter-bead distance vectors (type-1 + type-4 beads).
-3. PCA → 5 components.
+3. PCA or tlICA (time-lagged ICA) → 5 components.
 4. MiniBatchKMeans (1500 microstates) + Ward merge (22 macrostates).
 5. Lagged (2 ns) transition network between macrostates.
 
@@ -31,6 +31,9 @@ python scripts/run_imamura_msm.py ... --auto-beads --type4-source endpoint
 
 Exclude benzene ring expansion when finding endpoints:
 python scripts/run_imamura_msm.py ... --auto-beads --no-endpoint-extend-ring
+
+tlICA instead of PCA before clustering:
+python scripts/run_imamura_msm.py ... --dim-reduction tlica --tlica-lag-ns 2.0
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ from src.utils.imamura_msm import (
     detect_formation_frames,
     extract_imamura_features_multi,
     lag_frames_from_ns,
+    load_imamura_bead_spec,
     resolve_imamura_bead_spec,
     plot_imamura_bead_spec,
     write_imamura_artifacts,
@@ -270,8 +274,27 @@ def parse_args() -> argparse.Namespace:
     )
     trunc.add_argument("--contact-cutoff", type=float, default=4.5)
 
-    msm = p.add_argument_group("PCA / clustering / transitions")
-    msm.add_argument("--n-pca", type=int, default=DEFAULT_PCA_COMPONENTS)
+    msm = p.add_argument_group("PCA / tlICA / clustering / transitions")
+    msm.add_argument(
+        "--dim-reduction",
+        choices=["pca", "tlica"],
+        default="pca",
+        help="Reduce features with PCA (default) or time-lagged ICA (tlICA/TICA)",
+    )
+    msm.add_argument("--n-pca", type=int, default=DEFAULT_PCA_COMPONENTS,
+                     help="Number of PCA or tlICA components (default: 5)")
+    msm.add_argument(
+        "--tlica-lag-ns",
+        type=float,
+        default=None,
+        help="tlICA lag time in ns (default: same as --transition-lag-ns)",
+    )
+    msm.add_argument(
+        "--tlica-regularization",
+        type=float,
+        default=None,
+        help="tlICA covariance shrinkage factor (default: 1e-6 × trace(C0)/d)",
+    )
     msm.add_argument("--n-micro", type=int, default=DEFAULT_N_MICROCLUSTERS)
     msm.add_argument("--n-macro", type=int, default=DEFAULT_N_MACROSTATES)
     msm.add_argument(
@@ -291,10 +314,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Skip extraction; cluster/transitions from existing imamura_features.csv",
     )
+    msm.add_argument(
+        "--bead-spec",
+        default=None,
+        help="Load bead_spec.json instead of re-resolving (default: sibling of --features-csv)",
+    )
     return p.parse_args()
 
 
 def _build_config(args: argparse.Namespace) -> ImamuraMSMConfig:
+    from src.utils.imamura_msm import DEFAULT_TLICA_REGULARIZATION
+
     return ImamuraMSMConfig(
         n_type1_beads=args.n_type1_beads,
         n_type4_beads=args.n_type4_beads,
@@ -302,6 +332,13 @@ def _build_config(args: argparse.Namespace) -> ImamuraMSMConfig:
         n_microclusters=args.n_micro,
         n_macrostates=args.n_macro,
         transition_lag_ns=args.transition_lag_ns,
+        dimensionality_reduction=args.dim_reduction,
+        tlica_lag_ns=args.tlica_lag_ns,
+        tlica_regularization=(
+            args.tlica_regularization
+            if args.tlica_regularization is not None
+            else DEFAULT_TLICA_REGULARIZATION
+        ),
         formation_min_active_interfaces=args.formation_min_interfaces,
         formation_sustain_frames=args.formation_sustain_frames,
         contact_cutoff=args.contact_cutoff,
@@ -316,6 +353,54 @@ def _bead_resolution_options(args: argparse.Namespace) -> ImamuraBeadResolutionO
         endpoint_exclude_center_benzene=args.endpoint_exclude_center_benzene,
         type4_per_monomer=args.type4_per_monomer,
     )
+
+
+def _bead_spec_source_path(args: argparse.Namespace) -> Path | None:
+    if args.bead_spec:
+        return Path(args.bead_spec)
+    if args.features_csv:
+        sibling = Path(args.features_csv).parent / "bead_spec.json"
+        if sibling.is_file():
+            return sibling
+    return None
+
+
+def _write_bead_spec_artifacts(
+    u0,
+    monomer_sels: list[str],
+    bead_spec: ImamuraBeadSpec,
+    out_dir: Path,
+) -> None:
+    bead_path = write_imamura_bead_spec(bead_spec, out_dir / "bead_spec.json")
+    print(f"  Wrote {bead_path}")
+    bead_plot = plot_imamura_bead_spec(
+        u0,
+        monomer_sels or [],
+        bead_spec,
+        out_dir / "auto_beads.png",
+    )
+    print(f"  Wrote {bead_plot}")
+    if bead_spec.uses_ring_centroids:
+        type4_desc = (
+            "methyl atoms"
+            if bead_spec.type4_source == "methyl"
+            else "endpoint atoms"
+        )
+        print(
+            f"  type-1: {len(bead_spec.type1_ring_groups or [])} benzene "
+            "ring centroids"
+        )
+        print(
+            f"  type-4 ({bead_spec.type4_source}, rank={bead_spec.type4_rank}): "
+            f"{len(bead_spec.type4_atom_ids or ())} {type4_desc}"
+        )
+        print(
+            f"  endpoint_extend_ring={bead_spec.endpoint_extend_ring}, "
+            f"exclude_center_benzene={bead_spec.endpoint_exclude_center_benzene}"
+        )
+    else:
+        print(f"  type-1: {bead_spec.type1_selection}")
+        print(f"  type-4: {bead_spec.type4_selection}")
 
 
 def _sync_resolved_type4_bead_count(
@@ -367,8 +452,20 @@ def main() -> None:
         )
         monomer_sels = resolved.monomer_selections
         bead_resolution = _bead_resolution_options(args)
+        bead_spec_path = _bead_spec_source_path(args)
+        bead_spec: ImamuraBeadSpec | None = None
 
-        if args.auto_beads or not (args.type1_selection and args.type4_selection):
+        if bead_spec_path is not None:
+            with step("load_bead_spec"):
+                bead_spec = load_imamura_bead_spec(bead_spec_path)
+                print(f"  Loaded {bead_spec_path}")
+                _sync_resolved_type4_bead_count(config, bead_spec)
+                bead_spec.validate(
+                    n_type1=config.n_type1_beads,
+                    n_type4=config.n_type4_beads,
+                )
+                _write_bead_spec_artifacts(u0, monomer_sels or [], bead_spec, out_dir)
+        elif args.auto_beads or not (args.type1_selection and args.type4_selection):
             with step("resolve_bead_selections"):
                 bead_spec = resolve_imamura_bead_spec(
                     u0,
@@ -386,37 +483,7 @@ def main() -> None:
                     n_type1=config.n_type1_beads,
                     n_type4=config.n_type4_beads,
                 )
-                bead_path = write_imamura_bead_spec(bead_spec, out_dir / "bead_spec.json")
-                print(f"  Wrote {bead_path}")
-                bead_plot = plot_imamura_bead_spec(
-                    u0,
-                    monomer_sels or [],
-                    bead_spec,
-                    out_dir / "auto_beads.png",
-                )
-                print(f"  Wrote {bead_plot}")
-                if bead_spec.uses_ring_centroids:
-                    type4_desc = (
-                        "methyl atoms"
-                        if bead_spec.type4_source == "methyl"
-                        else "endpoint atoms"
-                    )
-                    print(
-                        f"  type-1: {len(bead_spec.type1_ring_groups or [])} benzene "
-                        "ring centroids"
-                    )
-                    print(
-                        f"  type-4 ({bead_spec.type4_source}, rank={bead_spec.type4_rank}): "
-                        f"{len(bead_spec.type4_atom_ids or ())} {type4_desc}"
-                    )
-                    print(
-                        f"  endpoint_extend_ring={bead_spec.endpoint_extend_ring}, "
-                        f"exclude_center_benzene="
-                        f"{bead_spec.endpoint_exclude_center_benzene}"
-                    )
-                else:
-                    print(f"  type-1: {bead_spec.type1_selection}")
-                    print(f"  type-4: {bead_spec.type4_selection}")
+                _write_bead_spec_artifacts(u0, monomer_sels or [], bead_spec, out_dir)
         else:
             bead_spec = resolve_imamura_bead_spec(
                 u0,
@@ -427,13 +494,7 @@ def main() -> None:
                 n_type1=args.n_type1_beads,
                 n_type4=args.n_type4_beads,
             )
-            write_imamura_bead_spec(bead_spec, out_dir / "bead_spec.json")
-            plot_imamura_bead_spec(
-                u0,
-                monomer_sels or [],
-                bead_spec,
-                out_dir / "auto_beads.png",
-            )
+            _write_bead_spec_artifacts(u0, monomer_sels or [], bead_spec, out_dir)
 
         if truncate and not formation_frames:
             with step("detect_formation_frames"):
@@ -479,18 +540,10 @@ def main() -> None:
                     feature_names=feat_names,
                     formation_frames=formation_frames,
                 )
-                bead_spec = resolve_imamura_bead_spec(
-                    u0,
-                    explicit_type1=args.type1_selection,
-                    explicit_type4=args.type4_selection,
-                    gsa_resname=args.gsa_resname,
-                    n_monomers=args.n_monomers,
-                    bead_mode=args.bead_mode,
-                    type1_atom_name=args.type1_atom_name,
-                    type4_atom_name=args.type4_atom_name,
-                    resolution=bead_resolution,
-                )
-                _sync_resolved_type4_bead_count(config, bead_spec)
+                if bead_spec is None:
+                    raise RuntimeError(
+                        "bead_spec missing after setup; use --bead-spec or --auto-beads"
+                    )
                 feature_result.bead_spec = bead_spec
         else:
             with step("extract_imamura_features"):
@@ -509,22 +562,59 @@ def main() -> None:
                 feature_result.formation_frames = formation_frames
                 print(f"  {len(feature_result.dataframe)} frames extracted")
 
-        with step("pca_and_cluster"):
-            X = feature_result.dataframe[feature_result.feature_names].to_numpy()
-            clustering = cluster_imamura_features(X, config=config)
-            print(
-                f"  PCA variance explained (sum): "
-                f"{clustering.explained_variance_ratio.sum():.3f}"
+        with step("dimreduce_and_cluster"):
+            feat_df = feature_result.dataframe
+            X = feat_df[feature_result.feature_names].to_numpy()
+            traj_ids = (
+                feat_df["traj_id"].to_numpy()
+                if "traj_id" in feat_df.columns
+                else None
             )
+
+            dt_ps = args.dt_ps
+            if dt_ps is None:
+                sample = feat_df["frame"].head(2).tolist()
+                dt_ps = _infer_dt_ps(u0, sample)
+
+            tlica_lag_ns = config.tlica_lag_ns or config.transition_lag_ns
+            tlica_lag_frames = lag_frames_from_ns(
+                tlica_lag_ns,
+                dt_ps,
+                stride=args.stride,
+            )
+
+            clustering = cluster_imamura_features(
+                X,
+                config=config,
+                traj_ids=traj_ids,
+                tlica_lag_frames=tlica_lag_frames,
+                tlica_lag_ns=tlica_lag_ns,
+            )
+            if clustering.dimensionality_reduction == "tlica":
+                print(
+                    f"  tlICA lag: {tlica_lag_ns} ns → {tlica_lag_frames} frames "
+                    f"(dt={dt_ps} ps, stride={args.stride})"
+                )
+                if clustering.projection_eigenvalues is not None:
+                    print(
+                        f"  Leading TIC eigenvalues: "
+                        f"{clustering.projection_eigenvalues[:3]}"
+                    )
+                if clustering.implied_timescales_ns is not None:
+                    print(
+                        f"  Implied timescales (ns): "
+                        f"{clustering.implied_timescales_ns[:3]}"
+                    )
+            else:
+                print(
+                    f"  PCA variance explained (sum): "
+                    f"{clustering.explained_variance_ratio.sum():.3f}"
+                )
             print(
                 f"  Microclusters: {len(set(clustering.micro_labels))}, "
                 f"Macrostates: {len(set(clustering.macro_labels))}"
             )
 
-        dt_ps = args.dt_ps
-        if dt_ps is None:
-            sample = feature_result.dataframe["frame"].head(2).tolist()
-            dt_ps = _infer_dt_ps(u0, sample)
         lag = lag_frames_from_ns(config.transition_lag_ns, dt_ps, stride=args.stride)
 
         with step("transition_network"):
@@ -549,6 +639,9 @@ def main() -> None:
                 clustering,
                 transitions,
                 config=config,
+                universe=u0,
+                monomer_selections=monomer_sels or [],
+                bead_spec=bead_spec,
             )
 
         print("\nArtifacts:")
