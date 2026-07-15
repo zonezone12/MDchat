@@ -147,6 +147,17 @@ class ImamuraFeatureResult:
     feature_names: List[str]
     formation_frames: Dict[str, int] = field(default_factory=dict)
     bead_spec: Optional[ImamuraBeadSpec] = None
+    pair_trace: Optional["ImamuraPairTrace"] = None
+
+
+@dataclass
+class ImamuraPairTrace:
+    """Compact per-frame mapping from sorted CV ranks to canonical bead pairs."""
+
+    traj_ids: np.ndarray
+    frames: np.ndarray
+    v1_pair_indices: np.ndarray
+    v4_pair_indices: np.ndarray
 
 
 @dataclass
@@ -921,18 +932,31 @@ def sorted_pairwise_distances(positions: np.ndarray) -> np.ndarray:
     -------
     (C(N, 2),) array
     """
+    distances, _ = sorted_pairwise_distances_with_identity(positions)
+    return distances
+
+
+def sorted_pairwise_distances_with_identity(
+    positions: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sorted distances and canonical pair indices for one bead block.
+
+    Canonical pair indices follow ``combinations(range(n_beads), 2)`` order.
+    The returned identity array therefore records exactly which physical pair
+    occupies each sorted Imamura CV rank in this frame.
+    """
     n = positions.shape[0]
     if n < 2:
-        return np.array([], dtype=np.float64)
-
-    dists: List[float] = []
-    for i, j in combinations(range(n), 2):
-        d = float(np.linalg.norm(positions[i] - positions[j]))
-        dists.append(d)
-    arr = np.asarray(dists, dtype=np.float64)
-    arr.sort()
-    arr = arr[::-1]
-    return arr
+        return (
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.uint16),
+        )
+    pairs = np.asarray(list(combinations(range(n), 2)), dtype=np.int64)
+    deltas = positions[pairs[:, 0]] - positions[pairs[:, 1]]
+    distances = np.linalg.norm(deltas, axis=1).astype(np.float64, copy=False)
+    order = np.argsort(-distances, kind="stable")
+    index_dtype = np.uint16 if len(pairs) <= np.iinfo(np.uint16).max else np.uint32
+    return distances[order], order.astype(index_dtype, copy=False)
 
 
 def build_imamura_feature_vector(
@@ -943,6 +967,23 @@ def build_imamura_feature_vector(
     n_type4: int = DEFAULT_N_TYPE4_BEADS,
 ) -> np.ndarray:
     """Combine sorted type-1 and type-4 distance vectors into v_f (168-D)."""
+    vf, _, _ = build_imamura_feature_vector_with_trace(
+        type1_positions,
+        type4_positions,
+        n_type1=n_type1,
+        n_type4=n_type4,
+    )
+    return vf
+
+
+def build_imamura_feature_vector_with_trace(
+    type1_positions: np.ndarray,
+    type4_positions: np.ndarray,
+    *,
+    n_type1: int = DEFAULT_N_TYPE1_BEADS,
+    n_type4: int = DEFAULT_N_TYPE4_BEADS,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build one Imamura vector and its exact rank-to-pair identity arrays."""
     if type1_positions.shape[0] != n_type1:
         raise ValueError(
             f"type-1 selection yielded {type1_positions.shape[0]} beads; "
@@ -954,8 +995,8 @@ def build_imamura_feature_vector(
             f"expected {n_type4}"
         )
 
-    v1 = sorted_pairwise_distances(type1_positions)
-    v4 = sorted_pairwise_distances(type4_positions)
+    v1, v1_pair_indices = sorted_pairwise_distances_with_identity(type1_positions)
+    v4, v4_pair_indices = sorted_pairwise_distances_with_identity(type4_positions)
     n1, n4, total = expected_distance_counts(n_type1, n_type4)
     if v1.size != n1 or v4.size != n4:
         raise ValueError(
@@ -964,7 +1005,7 @@ def build_imamura_feature_vector(
     vf = np.concatenate([v1, v4])
     if vf.size != total:
         raise ValueError(f"Feature vector length {vf.size} != expected {total}")
-    return vf
+    return vf, v1_pair_indices, v4_pair_indices
 
 
 def _monomer_coords_list(universe: Any, monomer_selections: Sequence[str]) -> List[np.ndarray]:
@@ -1108,6 +1149,7 @@ class ImamuraBeadDistanceObserver(FrameObserver):
         n_type4: int = DEFAULT_N_TYPE4_BEADS,
         traj_id: str = "",
         start_frame: int = 0,
+        record_pair_trace: bool = False,
     ):
         super().__init__()
         self.bead_spec = bead_spec
@@ -1115,10 +1157,12 @@ class ImamuraBeadDistanceObserver(FrameObserver):
         self.n_type4 = n_type4
         self.traj_id = traj_id
         self.start_frame = start_frame
+        self.record_pair_trace = record_pair_trace
         self.feature_names = imamura_feature_names(n_type1, n_type4)
         bead_spec.validate(n_type1=n_type1, n_type4=n_type4)
 
         self.results["rows"] = []
+        self.results["pair_trace_rows"] = []
         self.results["frame_call_count"] = 0
 
     def get_selections_needed(self) -> List[str]:
@@ -1132,6 +1176,7 @@ class ImamuraBeadDistanceObserver(FrameObserver):
     def _get_aggregator(self) -> Optional[ResultsGroup]:
         return ResultsGroup(lookup={
             "rows": ResultsGroup.list_extend_sorted("frame"),
+            "pair_trace_rows": ResultsGroup.list_extend_sorted("frame"),
             "frame_call_count": ResultsGroup.sum_values,
         })
 
@@ -1140,12 +1185,22 @@ class ImamuraBeadDistanceObserver(FrameObserver):
 
     def on_frame(self, ts: Any, frame_idx: int, universe: Any) -> None:
         type1, type4 = bead_positions_from_spec(universe, self.bead_spec)
-        vf = build_imamura_feature_vector(
-            type1,
-            type4,
-            n_type1=self.n_type1,
-            n_type4=self.n_type4,
-        )
+        if self.record_pair_trace:
+            vf, v1_pair_indices, v4_pair_indices = (
+                build_imamura_feature_vector_with_trace(
+                    type1,
+                    type4,
+                    n_type1=self.n_type1,
+                    n_type4=self.n_type4,
+                )
+            )
+        else:
+            vf = build_imamura_feature_vector(
+                type1,
+                type4,
+                n_type1=self.n_type1,
+                n_type4=self.n_type4,
+            )
         time_ps = float(getattr(ts, "time", frame_idx))
         row = {
             "traj_id": self.traj_id,
@@ -1155,6 +1210,14 @@ class ImamuraBeadDistanceObserver(FrameObserver):
         for name, val in zip(self.feature_names, vf):
             row[name] = float(val)
         self.results["rows"].append(row)
+        if self.record_pair_trace:
+            self.results["pair_trace_rows"].append(
+                {
+                    "frame": int(frame_idx),
+                    "v1_pair_indices": v1_pair_indices,
+                    "v4_pair_indices": v4_pair_indices,
+                }
+            )
         self.results["frame_call_count"] += 1
 
     def on_frame_end(self, iterator: TrajectoryIterator) -> None:
@@ -1172,6 +1235,7 @@ def compute_imamura_features(
     stop: Optional[int] = None,
     step: Optional[int] = None,
     n_jobs: int = 1,
+    record_pair_trace: bool = False,
 ) -> Any:
     """Extract Imamura features for one trajectory via TrajectoryIterator."""
     import pandas as pd
@@ -1182,6 +1246,7 @@ def compute_imamura_features(
         n_type4=n_type4,
         traj_id=traj_id,
         start_frame=start or 0,
+        record_pair_trace=record_pair_trace,
     )
     iterator = TrajectoryIterator(universe)
     iterator.subscribe(observer)
@@ -1190,7 +1255,24 @@ def compute_imamura_features(
     rows = observer.results.get("rows", [])
     if not rows:
         return pd.DataFrame(columns=["traj_id", "frame", "time_ps", *observer.feature_names])
-    return pd.DataFrame(rows)
+    dataframe = pd.DataFrame(rows)
+    if record_pair_trace:
+        pair_rows = observer.results.get("pair_trace_rows", [])
+        if len(pair_rows) != len(dataframe):
+            raise RuntimeError(
+                "Pair-identity trace row count does not match Imamura feature rows"
+            )
+        dataframe.attrs["imamura_pair_trace"] = ImamuraPairTrace(
+            traj_ids=np.full(len(pair_rows), str(traj_id)),
+            frames=np.asarray([row["frame"] for row in pair_rows], dtype=np.int64),
+            v1_pair_indices=np.stack(
+                [row["v1_pair_indices"] for row in pair_rows]
+            ),
+            v4_pair_indices=np.stack(
+                [row["v4_pair_indices"] for row in pair_rows]
+            ),
+        )
+    return dataframe
 
 
 def extract_imamura_features_multi(
@@ -1205,6 +1287,7 @@ def extract_imamura_features_multi(
     n_type1: int = DEFAULT_N_TYPE1_BEADS,
     n_type4: int = DEFAULT_N_TYPE4_BEADS,
     n_jobs: int = 1,
+    record_pair_trace: bool = False,
 ) -> ImamuraFeatureResult:
     """Extract features from multiple trajectories, optionally post-formation."""
     import MDAnalysis as mda
@@ -1213,6 +1296,7 @@ def extract_imamura_features_multi(
     feature_names = imamura_feature_names(n_type1, n_type4)
     frames_map = formation_frames or {}
     parts: List[Any] = []
+    pair_trace_parts: List[ImamuraPairTrace] = []
 
     for traj_path in trajectory_paths:
         traj_path = Path(traj_path)
@@ -1240,18 +1324,35 @@ def extract_imamura_features_multi(
             start=start,
             step=stride,
             n_jobs=n_jobs,
+            record_pair_trace=record_pair_trace,
         )
         if not df.empty:
+            pair_trace = df.attrs.get("imamura_pair_trace")
+            if pair_trace is not None:
+                pair_trace_parts.append(pair_trace)
             parts.append(df)
 
     combined = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
         columns=["traj_id", "frame", "time_ps", *feature_names]
     )
+    combined_pair_trace: Optional[ImamuraPairTrace] = None
+    if pair_trace_parts:
+        combined_pair_trace = ImamuraPairTrace(
+            traj_ids=np.concatenate([trace.traj_ids for trace in pair_trace_parts]),
+            frames=np.concatenate([trace.frames for trace in pair_trace_parts]),
+            v1_pair_indices=np.concatenate(
+                [trace.v1_pair_indices for trace in pair_trace_parts], axis=0
+            ),
+            v4_pair_indices=np.concatenate(
+                [trace.v4_pair_indices for trace in pair_trace_parts], axis=0
+            ),
+        )
     return ImamuraFeatureResult(
         dataframe=combined,
         feature_names=feature_names,
         formation_frames=frames_map,
         bead_spec=bead_spec,
+        pair_trace=combined_pair_trace,
     )
 
 
@@ -2438,6 +2539,128 @@ def load_imamura_features_csv(
     return df, feat_names
 
 
+def imamura_pair_index_table(
+    bead_spec: ImamuraBeadSpec,
+    *,
+    n_type1: int,
+    n_type4: int,
+    universe: Any = None,
+) -> Any:
+    """Describe canonical pair indices stored in :class:`ImamuraPairTrace`."""
+    import pandas as pd
+
+    def _atom_values(kind: str, bead_index: int) -> Tuple[int, ...]:
+        if bead_spec.uses_ring_centroids:
+            if kind == "v1":
+                rings = bead_spec.type1_ring_groups or []
+                return (
+                    tuple(int(value) for value in rings[bead_index])
+                    if bead_index < len(rings)
+                    else ()
+                )
+            atoms = bead_spec.type4_atom_ids or ()
+            return (int(atoms[bead_index]),) if bead_index < len(atoms) else ()
+        if universe is None:
+            return ()
+        selection = (
+            bead_spec.type1_selection if kind == "v1" else bead_spec.type4_selection
+        )
+        group = universe.select_atoms(selection) if selection else []
+        if bead_index >= len(group):
+            return ()
+        return (int(group[bead_index].ix),)
+
+    def _monomer_index(kind: str, bead_index: int) -> Optional[int]:
+        if kind == "v1":
+            return bead_index if bead_index < n_type1 else None
+        if n_type1 > 0 and n_type4 % n_type1 == 0:
+            return bead_index // (n_type4 // n_type1)
+        return None
+
+    rows: List[Dict[str, Any]] = []
+    for block, count in (("v1", n_type1), ("v4", n_type4)):
+        for pair_index, (bead_i, bead_j) in enumerate(
+            combinations(range(count), 2)
+        ):
+            values_i = _atom_values(block, bead_i)
+            values_j = _atom_values(block, bead_j)
+            row: Dict[str, Any] = {
+                "feature_block": block,
+                "pair_index": pair_index,
+                "bead_i": bead_i,
+                "bead_j": bead_j,
+                "bead_i_monomer_index": _monomer_index(block, bead_i),
+                "bead_j_monomer_index": _monomer_index(block, bead_j),
+                "bead_i_spec_atom_values": ";".join(map(str, values_i)),
+                "bead_j_spec_atom_values": ";".join(map(str, values_j)),
+            }
+            if universe is not None and values_i and values_j:
+                atoms_i = universe.atoms[list(values_i)]
+                atoms_j = universe.atoms[list(values_j)]
+                row.update(
+                    {
+                        "bead_i_atom_ids": ";".join(
+                            str(int(value)) for value in atoms_i.ids
+                        ),
+                        "bead_j_atom_ids": ";".join(
+                            str(int(value)) for value in atoms_j.ids
+                        ),
+                        "bead_i_atom_names": ";".join(map(str, atoms_i.names)),
+                        "bead_j_atom_names": ";".join(map(str, atoms_j.names)),
+                        "bead_i_resids": ";".join(
+                            str(int(value)) for value in atoms_i.resids
+                        ),
+                        "bead_j_resids": ";".join(
+                            str(int(value)) for value in atoms_j.resids
+                        ),
+                    }
+                )
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def write_imamura_pair_trace(
+    trace: ImamuraPairTrace,
+    output_dir: Union[str, Path],
+    bead_spec: ImamuraBeadSpec,
+    *,
+    n_type1: int,
+    n_type4: int,
+    universe: Any = None,
+) -> Dict[str, Path]:
+    """Persist compact exact pair identities without rereading trajectories."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = output_dir / "pair_identity_trace.npz"
+    np.savez(
+        trace_path,
+        format_version=np.asarray([1], dtype=np.uint8),
+        traj_ids=np.asarray(trace.traj_ids, dtype=str),
+        frames=np.asarray(trace.frames, dtype=np.int64),
+        v1_pair_indices=trace.v1_pair_indices,
+        v4_pair_indices=trace.v4_pair_indices,
+    )
+    map_path = output_dir / "pair_index_map.csv"
+    imamura_pair_index_table(
+        bead_spec,
+        n_type1=n_type1,
+        n_type4=n_type4,
+        universe=universe,
+    ).to_csv(map_path, index=False)
+    return {"pair_identity_trace": trace_path, "pair_index_map": map_path}
+
+
+def load_imamura_pair_trace(path: Union[str, Path]) -> ImamuraPairTrace:
+    """Load a trace written by :func:`write_imamura_pair_trace`."""
+    with np.load(path, allow_pickle=False) as data:
+        return ImamuraPairTrace(
+            traj_ids=data["traj_ids"].astype(str),
+            frames=data["frames"].astype(np.int64, copy=False),
+            v1_pair_indices=data["v1_pair_indices"],
+            v4_pair_indices=data["v4_pair_indices"],
+        )
+
+
 def _infer_dt_ps(universe: Any, sample_frames: Sequence[int]) -> float:
     """Estimate trajectory spacing in ps from consecutive frame times."""
     if len(universe.trajectory) < 2:
@@ -2675,6 +2898,39 @@ def write_imamura_artifacts(
     feat_path = output_dir / "imamura_features.csv"
     feature_result.dataframe.to_csv(feat_path, index=False)
     written["features"] = feat_path
+
+    effective_bead_spec = bead_spec or feature_result.bead_spec
+    if feature_result.pair_trace is not None and effective_bead_spec is not None:
+        trace = feature_result.pair_trace
+        table = feature_result.dataframe
+        if len(trace.frames) != len(table):
+            raise ValueError(
+                "Pair-identity trace length does not match Imamura feature table"
+            )
+        if "traj_id" in table and not np.array_equal(
+            trace.traj_ids.astype(str),
+            table["traj_id"].astype(str).to_numpy(),
+        ):
+            raise ValueError(
+                "Pair-identity trace trajectory IDs do not match feature rows"
+            )
+        if "frame" in table and not np.array_equal(
+            trace.frames,
+            table["frame"].to_numpy(dtype=np.int64),
+        ):
+            raise ValueError(
+                "Pair-identity trace frame indices do not match feature rows"
+            )
+        written.update(
+            write_imamura_pair_trace(
+                trace,
+                output_dir,
+                effective_bead_spec,
+                n_type1=cfg.n_type1_beads,
+                n_type4=cfg.n_type4_beads,
+                universe=universe,
+            )
+        )
 
     if feature_result.formation_frames:
         ff_path = output_dir / "formation_frames.csv"

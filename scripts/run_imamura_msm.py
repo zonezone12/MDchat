@@ -65,6 +65,7 @@ from src.utils.imamura_msm import (
     extract_imamura_features_multi,
     lag_frames_from_ns,
     load_imamura_bead_spec,
+    load_imamura_pair_trace,
     resolve_imamura_bead_spec,
     plot_imamura_bead_spec,
     write_imamura_artifacts,
@@ -135,6 +136,14 @@ def parse_args() -> argparse.Namespace:
         help="Trajectory format (e.g. TRJ, XTC, DCD)",
     )
     p.add_argument("--stride", type=int, default=1, help="Frame stride")
+    p.add_argument(
+        "--no-pair-trace",
+        action="store_true",
+        help=(
+            "Do not record compact per-frame rank-to-bead-pair identities. "
+            "Tracing is enabled by default during feature extraction."
+        ),
+    )
     p.add_argument(
         "--n-jobs",
         type=int,
@@ -540,6 +549,14 @@ def main() -> None:
                     feature_names=feat_names,
                     formation_frames=formation_frames,
                 )
+                pair_trace_path = Path(args.features_csv).with_name(
+                    "pair_identity_trace.npz"
+                )
+                if not args.no_pair_trace and pair_trace_path.is_file():
+                    feature_result.pair_trace = load_imamura_pair_trace(
+                        pair_trace_path
+                    )
+                    print(f"  Loaded {pair_trace_path}")
                 if bead_spec is None:
                     raise RuntimeError(
                         "bead_spec missing after setup; use --bead-spec or --auto-beads"
@@ -558,9 +575,12 @@ def main() -> None:
                     n_type1=config.n_type1_beads,
                     n_type4=config.n_type4_beads,
                     n_jobs=args.n_jobs,
+                    record_pair_trace=not args.no_pair_trace,
                 )
                 feature_result.formation_frames = formation_frames
                 print(f"  {len(feature_result.dataframe)} frames extracted")
+                if feature_result.pair_trace is not None:
+                    print("  Exact rank-to-pair identities recorded in the same pass")
 
         with step("dimreduce_and_cluster"):
             feat_df = feature_result.dataframe

@@ -317,6 +317,8 @@ python scripts/run_imamura_msm.py \
 output/.../
 ├── bead_spec.json
 ├── imamura_features.csv
+├── pair_identity_trace.npz  # exact rank→physical-pair mapping recorded in-pass
+├── pair_index_map.csv       # canonical pair/bead/atom metadata
 ├── frame_states.csv          # traj_id, frame, features, micro/macro labels, PCs or TICs
 ├── micro_to_macro.csv
 ├── micro_pca_centroids.csv
@@ -425,6 +427,143 @@ sweep_df = sweep_imamura_clustering(
     tlica_lag_ns=2.0,
 )
 ```
+
+---
+
+## State-transfer and changepoint comparison
+
+`scripts/compare_state_methods.py` builds matched PCA and tlICA assignments
+from the same saved Imamura CV rows, then asks two separate questions:
+
+1. **Are the states reproducible?** PCA, tlICA, and combined-changepoint labels
+   are compared with label-invariant ARI, NMI, V-measure, contingency tables,
+   and transition-boundary timing.
+2. **What changes during a transfer?** For every directed macrostate transfer,
+   the script compares pre- and post-transfer `v1_*` / `v4_*` windows and ranks
+   CVs by standardized change and consistency across events.
+
+LDA is a **post-hoc supervised interpretation**, not a third state-discovery
+method. It projects the already-assigned PCA or tlICA macrostates, reports
+central-ring versus endpoint loadings, and uses leave-one-trajectory-out
+validation when multiple trajectories are present.
+
+### Required inputs
+
+- An endpoint-style `frame_states.csv` that still contains `traj_id`, `frame`,
+  `time_ps`, and all raw `v1_*` / `v4_*` columns. Existing labels and PC/TIC
+  columns are discarded before creating the matched variants.
+- `output/changepoints/clusters/combined/segments_clustered.csv`.
+- `output/changepoints/all_breakpoints.csv`.
+- Matching trajectory IDs. If the two pipelines use different names, provide
+  an explicit two-column map; the script never guesses trajectory identity.
+
+The reference `output/imamura_msm/BMMpM/frame_states.csv` uses the single ID
+`mdcrd_v`, while the changepoint cohort uses IDs such as
+`BMMpM_109234_mdcrd_v`. It is suitable for checking the input schema but not
+for a cohort comparison without a scientifically valid ID mapping. Use the
+multi-trajectory endpoint result for the final analysis.
+
+### Command
+
+```bash
+python scripts/compare_state_methods.py \
+  --imamura-frame-states output/imamura_endpoint/frame_states.csv \
+  --changepoint-segments output/changepoints/clusters/combined/segments_clustered.csv \
+  --changepoint-breakpoints output/changepoints/all_breakpoints.csv \
+  --output-dir output/state_comparison \
+  --n-components 5 \
+  --n-micro 2000 \
+  --n-macro 12 \
+  --tlica-lag-ns 2.0 \
+  --min-dwell-rows 5 \
+  --window-rows 25 \
+  --boundary-tolerance-ps 500
+```
+
+Optional explicit ID map:
+
+```csv
+imamura_traj_id,changepoint_traj_id
+endpoint_run_109234,BMMpM_109234_mdcrd_v
+```
+
+Pass `--gsa-features-dir output/gsa_features` to add event-aligned deformation,
+pore, gear, interface-contact, guest, and solvent observables. Pass
+`--write-aligned-traces` only when the large long-form event/CV table is
+needed.
+
+`run_imamura_msm.py` records exact rank-to-pair identities during the original
+feature-extraction pass. This adds no second trajectory read and writes:
+
+- `pair_identity_trace.npz` — compact integer arrays mapping every frame and
+  `v1_*`/`v4_*` rank to a canonical physical pair.
+- `pair_index_map.csv` — canonical pair index to bead and atom metadata.
+
+Recording is enabled by default; use `--no-pair-trace` only when the extra
+binary artifact is not needed. When comparison uses the sibling
+`frame_states.csv`, both trace files are discovered automatically:
+
+```bash
+python scripts/compare_state_methods.py \
+  --imamura-frame-states output/imamura_endpoint/frame_states.csv \
+  --output-dir output/state_comparison \
+  --exact-top-features 10
+```
+
+For files stored elsewhere, pass `--pair-identity-trace` and
+`--pair-index-map` explicitly. The trace rows are validated against
+`traj_id`/`frame`; mismatched extraction and state tables are rejected.
+
+### Principal outputs
+
+Each `pca/` and `tlica/` output folder contains:
+
+- `frame_states.csv` — matched state assignment.
+- `lda_loadings.csv`, `lda_state_centroids.csv`, `lda_validation.csv` —
+  supervised state interpretation and held-out separability.
+- `transition_events.csv` — directed state transfers after short A-B-A
+  recrossing suppression.
+- `transition_event_deltas.csv` — per-event pre/post CV changes.
+- `transition_signatures_top.csv` — strongest and most consistent CV changes
+  for each directed state pair, with boundary slopes, peak-change timing, and
+  bootstrap confidence intervals.
+- `state_agreement.csv`, `state_contingency.csv` — state-label comparison.
+- `boundary_matches.csv`, `boundary_agreement_by_trajectory.csv` — temporal
+  support from combined changepoints.
+- `transition_events_changepoint_support.csv` — marks transfers supported by a
+  nearby combined changepoint.
+- `exact_transition_pair_trace.csv` — for each event/frame/CV rank, the exact
+  current bead pair, distance, monomer assignment, atom indices/IDs/names, and
+  pre/post relative time. Built from the recorded trace without rereading raw
+  trajectories.
+- `exact_transition_pair_summary.csv` — physical-pair rank occupancy and
+  pre/post distance change for each directed state transfer.
+
+The root `pca_vs_tlica_agreement.csv` measures how strongly dimensionality
+reduction changes the state partition.
+`pca_vs_tlica_transition_consensus.csv` maps tlICA states onto PCA states for
+display and identifies transfer CVs whose change direction agrees between both
+reductions. With GSA inputs,
+`pi_proxy_vs_deformation_event_correlations.csv` reports whether endpoint/ring
+CV changes co-vary across events with RMSD, deformation, pore, gear, and
+interface-contact changes.
+
+### Interpretation limits for the pi system
+
+When endpoint selection includes aromatic atoms, changing `v4_*` distances can
+show that the endpoint/pi-system geometry rearranges during deformation.
+Likewise, `v1_*` tracks central-benzene centroid separation. These remain
+**distance-distribution proxies**:
+
+- they do not contain ring-normal orientation or lateral stacking slip;
+- sorted Imamura slots do not preserve one fixed atom-pair identity over time;
+  exact tracing resolves the dynamic pair occupying the rank but does not add
+  missing orientation information;
+- temporal precedence and correlation do not by themselves prove causality.
+
+Therefore, report a result as “endpoint/pi-system distance rearrangement
+precedes or accompanies deformation,” not “pi stacking causes deformation,”
+unless independent orientation-specific aromatic CVs are added later.
 
 ---
 
