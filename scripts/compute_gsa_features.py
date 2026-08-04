@@ -195,7 +195,7 @@ def main() -> None:
     args = parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
+    print(f"Output directory: {out_dir}")
     traj_paths = _expand_trajectories(args.trajectories)
     if not traj_paths:
         print("No trajectory files matched.", file=sys.stderr)

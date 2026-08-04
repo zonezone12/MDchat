@@ -10,6 +10,7 @@ from . import (  # noqa: F401
     metrics,
     plateau,
     changepoint,
+    changepoint_pipeline,
     endpoints,
     plotting,
     scoring,

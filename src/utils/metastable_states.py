@@ -66,6 +66,9 @@ class ClusteringResult:
     silhouette: float
     method: str
     selection_mode: str = "fixed_k"
+    # Populated when selection_mode == "auto_silhouette": one row per
+    # evaluated k with keys k, silhouette, n_clusters_effective, selected.
+    silhouette_by_k: Optional[List[Dict[str, object]]] = None
 
 
 @dataclass
@@ -498,7 +501,9 @@ def cluster_metastable_states(
     1. *rmsd_cutoff* — ``fcluster`` distance threshold
     2. *n_clusters* — fixed ``maxclust`` cut (default mode in CLI scripts)
     3. *auto_select_k=True* — pick k with highest silhouette in
-       ``k_min`` … ``k_max`` (legacy; off by default)
+       ``k_min`` … ``k_max`` (legacy; off by default). The full
+       silhouette-vs-k curve is stored on
+       :attr:`ClusteringResult.silhouette_by_k`.
 
     Silhouette on the returned result always uses *distance_matrix* when
     k ≥ 2. Use :func:`src.utils.cluster_inspection.silhouette_scores_by_k`
@@ -592,18 +597,31 @@ def cluster_metastable_states(
         k_max_eff = max(k_min, k_max_eff)
 
         best_k, best_labels, best_sil = k_min, None, -1.0
+        silhouette_by_k: List[Dict[str, object]] = []
         for k in range(k_min, k_max_eff + 1):
             labels_k = fcluster(Z, t=k, criterion="maxclust") - 1
-            if len(set(labels_k)) < 2:
-                continue
-            sil = _silhouette(labels_k)
-            if sil > best_sil:
-                best_sil, best_k, best_labels = sil, k, labels_k
+            n_eff = len(set(labels_k))
+            sil = float("nan")
+            if n_eff >= 2:
+                sil = _silhouette(labels_k)
+                if sil > best_sil:
+                    best_sil, best_k, best_labels = sil, k, labels_k
+            silhouette_by_k.append(
+                {
+                    "k": k,
+                    "silhouette": sil,
+                    "n_clusters_effective": n_eff,
+                    "selected": False,
+                }
+            )
 
         if best_labels is None:
             best_labels = np.zeros(n, dtype=int)
             best_k = 1
             best_sil = -1.0
+
+        for row in silhouette_by_k:
+            row["selected"] = row["k"] == best_k
 
         cutoff = (
             float(Z[-(best_k - 1), 2])
@@ -618,6 +636,7 @@ def cluster_metastable_states(
             silhouette=best_sil,
             method=linkage_method,
             selection_mode="auto_silhouette",
+            silhouette_by_k=silhouette_by_k,
         )
 
     raise ValueError(
@@ -795,9 +814,23 @@ def format_cluster_summary(segments: Sequence[Segment], clustering: ClusteringRe
         f"Selection mode: {mode_desc}",
         f"Silhouette score (chosen k): {clustering.silhouette:.4f}",
         f"Linkage merge height at cut: {clustering.cutoff_distance:.4f}",
-        "",
-        "Per-cluster membership:",
     ]
+    if clustering.silhouette_by_k:
+        lines.append("Silhouette vs k (auto-select):")
+        for row in clustering.silhouette_by_k:
+            mark = " ← chosen" if row.get("selected") else ""
+            sil = row["silhouette"]
+            sil_s = f"{sil:.4f}" if isinstance(sil, float) and sil == sil else "nan"
+            lines.append(
+                f"  k={row['k']}: silhouette={sil_s} "
+                f"(n_eff={row['n_clusters_effective']}){mark}"
+            )
+    lines.extend(
+        [
+            "",
+            "Per-cluster membership:",
+        ]
+    )
     by_cluster: Dict[int, List[str]] = {}
     for s in segments:
         by_cluster.setdefault(s.cluster_label, []).append(

@@ -111,6 +111,16 @@ def main() -> None:
         "segments; auto-k by silhouette"
     )
     lines.append("")
+    if (d / "atom_index_map.png").is_file():
+        lines.append("## Atom index map (feature label reference)")
+        lines.append("")
+        lines.append(
+            "Distance features are labeled `<element><index>` (e.g. `N0-H8`, "
+            "`O6-O8`). Use this diagram to map feature names to atoms."
+        )
+        lines.append("")
+        lines.append("![atom index map](atom_index_map.png)")
+        lines.append("")
     lines.append("## Key findings")
     lines.append("")
     lines.append(
@@ -131,8 +141,14 @@ def main() -> None:
     lines.append(
         "4. **Segment clusters recover the transfer-active state.** Cross-system "
         "CV clustering (`clusters/all_cv`) isolates a rare transfer-active cluster "
-        "(δ̄ ≈ −0.13) occupied only by m1n1 short segments; the majority cluster "
-        "is acid-bound (δ̄ ≈ +0.66)."
+        "(δ̄ ≈ −0.14, ~1.3% of m1n1 frames) occupied only by m1n1; the majority "
+        "cluster is acid-bound (δ̄ ≈ +0.62)."
+    )
+    lines.append(
+        "5. **Transfer is gated by water approach.** In transfer-active vs "
+        "acid-bound segments, `d(N···Ow)` shortens by ~0.82 Å (→ 2.88 Å) and "
+        "`d(O6···Ow)` by ~0.96 Å (→ 2.76 Å) — water bridges amine and nitrate "
+        "while the proton hops. See `pt_causing_behavior.md`."
     )
     lines.append("")
     lines.append("## Per-trajectory statistics")
@@ -266,11 +282,64 @@ def main() -> None:
                 )
             lines.append("")
             lines.append(
-                "PIMD visits two pairwise-geometry regimes; CLMD stays in one. "
-                "This is consistent with quantum delocalization opening additional "
-                "transfer-coupled geometries."
+                "PIMD visits a second pairwise-geometry regime that is "
+                "**water-distant** (`d(N···Ow)` ≈ 6 Å, zero amine population) — "
+                "an inactive basin opened by quantum exploration, not a "
+                "transfer-ready contact. Transfer still occurs in the shared "
+                "water-proximal basin; PIMD completes more hops there via "
+                "proton delocalization."
             )
             lines.append("")
+
+    # Cluster-state / PT-causing behavior (if analyzed)
+    behavior = d / "pt_causing_behavior.md"
+    if behavior.is_file():
+        lines.append("## Cluster states → behavior causing proton transfer")
+        lines.append("")
+        lines.append(
+            "Full analysis: [`pt_causing_behavior.md`](pt_causing_behavior.md). "
+            "Key contrast (m1n1 only, frame-weighted):"
+        )
+        lines.append("")
+        if (d / "cluster_state_contrast.png").is_file():
+            lines.append("![cluster state contrast](cluster_state_contrast.png)")
+            lines.append("")
+        summary_csv = d / "cluster_state_summary.csv"
+        if summary_csv.is_file():
+            cs = pd.read_csv(summary_csv)
+            lines.append(
+                "| role | n_seg | n_frames | δ̄ | d(N–H) | d(O–H) | "
+                "d(N···Ow) | d(O6···Ow) | frac amine |"
+            )
+            lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+            for _, r in cs.iterrows():
+                role = str(r["role"])
+                if role.startswith("delta"):
+                    lines.append(
+                        f"| **{role}** |  |  | "
+                        f"{r.get('δ mean', float('nan')):+.3f} | "
+                        f"{r.get('d(N–H)', float('nan')):+.3f} | "
+                        f"{r.get('d(O–H)', float('nan')):+.3f} | "
+                        f"{r.get('d(N_amine···Ow)', float('nan')):+.3f} | "
+                        f"{r.get('d(O6_nitrate···Ow)', float('nan')):+.3f} | "
+                        f"{r.get('frac amine', float('nan')):+.3f} |"
+                    )
+                else:
+                    lines.append(
+                        f"| {role} | {int(r['n_segments'])} | {int(r['n_frames'])} | "
+                        f"{r.get('δ mean', float('nan')):.3f} | "
+                        f"{r.get('d(N–H)', float('nan')):.3f} | "
+                        f"{r.get('d(O–H)', float('nan')):.3f} | "
+                        f"{r.get('d(N_amine···Ow)', float('nan')):.3f} | "
+                        f"{r.get('d(O6_nitrate···Ow)', float('nan')):.3f} | "
+                        f"{r.get('frac amine', float('nan')):.3f} |"
+                    )
+            lines.append("")
+        lines.append(
+            "Regenerate: `python scripts/analyze_pt_cluster_states.py "
+            "--output-dir output/nh4no3_pt`."
+        )
+        lines.append("")
 
     movies = sorted(d.glob("movie_*.gif"))
     if movies:
@@ -332,6 +401,70 @@ def main() -> None:
         )
         lines.append("")
 
+    rec_path = d / "penalty_recommendation.csv"
+    if rec_path.is_file():
+        rec = pd.read_csv(rec_path)
+        lines.append("## Penalty selection (changepoint sensitivity)")
+        lines.append("")
+        lines.append(
+            "The penalty is **not** a magic constant. The driver's default is the "
+            "BIC-style heuristic `penalty = log(n_frames) ≈ 8.5`, but "
+            "`scripts/sweep_pt_penalty.py` sweeps a log-spaced grid, records the "
+            "breakpoint count per penalty, and picks the **elbow** (knee) of the "
+            "count-vs-penalty curve — the point of diminishing returns where "
+            "adding penalty stops removing spurious breaks."
+        )
+        lines.append("")
+        lines.append("| tag | signal | cost | log(n) → n_cp | elbow penalty → n_cp |")
+        lines.append("|---|---|---|---:|---:|")
+        for _, r in rec.iterrows():
+            lines.append(
+                f"| `{r['tag']}` | {r['signal']} | `{r['cost_model']}` | "
+                f"{r['heuristic_penalty_logn']:.1f} → {int(r['n_bkps_at_heuristic'])} | "
+                f"{r['recommended_penalty']:.1f} → {int(r['n_bkps_at_elbow'])} |"
+            )
+        lines.append("")
+        if (d / "penalty_sweep_delta.png").is_file():
+            lines.append("![penalty sweep — delta CV](penalty_sweep_delta.png)")
+            lines.append("")
+        if (d / "penalty_sweep_pairwise.png").is_file():
+            lines.append("![penalty sweep — pairwise](penalty_sweep_pairwise.png)")
+            lines.append("")
+        lines.append(
+            "**Reading the curves.**"
+        )
+        lines.append("")
+        lines.append(
+            "- **δ CV (`rbf`):** a clean sigmoidal decay. The `log(n)≈8.5` default "
+            "sits on the *steep* part (~64–84 breakpoints), i.e. it **over-segments** "
+            "thermal wiggles. The elbow at penalty **≈17–22** collapses to the few "
+            "real transitions: m1n0 (no water) → **0–4**, m1n1 (with water) → "
+            "**5–17**. This separation is the chemistry — water introduces genuine "
+            "regime changes; the dry system is essentially one state."
+        )
+        lines.append(
+            "- **Pairwise (`l2`):** an almost flat plateau near ~230 breakpoints "
+            "across the whole low-penalty region (including the default). The knee "
+            "is weak and only appears past penalty ~50–90, still leaving ~220 "
+            "breaks. This signals that the raw z-scored pairwise matrix is "
+            "**noise-dominated** for l2 segmentation (a break every ~`min_size` "
+            "window regardless of penalty). Treat pairwise changepoints as a fine "
+            "-grained texture, not discrete states; the δ CV is the trustworthy "
+            "regime detector. For coarse pairwise regimes use penalty ≥ 150."
+        )
+        lines.append("")
+        lines.append(
+            "Recommended runs from the elbow (median across tags): "
+            "`--penalty 22` for δ-driven segmentation, `--penalty 58` (or higher) "
+            "for pairwise."
+        )
+        lines.append("")
+        lines.append(
+            "Regenerate: `python scripts/sweep_pt_penalty.py "
+            "--output-dir output/nh4no3_pt`."
+        )
+        lines.append("")
+
     lines.append("## Methods notes")
     lines.append("")
     lines.append(
@@ -349,7 +482,11 @@ def main() -> None:
     lines.append(
         "- **Changepoints:** `src.utils.ruptures_utils.detect_changepoints` (Pelt). "
         "Default penalty ≈ `log(n_frames)` yields many fine segments "
-        "(~230/traj on pairwise); raise `--penalty` for coarser regimes."
+        "(~230/traj on pairwise); raise `--penalty` for coarser regimes. "
+        "Penalty is chosen/justified by elbow of the sweep in "
+        "`scripts/sweep_pt_penalty.py` (see *Penalty selection* above). The δ sweep "
+        "uses the fast `KernelCPD(rbf)` solver, which optimizes the same "
+        "penalized-kernel objective as Pelt+rbf."
     )
     lines.append(
         "- **Clustering:** `src.utils.metastable_states.cluster_metastable_states` "
@@ -371,10 +508,15 @@ def main() -> None:
         "--output-dir output/nh4no3_pt --auto-select-k --k-max 10"
     )
     lines.append("")
-    lines.append("# Coarser changepoints (recommended for fewer, longer segments)")
+    lines.append("# Penalty sensitivity sweep + elbow recommendation (plots)")
     lines.append(
-        "python scripts/run_proton_transfer_analysis.py --penalty 50 "
-        "--output-dir output/nh4no3_pt_p50"
+        "python scripts/sweep_pt_penalty.py --output-dir output/nh4no3_pt"
+    )
+    lines.append("")
+    lines.append("# Coarser changepoints at the elbow penalty (fewer, real regimes)")
+    lines.append(
+        "python scripts/run_proton_transfer_analysis.py --penalty 22 "
+        "--output-dir output/nh4no3_pt_p22"
     )
     lines.append("```")
     lines.append("")
@@ -409,9 +551,27 @@ def main() -> None:
         "all_segment_stats_pairwise_distances.csv",
         "all_segments_clustered.csv",
         "cluster_occupancy.csv",
+        "penalty_recommendation.csv",
+        "penalty_sweep_delta.csv",
+        "penalty_sweep_pairwise.csv",
+        "penalty_sweep_delta.png",
+        "penalty_sweep_pairwise.png",
+        "cluster_state_summary.csv",
+        "cluster_state_contrast.png",
+        "transfer_active_segments.csv",
+        "m1n1_pairwise_state_contrast.png",
+        "pt_causing_behavior.md",
         "summary.md",
     ]:
         if (d / name).is_file() or name == "summary.md":
+            lines.append(f"- `{name}`")
+    for name in [
+        "atom_index_map.png",
+        "atom_index_map_m1n0.png",
+        "atom_index_map_m1n1.png",
+        "atom_index_map.txt",
+    ]:
+        if (d / name).is_file():
             lines.append(f"- `{name}`")
     for gif in sorted(d.glob("movie_*.gif")) + sorted(d.glob("field_movie_*.gif")):
         lines.append(f"- `{gif.name}`")

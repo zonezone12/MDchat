@@ -40,7 +40,11 @@ from src.ProtonTransfer import (
     segment_feature_matrix,
     zscore_matrix,
 )
-from src.utils.cluster_inspection import plot_pca_clusters
+from src.utils.cluster_inspection import (
+    plot_pca_clusters,
+    plot_silhouette_by_k,
+    silhouette_scores_by_k,
+)
 from src.utils.metastable_states import (
     Segment,
     assign_cluster_labels,
@@ -605,6 +609,27 @@ def cluster_segment_cohort(
     (cohort_dir / "cluster_summary.txt").write_text(
         format_cluster_summary(segments, clustering),
         encoding="utf-8",
+    )
+
+    # Silhouette-vs-k curve (records auto_select_k evaluation when used)
+    if clustering.silhouette_by_k is not None:
+        sil_df = pd.DataFrame(clustering.silhouette_by_k)
+    else:
+        sil_df = silhouette_scores_by_k(
+            feat_input.distance_matrix,
+            clustering.linkage_matrix,
+            k_max=k_max,
+        )
+        sil_df["selected"] = sil_df["k"] == clustering.n_clusters
+    sil_df.to_csv(cohort_dir / "silhouette_by_k.csv", index=False)
+    plot_silhouette_by_k(
+        sil_df,
+        cohort_dir / "silhouette_by_k.png",
+        chosen_k=clustering.n_clusters,
+        title=(
+            f"Silhouette vs k — {cohort_name} "
+            f"(chosen k={clustering.n_clusters}, mode={clustering.selection_mode})"
+        ),
     )
 
     # PCA can fail for tiny cohorts; skip gracefully
