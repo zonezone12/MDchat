@@ -381,7 +381,24 @@ def write_changepoint_tables(
     cmp_path = output_dir / "changepoint_timing_comparison.csv"
     tables.breakpoints.to_csv(bkp_path, index=False)
     tables.segment_stats.to_csv(seg_path, index=False)
-    tables.comparison.to_csv(cmp_path, index=False)
+    if tables.comparison.empty:
+        # Single-group runs have no pairwise comparisons; keep a header-only file.
+        pd.DataFrame(
+            columns=[
+                "traj_id",
+                "group_a",
+                "group_b",
+                "tolerance_frames",
+                "n_bkps_a",
+                "n_bkps_b",
+                "n_shared",
+                "jaccard",
+                "mean_timing_offset_frames",
+                "mean_timing_offset_ps",
+            ]
+        ).to_csv(cmp_path, index=False)
+    else:
+        tables.comparison.to_csv(cmp_path, index=False)
     written["all_breakpoints"] = bkp_path
     written["all_segment_stats"] = seg_path
     written["changepoint_timing_comparison"] = cmp_path
@@ -396,7 +413,17 @@ def write_changepoint_tables(
     return written
 
 
-def discover_feature_csvs(features_dir: Path) -> list[Path]:
-    """Return sorted ``*_gsa_features.csv`` paths under *features_dir*."""
+def discover_feature_csvs(
+    features_dir: Path,
+    *,
+    suffix: str = "_gsa_features.csv",
+) -> list[Path]:
+    """Return sorted feature-CSV paths under *features_dir* matching *suffix*."""
     features_dir = Path(features_dir)
-    return sorted(features_dir.glob("*_gsa_features.csv"))
+    if not suffix.startswith("*"):
+        pattern = f"*{suffix}" if suffix.startswith("_") or suffix.startswith(".") else f"*_{suffix}"
+    else:
+        pattern = suffix
+    if not pattern.endswith(".csv"):
+        pattern = f"{pattern}.csv"
+    return sorted(features_dir.glob(pattern))

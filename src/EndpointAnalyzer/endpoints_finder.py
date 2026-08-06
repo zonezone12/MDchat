@@ -1,4 +1,7 @@
-from typing import List, Optional, Tuple
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -148,6 +151,40 @@ class EndpointsFinder:
                     selected.append(i)
         return sorted(set(selected))
     
+    def _candidate_endpoints(self, mol: Chem.Mol) -> Tuple[Chem.Mol, List[int]]:
+        """Run the shared endpoint pipeline through step-back (no ring flatten).
+
+        Returns the 2D-layout molecule and the surviving endpoint atom indices.
+        """
+        m2d, xy = self.to_2d_coords(mol)
+        hull_ids = self._get_endpoints_id_from_2d_coords(xy)  # "visual tips"
+        opp_ids = self._center_endpoints_opposite_ends(xy, hull_ids)
+
+        # union hull + valid opposites
+        endpoints = set(hull_ids) | {i for i in opp_ids if i is not None}
+
+        # optional topo weighting: bias toward topologically far atoms
+        if self.use_graph_farness:
+            f = self._graph_farness(m2d)
+            f = (f - f.min()) / (np.ptp(f) + 1e-12)
+            # re-rank hull tips by farness and keep top 80–100% (gentle pruning)
+            ranked = sorted(
+                endpoints,
+                key=lambda i: self.alpha * f[i] + (1 - self.alpha) * 1.0,
+                reverse=True,
+            )
+            endpoints = set(ranked)  # no strong pruning by default
+
+        # ring spacing throttle (optional)
+        if self.ring_min_gap_deg is not None and self.ring_max_per_ring > 0:
+            endpoints = set(self._ring_spacing_filter(m2d, xy, list(endpoints)))
+
+        # step back from terminals (optional)
+        if self.step_back_from_terminals:
+            endpoints = set(self._step_back_from_terminals(m2d, list(endpoints)))
+
+        return m2d, sorted(endpoints)
+
     def find_endpoints(self, mol: Chem.Mol) -> List[int]:
         """
         Find endpoint atom indices for a given molecule.
@@ -158,34 +195,105 @@ class EndpointsFinder:
         Returns:
             List of atom indices representing endpoints
         """
-        m2d, xy = self.to_2d_coords(mol)
-        hull_ids = self._get_endpoints_id_from_2d_coords(xy)  # "visual tips"
-        opp_ids = self._center_endpoints_opposite_ends(xy, hull_ids)
-        
-        # union hull + valid opposites
-        endpoints = set(hull_ids) | {i for i in opp_ids if i is not None}
-        
-        # optional topo weighting: bias toward topologically far atoms
-        if self.use_graph_farness:
-            f = self._graph_farness(m2d)
-            f = (f - f.min()) / (np.ptp(f) + 1e-12)
-            # re-rank hull tips by farness and keep top 80–100% (gentle pruning)
-            ranked = sorted(endpoints, key=lambda i: self.alpha * f[i] + (1 - self.alpha) * 1.0, reverse=True)
-            endpoints = set(ranked)  # no strong pruning by default
-        
-        # ring spacing throttle (optional)
-        if self.ring_min_gap_deg is not None and self.ring_max_per_ring > 0:
-            endpoints = set(self._ring_spacing_filter(m2d, xy, list(endpoints)))
-        
-        # step back from terminals (optional)
-        if self.step_back_from_terminals:
-            endpoints = set(self._step_back_from_terminals(m2d, list(endpoints)))
-        
+        m2d, endpoints = self._candidate_endpoints(mol)
+
         # extend to ring atoms (optional)
         if self.extend_to_ring_atoms:
-            endpoints = set(self._extend_to_ring_atoms(m2d, list(endpoints)))
-        
+            endpoints = self._extend_to_ring_atoms(m2d, list(endpoints))
+
         return sorted(endpoints)
+
+    @staticmethod
+    def _ring_systems(mol: Chem.Mol) -> List[List[int]]:
+        """Merge rings that share atoms into fused ring systems via union-find."""
+        rings = list(mol.GetRingInfo().AtomRings())
+        if not rings:
+            return []
+
+        parent = list(range(len(rings)))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        atom_to_rings: Dict[int, List[int]] = {}
+        for rid, ring in enumerate(rings):
+            for atom_idx in ring:
+                atom_to_rings.setdefault(atom_idx, []).append(rid)
+
+        for rids in atom_to_rings.values():
+            for k in range(1, len(rids)):
+                union(rids[0], rids[k])
+
+        systems: Dict[int, set[int]] = {}
+        for rid, ring in enumerate(rings):
+            root = find(rid)
+            systems.setdefault(root, set()).update(ring)
+
+        return [sorted(atoms) for atoms in systems.values()]
+
+    def find_endpoint_sites(self, mol: Chem.Mol) -> List[List[int]]:
+        """Group endpoints into chemically meaningful sites.
+
+        Ring endpoints collapse to their fused ring system (one site per system);
+        non-ring endpoints remain singleton atom sites. Sites are sorted by their
+        minimum atom index for deterministic column ordering.
+
+        Unlike ``find_endpoints`` (which flattens ring atoms into a single list),
+        this preserves the site grouping so callers can take ring **centroids**.
+        """
+        m2d, endpoints = self._candidate_endpoints(mol)
+        if not endpoints:
+            return []
+
+        ring_systems = self._ring_systems(m2d)
+        atom_to_system: Dict[int, int] = {}
+        for sid, atoms in enumerate(ring_systems):
+            for a in atoms:
+                atom_to_system[a] = sid
+
+        sites: List[List[int]] = []
+        seen_systems: set[int] = set()
+        for ep in endpoints:
+            sid = atom_to_system.get(ep)
+            if sid is None:
+                sites.append([ep])
+            elif sid not in seen_systems:
+                seen_systems.add(sid)
+                sites.append(list(ring_systems[sid]))
+
+        sites.sort(key=lambda s: (min(s), len(s), s))
+        return sites
+
+    def find_endpoint_site_info(self, mol: Chem.Mol) -> List[Dict[str, Any]]:
+        """Per-site metadata for ``find_endpoint_sites`` (kind, n_atoms, rep atom)."""
+        m2d, _ = self._candidate_endpoints(mol)
+        sites = self.find_endpoint_sites(mol)
+        ring_atoms: set[int] = set()
+        for atoms in self._ring_systems(m2d):
+            ring_atoms.update(atoms)
+
+        info: List[Dict[str, Any]] = []
+        for site_idx, atoms in enumerate(sites):
+            # Multi-atom sites from fused ring systems are rings; singletons are atoms.
+            kind = "ring" if len(atoms) > 1 else "atom"
+            info.append(
+                {
+                    "site_index": site_idx,
+                    "kind": kind,
+                    "n_atoms": len(atoms),
+                    "atom_indices": list(atoms),
+                    "representative_atom": int(min(atoms)),
+                }
+            )
+        return info
     
     def _step_back_from_terminals(self, mol: Chem.Mol, endpoints: List[int]) -> List[int]:
         """

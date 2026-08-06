@@ -2,22 +2,39 @@
 
 **MD_analysis — developer / user guide**
 
-Detect regime changes in pre-computed GSA feature CSVs, optionally tune the Pelt penalty, cluster the resulting segments, and produce cohort summaries/plots.
+Detect regime changes in feature time series, optionally tune the Pelt penalty, cluster the resulting segments, and produce cohort summaries/plots.
 
-Logic lives in `src/ChangepointAnalysis/`. Scripts under `scripts/` are thin argparse wrappers. MDChat exposes the same stages as cohort-level skills (no loaded universe required).
+Two entry paths:
+
+| Path | Input | Feature group(s) | Typical question |
+|------|-------|------------------|------------------|
+| **GSA features** | Pre-computed `*_gsa_features.csv` | `gsa`, `iodine`, `na_water`, `combined` | Which chemical coordinates change together? |
+| **Endpoint sites** | Topology + trajectory → `*_endpoint_features.csv` | `endpoint` | Do ring-centroid / tooth distances recover A→B→C1→C2 deformation motifs? |
+
+Logic lives in `src/ChangepointAnalysis/`. Scripts under `scripts/` are thin argparse wrappers. MDChat exposes the same stages as skills.
 
 ---
 
 ## Prerequisites
 
+### GSA feature path
+
 1. Feature CSVs from `scripts/compute_gsa_features.py` (or equivalent), named `{traj_id}_gsa_features.csv`.
 2. Each CSV must include at least `frame` / `time_ps` (optional but recommended) plus the numeric feature columns listed in `src/ChangepointAnalysis/feature_groups.py`.
-3. Repo root on `PYTHONPATH` (editable install or run from the repo root as shown below).
+
+### Endpoint-site path
+
+1. Shared topology + one or more trajectories.
+2. RDKit available (`pip install -e ".[rdkit]"`) for endpoint / ring detection.
+3. Optional: an existing `*_gsa_features.csv` directory if you want an `assembly_rmsd_to_ref` overlay (`--rmsd-from`).
 
 ```powershell
 # From repo root
 python scripts/compute_gsa_features.py --help
+python scripts/run_endpoint_changepoint.py --help
 ```
+
+Repo root must be on `PYTHONPATH` (editable install or run from the repo root).
 
 ---
 
@@ -25,7 +42,7 @@ python scripts/compute_gsa_features.py --help
 
 ```mermaid
 flowchart TD
-    feats["*_gsa_features.csv"] --> detect
+    feats["*_gsa_features.csv<br/>or *_endpoint_features.csv"] --> detect
     detect["detect: Pelt per feature group"] --> tables["all_breakpoints.csv<br/>all_segment_stats.csv<br/>changepoint_timing_comparison.csv"]
     sweep["optional: penalty sweep"] -.->|"recommended penalty"| detect
     tables --> cluster["cluster segments by group"]
@@ -36,7 +53,7 @@ flowchart TD
 
 | Stage | What it does | Main outputs |
 |-------|----------------|--------------|
-| **Detect** | Multivariate Pelt (ruptures) on four feature groups | `all_breakpoints.csv`, `all_segment_stats.csv`, timing comparison |
+| **Detect** | Multivariate Pelt (ruptures) per feature group | `all_breakpoints.csv`, `all_segment_stats.csv`, timing comparison |
 | **Sweep** (optional) | Grid of penalties → elbow recommendation | `penalty_sweep/` summaries + plots |
 | **Cluster** | Hierarchical clustering of segment summaries | `clusters/{group}/`, transitions |
 | **Summarize** | Cohort Jaccard/regime tables + timeline plots | `cohort_*.csv`, `plots/` |
@@ -49,8 +66,11 @@ flowchart TD
 | `iodine` | IOD guest location and contacts | `IODINE_COLS` |
 | `na_water` | Cavity water / Na⁺ environment | `NA_WATER_COLS` |
 | `combined` | All numeric non-metadata columns | derived from the CSV |
+| `endpoint` | Site-centroid distances (`endpoint_dist_*`) | every column with prefix `endpoint_dist_` |
 
-Constants and helpers: `src/ChangepointAnalysis/feature_groups.py`.
+Constants and helpers: `src/ChangepointAnalysis/feature_groups.py` (`DEFAULT_GROUPS` = the four GSA groups; `ALL_GROUPS` also includes `endpoint`).
+
+Timeline plots fall back to `endpoint_dist_mean/min/max` when the usual GSA panel columns are absent, so summarize works on endpoint-only CSVs.
 
 ---
 
@@ -58,23 +78,26 @@ Constants and helpers: `src/ChangepointAnalysis/feature_groups.py`.
 
 | Path | Role |
 |------|------|
-| `src/ChangepointAnalysis/feature_groups.py` | Column lists, colors, group helpers |
-| `src/ChangepointAnalysis/detection.py` | `ChangepointConfig`, detection + CSV writers |
+| `src/ChangepointAnalysis/feature_groups.py` | Column lists, colors, group helpers, CSV suffix helpers |
+| `src/ChangepointAnalysis/detection.py` | `ChangepointConfig`, detection + CSV writers, `discover_feature_csvs(..., suffix=)` |
 | `src/ChangepointAnalysis/penalty_sweep.py` | Elbow / plateau sweep |
 | `src/ChangepointAnalysis/segment_clustering.py` | Segment clustering |
-| `src/ChangepointAnalysis/reporting.py` | Cohort tables and plots |
-| `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline` orchestrator |
+| `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation` |
+| `src/ChangepointAnalysis/endpoint_features.py` | Ring-site feature extraction → `*_endpoint_features.csv` |
+| `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
+| `src/EndpointAnalyzer/endpoints_finder.py` | `find_endpoint_sites` / ring-system grouping |
 | `scripts/changepoint_feature_groups.py` | Detect CLI |
 | `scripts/sweep_changepoint_penalty.py` | Sweep CLI |
 | `scripts/cluster_changepoint_segments.py` | Cluster CLI |
 | `scripts/summarize_changepoint_results.py` | Summarize CLI |
-| `scripts/run_changepoint_pipeline.py` | End-to-end CLI |
+| `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features) |
+| `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
 | `src/mdchat/skills/changepoint_pipeline.py` | MDChat skills |
 | `tests/test_changepoint_pipeline.py` | Synthetic regression tests |
 
 ---
 
-## Quick start (recommended)
+## Quick start — GSA features
 
 One command for detect → cluster → summarize:
 
@@ -107,11 +130,94 @@ Useful flags:
 | `--skip-summarize` | off | Skip plots / cohort CSVs |
 | `--min-size` | 10 | Minimum segment length (frames) |
 | `--jump` | 5 | Ruptures subsample step |
-| `--tolerance-frames` | 50 | ± for “shared” breakpoints |
+| `--tolerance-frames` | 50 | Window for “shared” breakpoints |
 
 ---
 
-## Stage-by-stage CLIs
+## Quick start — endpoint sites (A / B / C1 / C2)
+
+Use this path when you want to ask whether **endpoint geometry alone** recovers the paper's escalating deformation motifs (perfect cube → one cation–π open → two open with closed d1 → two open with elongated d1).
+
+### Ring centroids, not atom–atom distances
+
+A cation–π contact is measured from the **ring centroid**, not from individual ring atoms. The extractor therefore:
+
+1. Finds endpoint tips via `EndpointsFinder`.
+2. Groups tips into **sites**: fused ring systems (union-find over RDKit rings) become one multi-atom site; non-ring tips stay singleton atom sites.
+3. Computes **site-centroid ↔ site-centroid** distances each frame (`EndpointAnalyzerObserver(use_ring_centroids=True)`).
+
+This maps chemically to:
+
+| Paper parameter | Endpoint-site proxy |
+|-----------------|---------------------|
+| Cation–π (open ≥ 6.5 Å) | Pole Py⁺ site ↔ benzene **ring-system centroid** |
+| Equatorial d1 (closed ~5 Å / elongated ≥ 7 Å) | Gear-tooth (ipso-carbon) atom-site distances |
+
+We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å).
+
+```mermaid
+flowchart TD
+  topo["topology + trajectory"] --> sel["resolve_selections → monomers"]
+  sel --> sites["find_endpoint_sites → ring + atom sites"]
+  sites --> obs["EndpointAnalyzerObserver use_ring_centroids=True"]
+  obs --> csv["*_endpoint_features.csv + endpoint_sites.csv"]
+  csv --> pipe["ChangepointPipeline groups=endpoint"]
+  pipe --> cmp["endpoint_cluster_deformation_summary.csv"]
+```
+
+### CLI
+
+```powershell
+python scripts/run_endpoint_changepoint.py `
+  --topology traj/BHHpH_ca.prmtop `
+  --trajectories "traj/BHHpH_*_mdcrd_v.trj" `
+  --gsa-resname MOL `
+  --output-dir output/endpoint_changepoints `
+  --rmsd-from output/gsa_features `
+  --include-site-pairs `
+  --with-sweep
+```
+
+| Flag | Effect |
+|------|--------|
+| `--no-ring-centroids` | Flat atom endpoints instead of ring-system centroids |
+| `--include-site-pairs` | Also emit `endpoint_dist_{i}s{a}_{j}s{b}` for individual openings |
+| `--rmsd-from DIR` | Overlay mean `assembly_rmsd_to_ref` per cluster from `*_gsa_features.csv` |
+| `--step N` | Trajectory frame stride |
+| `--features-dir` | Where to write features (default: `<output-dir>/endpoint_features`) |
+| `--with-sweep` | Penalty sweep before final detection |
+| `--n-clusters` / `--k` | Segment clusters (default 5) |
+
+**Outputs under `--output-dir`:**
+
+| Artifact | Role |
+|----------|------|
+| `endpoint_features/*_endpoint_features.csv` | Per-frame site-distance features |
+| `endpoint_features/endpoint_sites.csv` | Site map (monomer, kind, atom ids) |
+| `endpoint_features/endpoint_sites.png` | Visual QC from topology (blue=ring system, orange=atom site); one file per prmtop |
+| `all_breakpoints.csv`, `all_segment_stats.csv`, … | Standard changepoint tables (`group=endpoint`) |
+| `clusters/` | Segment clusters |
+| `endpoint_cluster_deformation_summary.csv` | Clusters ordered by mean endpoint distance (+ optional RMSD) |
+| `plots/endpoint_cluster_deformation.png` | Bar/scatter vs deformation proxy |
+
+### Reading results vs A / B / C1 / C2
+
+1. Order clusters by mean endpoint-site distance (the deformation summary CSV already sorts this way).
+2. If `--rmsd-from` was set, compare each cluster's mean RMSD to the paper peaks (A≈1.0, B≈1.5, C1≈1.6–2.5, C2≈2.7 Å).
+3. With `--include-site-pairs`, inspect which individual site-pair distances jump at breakpoints — a single large jump suggests B; two openings plus an elongated equatorial pair suggest C2.
+
+### Feature column schema (`*_endpoint_features.csv`)
+
+| Columns | Meaning |
+|---------|---------|
+| `traj_id`, `frame`, `time_ps` | Metadata |
+| `endpoint_dist_{i}_{j}_{min,mean,max}` | Aggregates over all site-pairs between monomers *i* and *j* |
+| `endpoint_dist_{mean,min,max,std}` | Assembly-wide aggregates |
+| `endpoint_dist_{i}s{a}_{j}s{b}` | Optional raw site–site distance (`--include-site-pairs`) |
+
+---
+
+## Stage-by-stage CLIs (GSA features)
 
 Use these when you want to re-run one stage without the full pipeline.
 
@@ -173,11 +279,13 @@ python scripts/summarize_changepoint_results.py `
 
 **Writes:** `cohort_timing_summary.csv`, `cohort_segment_regime_summary.csv`, `breakpoints_per_trajectory.csv`, and plots under `plots/` (Jaccard heatmap, breakpoint histogram, cohort overview, optional timelines).
 
+To summarize an endpoint-only run, point `--features-dir` at the `*_endpoint_features.csv` directory (timeline panels auto-fall back to endpoint aggregates).
+
 ---
 
 ## Python API
 
-### End-to-end
+### GSA features end-to-end
 
 ```python
 from src.ChangepointAnalysis import (
@@ -207,14 +315,63 @@ pipe.cluster_segments()
 pipe.summarize()
 ```
 
-### Detect only
+Pass `features_suffix="_endpoint_features.csv"` when the features directory holds endpoint CSVs:
+
+```python
+pipe = ChangepointPipeline(
+    "output/endpoint_changepoints/endpoint_features",
+    "output/endpoint_changepoints",
+    detection=ChangepointConfig(groups=("endpoint",)),
+    clustering=SegmentClusteringConfig(groups=("endpoint",)),
+    features_suffix="_endpoint_features.csv",
+)
+```
+
+### Endpoint sites end-to-end
+
+```python
+from src.ChangepointAnalysis import run_endpoint_changepoint
+
+artifacts = run_endpoint_changepoint(
+    "traj/BHHpH_ca.prmtop",
+    ["traj/BHHpH_109345_mdcrd_v.trj"],
+    output_dir="output/endpoint_changepoints",
+    use_ring_centroids=True,
+    include_site_pairs=True,
+    rmsd_from="output/gsa_features",
+)
+```
+
+Lower-level extraction only:
+
+```python
+import MDAnalysis as mda
+from src.ChangepointAnalysis import (
+    EndpointFeatureConfig,
+    generate_endpoint_features,
+    write_endpoint_features_csv,
+)
+
+u = mda.Universe("topo.prmtop", "traj.trj")
+features, sites = generate_endpoint_features(
+    u,
+    EndpointFeatureConfig(use_ring_centroids=True, include_site_pairs=True),
+    traj_id="my_traj",
+)
+write_endpoint_features_csv(features, "output/endpoint_features", "my_traj", sites_df=sites)
+```
+
+### Detect only (any suffix)
 
 ```python
 from pathlib import Path
 from src.ChangepointAnalysis import ChangepointConfig, detect_cohort_changepoints
 from src.ChangepointAnalysis.detection import discover_feature_csvs
 
-csv_paths = discover_feature_csvs(Path("output/gsa_features"))
+csv_paths = discover_feature_csvs(
+    Path("output/gsa_features"),
+    suffix="_gsa_features.csv",  # or "_endpoint_features.csv"
+)
 tables = detect_cohort_changepoints(
     csv_paths,
     ChangepointConfig(penalty=6.2),
@@ -231,27 +388,30 @@ ChangepointTables          # breakpoints, segment_stats, comparison DataFrames
 PenaltySweepConfig         # grid size, thresholds, nested ChangepointConfig
 PenaltySweepResult         # summary, elbow, recommended_penalty, ...
 SegmentClusteringConfig    # n_clusters, linkage, groups, PCA / all-k options
+EndpointFeatureConfig      # gsa_resname, use_ring_centroids, include_site_pairs, stride, ...
 ```
 
 ---
 
 ## MDChat skills
 
-Register automatically when MDChat loads skills (`/skills` or `/analysis`). Category: `changepoint`. These are **cohort / CSV** skills — they do **not** require a loaded `universe` (unlike the single-array `detect_changepoints` skill).
+Register automatically when MDChat loads skills (`/skills` or `/analysis`). Category: `changepoint`.
 
-| Skill | Stage |
-|-------|--------|
-| `changepoint_feature_groups` | Detect |
-| `sweep_changepoint_penalty` | Penalty sweep (+ optional final detect) |
-| `cluster_changepoint_segments` | Segment clustering |
-| `summarize_changepoint_results` | Cohort tables + plots |
-| `run_changepoint_pipeline` | Full chain |
+| Skill | Stage | Needs universe? |
+|-------|--------|-----------------|
+| `changepoint_feature_groups` | Detect on `*_gsa_features.csv` | No |
+| `sweep_changepoint_penalty` | Penalty sweep (+ optional final detect) | No |
+| `cluster_changepoint_segments` | Segment clustering | No |
+| `summarize_changepoint_results` | Cohort tables + plots | No |
+| `run_changepoint_pipeline` | Full GSA-feature chain | No |
+| `run_endpoint_changepoint` | Trajectory → endpoint sites → changepoint | No (loads trajectories itself) |
 
 Example asks:
 
 - “Run changepoint detection on `output/gsa_features` into `output/changepoints`.”
 - “Sweep the Pelt penalty and re-run detection at the elbow.”
 - “Cluster changepoint segments with k=5, then summarize.”
+- “Run endpoint-site changepoint on these trajectories and overlay RMSD from `output/gsa_features`.”
 
 ---
 
@@ -272,6 +432,12 @@ Plus per-group `*_mean` / `*_std` columns from `SUMMARY_COLS`.
 
 `traj_id`, `group_a`, `group_b`, `tolerance_frames`, `n_bkps_a`, `n_bkps_b`, `n_shared`, `jaccard`, `mean_timing_offset_frames`, `mean_timing_offset_ps`
 
+Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file — there are no pairwise group comparisons.
+
+### `endpoint_cluster_deformation_summary.csv`
+
+`cluster_label`, `n_segments`, `n_trajectories`, `total_frames`, `endpoint_dist_mean`, `endpoint_dist_std`, and optionally `assembly_rmsd_to_ref_mean` / `_std` when `--rmsd-from` is set. Rows are sorted by mean endpoint distance.
+
 ---
 
 ## Defaults that matter
@@ -284,16 +450,26 @@ Plus per-group `*_mean` / `*_std` columns from `SUMMARY_COLS`.
 | `jump` | 5 | Speed vs resolution trade-off |
 | Timing tolerance | 50 frames | Used for Jaccard “shared” matches |
 | Clustering | Ward, k=5 | Fixed k by default; `--auto-select-k` available |
+| Ring centroids | on for endpoint path | `use_ring_centroids=True`; opt out with `--no-ring-centroids` |
 
 ---
 
 ## Tests
 
 ```powershell
+# Full suite (GSA + endpoint)
 python -m pytest tests/test_changepoint_pipeline.py -v
+
+# Endpoint-focused only
+python -m pytest tests/test_changepoint_pipeline.py -k endpoint -v
 ```
 
-Synthetic features with a planted regime shift check output filenames, column sets, and that a breakpoint lands near the planted frame.
+Coverage includes:
+
+- Synthetic GSA features with a planted regime shift (filenames, schemas, breakpoint near the shift)
+- `all_pairs_to_metrics_df` flattening
+- Ring-system grouping (biphenyl / naphthalene) and centroid math
+- Endpoint-group pipeline on synthetic `*_endpoint_features.csv`
 
 ---
 
@@ -302,4 +478,5 @@ Synthetic features with a planted regime shift check output filenames, column se
 - Cohort interpretation notes: `output/changepoints/ANALYSIS_SUMMARY.md`
 - Presentation-style writeup: `output/changepoints/CHANGPOINT_PIPELINE_PRESENTATION.md`
 - Feature extraction entry point: `scripts/compute_gsa_features.py`
+- Endpoint finder / observer: `src/EndpointAnalyzer/`
 - Low-level ruptures wrapper: `src/utils/ruptures_utils.py`

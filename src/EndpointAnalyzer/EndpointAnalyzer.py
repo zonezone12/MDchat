@@ -63,6 +63,39 @@ class EndpointAnalyzer:
         center = sel.center_of_mass()
         return center, mda_endpoint_indices if mda_endpoint_indices else []
 
+    @staticmethod
+    def find_residue_endpoint_sites(
+        u: mda.Universe,
+        sel_str: str,
+        endpoints_finder: Optional[EndpointsFinder] = None,  # type: ignore[name-defined]
+    ) -> Tuple[np.ndarray, List[List[int]]]:
+        """Find endpoint *sites* (ring systems / atoms) as MDA atom-id groups.
+
+        Each site is a list of MDA atom ids. Ring-system sites contain all atoms
+        of a fused ring system; atom sites are singletons. Callers that want
+        cation–π style distances should take the mean position of each site.
+        """
+        if endpoints_finder is None:
+            endpoints_finder = EndpointsFinder()  # type: ignore[call-arg]
+
+        sel = u.select_atoms(sel_str)
+        if len(sel) == 0:
+            return np.array([np.nan, np.nan, np.nan]), []
+
+        mol = sel.convert_to("RDKIT")
+        if mol is None:
+            raise ValueError("RDKit conversion failed")
+
+        sites_rdkit = endpoints_finder.find_endpoint_sites(mol)
+        sites_mda: List[List[int]] = []
+        for site in sites_rdkit:
+            mda_ids = [int(sel[rdkit_idx].id) for rdkit_idx in site]
+            if mda_ids:
+                sites_mda.append(mda_ids)
+
+        center = sel.center_of_mass()
+        return center, sites_mda
+
     def compute_endpoint_distances(
         self,
         u: mda.Universe,
@@ -577,6 +610,7 @@ class EndpointAnalyzerObserver(FrameObserver):
         residue_sel_list: List[str],
         endpoints_finder: Optional[EndpointsFinder] = None,
         n_frame_rows: Optional[int] = None,
+        use_ring_centroids: bool = False,
     ):
         """
         Initialize EndpointAnalyzerObserver.
@@ -586,15 +620,22 @@ class EndpointAnalyzerObserver(FrameObserver):
             endpoints_finder: Optional EndpointsFinder instance
             n_frame_rows: If set, allocate distance arrays with this many rows
                 (use the sliced iteration length when using start/stop/step).
+            use_ring_centroids: If True, treat each fused ring system as one
+                site and compute distances between site centroids (cation–π
+                style). If False (default), use flat atom-level endpoints
+                (tooth-contact / legacy behaviour).
         """
         super().__init__()  # Initialize results dict from FrameObserver
         
         self.residue_sel_list = residue_sel_list
         self.endpoints_finder = endpoints_finder or EndpointsFinder()
         self._n_frame_rows = n_frame_rows
+        self.use_ring_centroids = bool(use_ring_centroids)
         
         # Storage for results (using self.results for ResultsGroup pattern)
         self.stored_ep_indices: List[List[int]] = []
+        # Per residue -> per site -> MDA atom ids (only when use_ring_centroids)
+        self.stored_site_indices: List[List[List[int]]] = []
         self.results['all_pairs'] = {}  # Store in results dict for aggregation
         self.n_res: int = 0
         self.n_frames: int = 0
@@ -626,25 +667,46 @@ class EndpointAnalyzerObserver(FrameObserver):
             else iterator.get_n_frames()
         )
         
-        # Find endpoint indices once on the initial frame
+        # Find endpoint / site indices once on the initial frame
         u = iterator.universe
-        #seems not needed to be at the initial frame in the iterator also save the time
-        #u.trajectory[0]  # Go to initial frame 
         
         self.stored_ep_indices = []
+        self.stored_site_indices = []
         for idx, sel_str in enumerate(self.residue_sel_list):
             try:
-                _, ep_indices = EndpointAnalyzer.find_residue_endpoints(
-                    u, sel_str, self.endpoints_finder
-                )
-                self.stored_ep_indices.append(ep_indices)
-                if len(ep_indices) == 0:
-                    warnings.warn(
-                        f"No endpoints found for residue {idx} ({sel_str}) on initial frame. "
-                        f"Check selection string and EndpointsFinder parameters."
+                if self.use_ring_centroids:
+                    _, sites = EndpointAnalyzer.find_residue_endpoint_sites(
+                        u, sel_str, self.endpoints_finder
                     )
+                    self.stored_site_indices.append(sites)
+                    # Flat list used only for logging / legacy accessors
+                    flat = [aid for site in sites for aid in site]
+                    self.stored_ep_indices.append(flat)
+                    n_sites = len(sites)
+                    if n_sites == 0:
+                        warnings.warn(
+                            f"No endpoint sites found for residue {idx} ({sel_str}). "
+                            f"Check selection string and EndpointsFinder parameters."
+                        )
+                    else:
+                        n_ring = sum(1 for s in sites if len(s) > 1)
+                        print(
+                            f"  Residue {idx} ({sel_str}): Found {n_sites} site(s) "
+                            f"({n_ring} ring, {n_sites - n_ring} atom)"
+                        )
                 else:
-                    print(f"  Residue {idx} ({sel_str}): Found {len(ep_indices)} endpoint(s)")
+                    _, ep_indices = EndpointAnalyzer.find_residue_endpoints(
+                        u, sel_str, self.endpoints_finder
+                    )
+                    self.stored_ep_indices.append(ep_indices)
+                    self.stored_site_indices.append([[aid] for aid in ep_indices])
+                    if len(ep_indices) == 0:
+                        warnings.warn(
+                            f"No endpoints found for residue {idx} ({sel_str}) on initial frame. "
+                            f"Check selection string and EndpointsFinder parameters."
+                        )
+                    else:
+                        print(f"  Residue {idx} ({sel_str}): Found {len(ep_indices)} endpoint(s)")
             except Exception as e:
                 warnings.warn(
                     f"Failed to find endpoints for {sel_str} on initial frame: {e}"
@@ -652,9 +714,12 @@ class EndpointAnalyzerObserver(FrameObserver):
                 import traceback
                 traceback.print_exc()
                 self.stored_ep_indices.append([])
+                self.stored_site_indices.append([])
         
-        # Determine max number of endpoints per residue
-        max_ep_per_residue = [len(ep_indices) for ep_indices in self.stored_ep_indices]
+        # Number of sites (or atoms) per residue
+        max_ep_per_residue = [
+            len(sites) for sites in self.stored_site_indices
+        ]
         
         # Initialize distance arrays
         self.all_pairs = {}
@@ -678,10 +743,35 @@ class EndpointAnalyzerObserver(FrameObserver):
                 f"  Found endpoints per residue: {max_ep_per_residue}"
             )
         else:
-            print(f"  Initialized {pairs_initialized} endpoint pair(s) for distance computation")
+            mode = "site-centroid" if self.use_ring_centroids else "atom"
+            print(
+                f"  Initialized {pairs_initialized} endpoint pair(s) "
+                f"for {mode} distance computation"
+            )
         
         self._initialized = True
     
+    def _site_positions(
+        self,
+        universe: mda.Universe,
+        sites: List[List[int]],
+    ) -> Optional[np.ndarray]:
+        """Return (n_sites, 3) positions — centroid of each site's atoms."""
+        if not sites:
+            return None
+        positions = []
+        for site in sites:
+            if not site:
+                continue
+            coords = universe.atoms[site].positions
+            if self.use_ring_centroids or len(site) > 1:
+                positions.append(coords.mean(axis=0))
+            else:
+                positions.append(coords[0])
+        if not positions:
+            return None
+        return np.asarray(positions, dtype=float)
+
     def on_frame(self, ts: mda.coordinates.base.Timestep, frame_idx: int,
                  universe: mda.Universe) -> None:
         """Process a single frame during iteration."""
@@ -691,13 +781,17 @@ class EndpointAnalyzerObserver(FrameObserver):
         frame_ep_positions = []
         for idx, sel_str in enumerate(self.residue_sel_list):
             try:
-                ep_indices = self.stored_ep_indices[idx]
-                if len(ep_indices) > 0:
-                    # Get endpoint positions directly from universe (already at current frame)
-                    ep_positions = universe.atoms[ep_indices].positions
-                    frame_ep_positions.append(ep_positions)
+                if self.use_ring_centroids:
+                    sites = self.stored_site_indices[idx]
+                    frame_ep_positions.append(self._site_positions(universe, sites))
                 else:
-                    frame_ep_positions.append(None)
+                    ep_indices = self.stored_ep_indices[idx]
+                    if len(ep_indices) > 0:
+                        # Get endpoint positions directly from universe (already at current frame)
+                        ep_positions = universe.atoms[ep_indices].positions
+                        frame_ep_positions.append(ep_positions)
+                    else:
+                        frame_ep_positions.append(None)
             except Exception as e:
                 warnings.warn(
                     f"Failed to get endpoint positions for {sel_str} at frame {ts.frame}: {e}"

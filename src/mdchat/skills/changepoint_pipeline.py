@@ -651,9 +651,216 @@ class RunChangepointPipelineSkill(Skill):
         )
 
 
+class EndpointChangepointSkill(Skill):
+    name = "run_endpoint_changepoint"
+    description = (
+        "Extract endpoint-site distances (ring-system centroids + atom sites) from "
+        "GSA monomer selections, then run the changepoint pipeline on the endpoint "
+        "feature group. Use to check whether deformation regimes recovered from "
+        "endpoint distances align with the paper's A/B/C1/C2 metastructures. "
+        "Optionally overlays assembly_rmsd_to_ref from a prior GSA features directory."
+    )
+    category = "changepoint"
+    parameters = [
+        Parameter(
+            "topology",
+            ParamType.FILE_PATH,
+            "Shared topology file (prmtop, pdb, …).",
+            required=True,
+        ),
+        Parameter(
+            "trajectories",
+            ParamType.ARRAY,
+            "Trajectory path(s) or glob pattern(s).",
+            required=True,
+            items_type=ParamType.STRING,
+        ),
+        Parameter(
+            "output_dir",
+            ParamType.FILE_PATH,
+            "Pipeline output directory.",
+            required=False,
+            default="output/endpoint_changepoints",
+        ),
+        Parameter(
+            "features_dir",
+            ParamType.FILE_PATH,
+            "Where to write *_endpoint_features.csv.",
+            required=False,
+            default=None,
+        ),
+        Parameter(
+            "gsa_resname",
+            ParamType.STRING,
+            "GSA amphiphile residue name.",
+            required=False,
+            default="MOL",
+        ),
+        Parameter(
+            "n_monomers",
+            ParamType.INTEGER,
+            "Expected number of GSA monomers.",
+            required=False,
+            default=6,
+            min_value=2,
+        ),
+        Parameter(
+            "use_ring_centroids",
+            ParamType.BOOLEAN,
+            "Collapse fused ring systems to centroids (cation–π style).",
+            required=False,
+            default=True,
+        ),
+        Parameter(
+            "include_site_pairs",
+            ParamType.BOOLEAN,
+            "Also emit per-site-pair distance columns.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "step",
+            ParamType.INTEGER,
+            "Trajectory frame stride.",
+            required=False,
+            default=1,
+            min_value=1,
+        ),
+        Parameter(
+            "time_per_frame_ps",
+            ParamType.FLOAT,
+            "Time between consecutive trajectory frames (ps).",
+            required=False,
+            default=1.0,
+            min_value=0.0,
+        ),
+        Parameter(
+            "penalty",
+            ParamType.FLOAT,
+            "Pelt penalty (omit for auto).",
+            required=False,
+            default=None,
+            min_value=0.0,
+        ),
+        Parameter(
+            "with_sweep",
+            ParamType.BOOLEAN,
+            "Run penalty sweep first.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "n_clusters",
+            ParamType.INTEGER,
+            "Number of segment clusters.",
+            required=False,
+            default=5,
+            min_value=2,
+        ),
+        Parameter(
+            "rmsd_from",
+            ParamType.FILE_PATH,
+            "Optional *_gsa_features.csv directory for RMSD overlay.",
+            required=False,
+            default=None,
+        ),
+        Parameter(
+            "skip_clustering",
+            ParamType.BOOLEAN,
+            "Skip segment clustering.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "skip_summarize",
+            ParamType.BOOLEAN,
+            "Skip summarize/plot stage.",
+            required=False,
+            default=False,
+        ),
+    ]
+    requires: List[str] = []
+    produces = ["endpoint_changepoint_artifacts"]
+
+    def execute(self, context: "AnalysisContext", **params: Any) -> SkillResult:
+        from pathlib import Path
+
+        from src.ChangepointAnalysis import (
+            ChangepointConfig,
+            PenaltySweepConfig,
+            SegmentClusteringConfig,
+        )
+        from src.ChangepointAnalysis.pipeline import run_endpoint_changepoint
+
+        topology = params.get("topology")
+        trajectories = params.get("trajectories")
+        if not topology or not trajectories:
+            return SkillResult(
+                success=False,
+                summary="topology and trajectories are required",
+                error="missing required parameters",
+            )
+        if isinstance(trajectories, str):
+            trajectories = [trajectories]
+
+        detection = ChangepointConfig(
+            groups=("endpoint",),
+            penalty=params.get("penalty"),
+        )
+        clustering = SegmentClusteringConfig(
+            groups=("endpoint",),
+            n_clusters=int(params.get("n_clusters", 5)),
+        )
+        with_sweep = bool(params.get("with_sweep", False))
+        sweep = None
+        if with_sweep:
+            sweep = PenaltySweepConfig(detection=detection)
+
+        try:
+            artifacts = run_endpoint_changepoint(
+                topology,
+                trajectories,
+                output_dir=params.get("output_dir") or "output/endpoint_changepoints",
+                features_dir=params.get("features_dir"),
+                gsa_resname=params.get("gsa_resname") or "MOL",
+                n_monomers=int(params.get("n_monomers", 6)),
+                use_ring_centroids=bool(params.get("use_ring_centroids", True)),
+                include_site_pairs=bool(params.get("include_site_pairs", False)),
+                step=int(params.get("step", 1)),
+                time_per_frame_ps=float(params.get("time_per_frame_ps", 1.0)),
+                detection=detection,
+                clustering=clustering,
+                with_sweep=with_sweep,
+                sweep=sweep,
+                skip_clustering=bool(params.get("skip_clustering", False)),
+                skip_summarize=bool(params.get("skip_summarize", False)),
+                rmsd_from=params.get("rmsd_from"),
+            )
+        except Exception as exc:
+            return SkillResult(
+                success=False,
+                summary=f"Endpoint changepoint pipeline failed: {exc}",
+                error=str(exc),
+            )
+
+        art_str = {k: str(v) for k, v in artifacts.items()}
+        context.set("endpoint_changepoint_artifacts", art_str)
+        out = params.get("output_dir") or "output/endpoint_changepoints"
+        return SkillResult(
+            success=True,
+            data={"endpoint_changepoint_artifacts": art_str},
+            artifacts=art_str,
+            summary=(
+                f"Endpoint-site changepoint pipeline complete → {out} "
+                f"({len(art_str)} artifacts)"
+            ),
+        )
+
+
 _registry = get_default_registry()
 _registry.register(ChangepointFeatureGroupsSkill())
 _registry.register(SweepChangepointPenaltySkill())
 _registry.register(ClusterChangepointSegmentsSkill())
 _registry.register(SummarizeChangepointResultsSkill())
 _registry.register(RunChangepointPipelineSkill())
+_registry.register(EndpointChangepointSkill())

@@ -17,6 +17,7 @@ from .feature_groups import (
     GROUP_COLORS,
     GROUP_MARKERS,
     REGIME_COLS,
+    resolve_features_csv,
 )
 
 # See module docstring in summarize script for why assembly_rg is the structural reference.
@@ -26,42 +27,101 @@ DEFAULT_TIMELINE_PANELS: list[tuple[str, str]] = [
     ("cavity_ion_count", "Cavity Na⁺ count"),
 ]
 
+DEFAULT_ENDPOINT_TIMELINE_PANELS: list[tuple[str, str]] = [
+    ("endpoint_dist_mean", "Endpoint-site dist mean (Å)"),
+    ("endpoint_dist_min", "Endpoint-site dist min (Å)"),
+    ("endpoint_dist_max", "Endpoint-site dist max (Å)"),
+]
+
+
+def resolve_timeline_panels(
+    df: pd.DataFrame,
+    panels: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Keep requested panels that exist in *df*; fall back to endpoint aggregates."""
+    requested = list(panels) if panels is not None else list(DEFAULT_TIMELINE_PANELS)
+    present = [(c, lab) for c, lab in requested if c in df.columns]
+    if present:
+        return present
+    return [(c, lab) for c, lab in DEFAULT_ENDPOINT_TIMELINE_PANELS if c in df.columns]
+
 
 def write_cohort_tables(changepoints_dir: Path) -> dict[str, Path]:
     """Write aggregated CSV summaries next to changepoint outputs."""
     changepoints_dir = Path(changepoints_dir)
-    cmp = pd.read_csv(changepoints_dir / "changepoint_timing_comparison.csv")
+    cmp_path = changepoints_dir / "changepoint_timing_comparison.csv"
+    try:
+        cmp = pd.read_csv(cmp_path)
+    except pd.errors.EmptyDataError:
+        cmp = pd.DataFrame(
+            columns=[
+                "traj_id",
+                "group_a",
+                "group_b",
+                "tolerance_frames",
+                "n_bkps_a",
+                "n_bkps_b",
+                "n_shared",
+                "jaccard",
+                "mean_timing_offset_ps",
+                "mean_timing_offset_frames",
+                "n_shared",
+            ]
+        )
     seg = pd.read_csv(changepoints_dir / "all_segment_stats.csv")
     bkp = pd.read_csv(changepoints_dir / "all_breakpoints.csv")
 
     written: dict[str, Path] = {}
 
-    pairs = (
-        cmp.groupby(["group_a", "group_b"], as_index=False)
-        .agg(
-            n_trajectories=("traj_id", "count"),
-            median_jaccard=("jaccard", "median"),
-            mean_jaccard=("jaccard", "mean"),
-            median_offset_ps=("mean_timing_offset_ps", "median"),
-            mean_offset_ps=("mean_timing_offset_ps", "mean"),
-            median_n_shared=("n_shared", "median"),
-            median_n_bkps_a=("n_bkps_a", "median"),
-            median_n_bkps_b=("n_bkps_b", "median"),
+    if cmp.empty or "group_a" not in cmp.columns:
+        pairs = pd.DataFrame(
+            columns=[
+                "group_a",
+                "group_b",
+                "n_trajectories",
+                "median_jaccard",
+                "mean_jaccard",
+                "median_offset_ps",
+                "mean_offset_ps",
+                "median_n_shared",
+                "median_n_bkps_a",
+                "median_n_bkps_b",
+            ]
         )
-        .sort_values("median_jaccard", ascending=False)
-    )
+    else:
+        pairs = (
+            cmp.groupby(["group_a", "group_b"], as_index=False)
+            .agg(
+                n_trajectories=("traj_id", "count"),
+                median_jaccard=("jaccard", "median"),
+                mean_jaccard=("jaccard", "mean"),
+                median_offset_ps=("mean_timing_offset_ps", "median"),
+                mean_offset_ps=("mean_timing_offset_ps", "mean"),
+                median_n_shared=("n_shared", "median"),
+                median_n_bkps_a=("n_bkps_a", "median"),
+                median_n_bkps_b=("n_bkps_b", "median"),
+            )
+            .sort_values("median_jaccard", ascending=False)
+        )
     path = changepoints_dir / "cohort_timing_summary.csv"
     pairs.to_csv(path, index=False)
     written["cohort_timing_summary"] = path
 
-    iod_gsa = cmp[
-        ((cmp["group_a"] == "iodine") & (cmp["group_b"] == "gsa"))
-        | ((cmp["group_a"] == "gsa") & (cmp["group_b"] == "iodine"))
-    ].copy()
+    if cmp.empty or "group_a" not in cmp.columns:
+        iod_gsa = pd.DataFrame(columns=list(cmp.columns) if len(cmp.columns) else ["jaccard"])
+    else:
+        iod_gsa = cmp[
+            ((cmp["group_a"] == "iodine") & (cmp["group_b"] == "gsa"))
+            | ((cmp["group_a"] == "gsa") & (cmp["group_b"] == "iodine"))
+        ].copy()
     low_path = changepoints_dir / "timing_low_agreement_iodine_vs_gsa.csv"
     high_path = changepoints_dir / "timing_high_agreement_iodine_vs_gsa.csv"
-    iod_gsa.sort_values("jaccard").head(10).to_csv(low_path, index=False)
-    iod_gsa.sort_values("jaccard", ascending=False).head(10).to_csv(high_path, index=False)
+    if "jaccard" in iod_gsa.columns and not iod_gsa.empty:
+        iod_gsa.sort_values("jaccard").head(10).to_csv(low_path, index=False)
+        iod_gsa.sort_values("jaccard", ascending=False).head(10).to_csv(high_path, index=False)
+    else:
+        iod_gsa.to_csv(low_path, index=False)
+        iod_gsa.to_csv(high_path, index=False)
     written["timing_low_agreement_iodine_vs_gsa"] = low_path
     written["timing_high_agreement_iodine_vs_gsa"] = high_path
 
@@ -96,9 +156,17 @@ def plot_jaccard_heatmap(changepoints_dir: Path, plot_dir: Path) -> Path:
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
     pairs = pd.read_csv(changepoints_dir / "cohort_timing_summary.csv")
-    groups = list(DEFAULT_GROUPS)
+    if pairs.empty or "group_a" not in pairs.columns:
+        groups = list(DEFAULT_GROUPS)
+    else:
+        groups_in_data = sorted(
+            set(pairs["group_a"].dropna().tolist() + pairs["group_b"].dropna().tolist())
+        )
+        groups = groups_in_data or list(DEFAULT_GROUPS)
     mat = pd.DataFrame(np.nan, index=groups, columns=groups)
     for _, row in pairs.iterrows():
+        if pd.isna(row.get("group_a")) or pd.isna(row.get("group_b")):
+            continue
         mat.loc[row["group_a"], row["group_b"]] = row["median_jaccard"]
         mat.loc[row["group_b"], row["group_a"]] = row["median_jaccard"]
     np.fill_diagonal(mat.values, 1.0)
@@ -113,9 +181,12 @@ def plot_jaccard_heatmap(changepoints_dir: Path, plot_dir: Path) -> Path:
             if np.isfinite(val):
                 ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=9)
     fig.colorbar(im, ax=ax, label="Median Jaccard")
-    ax.set_title(
-        f"Cohort changepoint timing agreement ({pairs['n_trajectories'].iloc[0]} trajectories)"
+    n_traj = (
+        int(pairs["n_trajectories"].iloc[0])
+        if (not pairs.empty and "n_trajectories" in pairs.columns)
+        else 0
     )
+    ax.set_title(f"Cohort changepoint timing agreement ({n_traj} trajectories)")
     fig.tight_layout()
     out = plot_dir / "cohort_jaccard_heatmap.png"
     fig.savefig(out, dpi=150)
@@ -158,15 +229,15 @@ def plot_cohort_breakpoints_all_trajectories(
     fig_h = max(8.0, 0.22 * len(trajs) + 2.0)
     fig, ax = plt.subplots(figsize=(14, fig_h))
 
-    for grp in DEFAULT_GROUPS:
+    for grp in sorted(bkp["group"].unique()) if "group" in bkp.columns else list(DEFAULT_GROUPS):
         sub = bkp[bkp["group"] == grp]
         if sub.empty:
             continue
         ax.scatter(
             sub["time_ps"],
             sub["traj_id"].map(traj_to_y),
-            c=GROUP_COLORS[grp],
-            marker=GROUP_MARKERS[grp],
+            c=GROUP_COLORS.get(grp, "#333333"),
+            marker=GROUP_MARKERS.get(grp, "o"),
             s=55 if grp == "gsa" else 40,
             alpha=0.85,
             linewidths=0.8,
@@ -177,8 +248,9 @@ def plot_cohort_breakpoints_all_trajectories(
     ax.set_yticks(range(len(trajs)), labels, fontsize=7)
     ax.set_xlabel("Time (ps)")
     ax.set_ylabel("Trajectory variant")
+    n_groups = bkp["group"].nunique() if "group" in bkp.columns else 0
     ax.set_title(
-        f"Changepoints across all trajectories ({len(trajs)} variants, 4 feature groups)"
+        f"Changepoints across all trajectories ({len(trajs)} variants, {n_groups} feature groups)"
     )
     ax.grid(axis="x", alpha=0.25)
     ax.legend(loc="upper right", ncol=4, framealpha=0.9)
@@ -228,8 +300,8 @@ def plot_cohort_traces_normalized_all_trajectories(
     n_plotted = 0
     for ax, (col, ylabel) in zip(axes, panels):
         for traj_id in trajs:
-            feat_path = features_dir / f"{traj_id}_gsa_features.csv"
-            if not feat_path.exists():
+            feat_path = resolve_features_csv(features_dir, traj_id)
+            if feat_path is None:
                 continue
             df = pd.read_csv(feat_path, usecols=lambda c: c in ("time_ps", col))
             if col not in df.columns:
@@ -382,23 +454,34 @@ def plot_timeline(
     segment_start_ps: Optional[float] = None,
     segment_end_ps: Optional[float] = None,
     rep_time_ps: Optional[float] = None,
+    features_suffix: Optional[str] = None,
 ) -> Optional[Path]:
     changepoints_dir = Path(changepoints_dir)
     features_dir = Path(features_dir)
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
-    panels = panels or DEFAULT_TIMELINE_PANELS
 
-    feat_path = features_dir / f"{traj_id}_gsa_features.csv"
-    if not feat_path.exists():
+    feat_path = resolve_features_csv(
+        features_dir, traj_id, suffix=features_suffix
+    )
+    if feat_path is None:
         log_event(
             "warning",
-            f"Skipping timeline for {traj_id}: missing {feat_path.name}",
+            f"Skipping timeline for {traj_id}: no features CSV found",
             component="summarize_changepoint_results",
         )
         return None
 
     df = pd.read_csv(feat_path)
+    panels = resolve_timeline_panels(df, panels)
+    if not panels:
+        log_event(
+            "warning",
+            f"Skipping timeline for {traj_id}: no usable panel columns",
+            component="summarize_changepoint_results",
+        )
+        return None
+
     bkp = pd.read_csv(changepoints_dir / "all_breakpoints.csv")
     bsub = bkp[bkp["traj_id"] == traj_id]
     time = df["time_ps"] if "time_ps" in df.columns else pd.Series(df.index, name="time_ps")
@@ -412,6 +495,10 @@ def plot_timeline(
         and segment_end_ps is not None
         and np.isfinite(segment_start_ps)
         and np.isfinite(segment_end_ps)
+    )
+
+    groups_present = (
+        sorted(bsub["group"].unique()) if "group" in bsub.columns else list(DEFAULT_GROUPS)
     )
 
     for ax, (col, ylabel) in zip(axes, panels):
@@ -428,11 +515,12 @@ def plot_timeline(
                 zorder=1,
             )
         ax.plot(time, df[col], color="0.3", lw=0.8, zorder=2)
-        for grp in DEFAULT_GROUPS:
+        for grp in groups_present:
+            color = GROUP_COLORS.get(grp, "#333333")
             for _, row in bsub[bsub["group"] == grp].iterrows():
                 ax.axvline(
                     row["time_ps"],
-                    color=GROUP_COLORS[grp],
+                    color=color,
                     alpha=0.7,
                     lw=1.2,
                     ls="--",
@@ -443,7 +531,10 @@ def plot_timeline(
         ax.set_ylabel(ylabel)
 
     axes[-1].set_xlabel("Time (ps)")
-    handles = [Line2D([0], [0], color=GROUP_COLORS[g], ls="--", label=g) for g in DEFAULT_GROUPS]
+    handles = [
+        Line2D([0], [0], color=GROUP_COLORS.get(g, "#333333"), ls="--", label=g)
+        for g in groups_present
+    ]
     if highlight_segment:
         handles.append(
             Line2D([0], [0], color="#ffdf80", alpha=0.6, lw=6, label="cluster medoid segment")
@@ -472,17 +563,19 @@ def plot_cluster_representative_timelines(
     features_dir: Path,
     plot_dir: Path,
     panels: list[tuple[str, str]] | None = None,
+    features_suffix: Optional[str] = None,
 ) -> list[str]:
     """Plot breakpoint timelines for each row in cluster_representatives.csv."""
-    panels = panels or DEFAULT_TIMELINE_PANELS
     written: list[str] = []
     for _, row in reps.iterrows():
         traj_id = str(row["traj_id"])
-        feat_path = Path(features_dir) / f"{traj_id}_gsa_features.csv"
-        if not feat_path.exists():
+        feat_path = resolve_features_csv(
+            features_dir, traj_id, suffix=features_suffix
+        )
+        if feat_path is None:
             log_event(
                 "warning",
-                f"Skipping cluster rep timeline for {traj_id}: missing {feat_path.name}",
+                f"Skipping cluster rep timeline for {traj_id}: no features CSV found",
                 component="summarize_changepoint_results",
             )
             continue
@@ -509,6 +602,7 @@ def plot_cluster_representative_timelines(
             segment_start_ps=start_ps,
             segment_end_ps=end_ps,
             rep_time_ps=rep_ps,
+            features_suffix=features_suffix,
         )
         if out is not None:
             written.append(out.name)
@@ -525,6 +619,7 @@ def summarize_changepoint_results(
     skip_individual_timelines: bool = False,
     cluster_representatives_csv: Optional[Sequence[str | Path]] = None,
     skip_cluster_rep_timelines: bool = False,
+    features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
     """Full summarize stage: cohort tables + plots + optional timelines."""
     changepoints_dir = Path(changepoints_dir)
@@ -560,11 +655,25 @@ def summarize_changepoint_results(
     written["cohort_breakpoints_all_trajectories"] = (
         plot_cohort_breakpoints_all_trajectories(changepoints_dir, plot_dir)
     )
+
+    # Choose timeline panels from the first available features CSV.
+    sample_panels = list(DEFAULT_TIMELINE_PANELS)
+    bkp = pd.read_csv(changepoints_dir / "all_breakpoints.csv")
+    sample_trajs = sorted_trajectory_ids(bkp)
+    for tid in sample_trajs:
+        sample_path = resolve_features_csv(
+            features_dir, tid, suffix=features_suffix
+        )
+        if sample_path is not None:
+            sample_df = pd.read_csv(sample_path, nrows=5)
+            sample_panels = resolve_timeline_panels(sample_df, DEFAULT_TIMELINE_PANELS)
+            break
+
     traces = plot_cohort_traces_normalized_all_trajectories(
         changepoints_dir,
         features_dir,
         plot_dir,
-        DEFAULT_TIMELINE_PANELS,
+        sample_panels if sample_panels else DEFAULT_TIMELINE_PANELS,
     )
     if traces is not None:
         written["cohort_traces_normalized_all_trajectories"] = traces
@@ -580,7 +689,8 @@ def summarize_changepoint_results(
                 changepoints_dir=changepoints_dir,
                 features_dir=features_dir,
                 plot_dir=plot_dir,
-                panels=DEFAULT_TIMELINE_PANELS,
+                panels=sample_panels if sample_panels else None,
+                features_suffix=features_suffix,
             )
             if out is not None:
                 written[out.name] = out
@@ -599,7 +709,8 @@ def summarize_changepoint_results(
                 changepoints_dir=changepoints_dir,
                 features_dir=features_dir,
                 plot_dir=plot_dir,
-                panels=DEFAULT_TIMELINE_PANELS,
+                panels=sample_panels if sample_panels else None,
+                features_suffix=features_suffix,
             )
             for name in cluster_written:
                 written[name] = plot_dir / name
@@ -612,5 +723,194 @@ def summarize_changepoint_results(
             f"({len(cluster_written)} cluster medoid)"
         ),
         component="summarize_changepoint_results",
+    )
+    return written
+
+
+def compare_endpoint_clusters_to_deformation(
+    changepoints_dir: Path | str,
+    features_dir: Path | str,
+    *,
+    rmsd_from: Optional[Path | str] = None,
+    plot_dir: Optional[Path | str] = None,
+    group: str = "endpoint",
+) -> dict[str, Path]:
+    """Summarise endpoint clusters vs deformation proxies (distance + optional RMSD).
+
+    Joins cluster labels from ``clusters/<group>/`` with segment stats and
+    optional ``assembly_rmsd_to_ref`` from a matching GSA features directory.
+    Emits ``endpoint_cluster_deformation_summary.csv`` and a bar/scatter plot.
+    """
+    changepoints_dir = Path(changepoints_dir)
+    features_dir = Path(features_dir)
+    plot_dir = Path(plot_dir) if plot_dir else changepoints_dir / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+
+    # Prefer clustered segment table if present
+    clustered_candidates = [
+        changepoints_dir / "clusters" / group / "segments_clustered.csv",
+        changepoints_dir / "clusters" / "all_segments_clustered.csv",
+    ]
+    seg_path = changepoints_dir / "all_segment_stats.csv"
+    seg: Optional[pd.DataFrame] = None
+    for clustered_path in clustered_candidates:
+        if clustered_path.exists():
+            seg = pd.read_csv(clustered_path)
+            if "group" in seg.columns:
+                seg = seg[seg["group"] == group].copy()
+            break
+    if seg is None and seg_path.exists():
+        seg = pd.read_csv(seg_path)
+        if "group" in seg.columns:
+            seg = seg[seg["group"] == group].copy()
+    if seg is None:
+        log_event(
+            "warning",
+            "No segment stats found for endpoint deformation comparison",
+            component="endpoint_deformation_compare",
+        )
+        return written
+
+    if seg.empty:
+        return written
+
+    label_col = None
+    for cand in ("cluster_label", "cluster", "label"):
+        if cand in seg.columns:
+            label_col = cand
+            break
+
+    # Optional RMSD overlay: mean assembly_rmsd_to_ref over each segment
+    rmsd_means: list[float] = []
+    rmsd_dir = Path(rmsd_from) if rmsd_from else None
+    if rmsd_dir is not None and rmsd_dir.exists():
+        for _, row in seg.iterrows():
+            traj_id = str(row["traj_id"])
+            gsa_path = resolve_features_csv(
+                rmsd_dir, traj_id, suffix="_gsa_features.csv"
+            )
+            if gsa_path is None or "assembly_rmsd_to_ref" not in pd.read_csv(
+                gsa_path, nrows=0
+            ).columns:
+                rmsd_means.append(np.nan)
+                continue
+            gsa = pd.read_csv(
+                gsa_path, usecols=lambda c: c in ("frame", "assembly_rmsd_to_ref")
+            )
+            start_f = int(row["start_frame"])
+            end_f = int(row["end_frame"])
+            mask = (gsa["frame"] >= start_f) & (gsa["frame"] <= end_f)
+            vals = gsa.loc[mask, "assembly_rmsd_to_ref"].to_numpy(dtype=float)
+            rmsd_means.append(float(np.nanmean(vals)) if len(vals) else np.nan)
+        seg = seg.copy()
+        seg["assembly_rmsd_to_ref_mean"] = rmsd_means
+
+    dist_col_candidates = [
+        "endpoint_dist_mean_mean",
+        "endpoint_dist_mean",
+        "endpoint_dist_min_mean",
+        "endpoint_dist_max_mean",
+    ]
+    dist_col = next((c for c in dist_col_candidates if c in seg.columns), None)
+
+    summary_rows: list[dict] = []
+    if label_col is not None:
+        for label, sub in seg.groupby(label_col):
+            row: dict = {
+                "cluster_label": label,
+                "n_segments": len(sub),
+                "n_trajectories": sub["traj_id"].nunique() if "traj_id" in sub.columns else np.nan,
+                "total_frames": int(sub["n_frames"].sum()) if "n_frames" in sub.columns else np.nan,
+            }
+            if dist_col is not None:
+                row["endpoint_dist_mean"] = float(sub[dist_col].mean())
+                row["endpoint_dist_std"] = float(sub[dist_col].std())
+            if "assembly_rmsd_to_ref_mean" in sub.columns:
+                row["assembly_rmsd_to_ref_mean"] = float(
+                    np.nanmean(sub["assembly_rmsd_to_ref_mean"])
+                )
+                row["assembly_rmsd_to_ref_std"] = float(
+                    np.nanstd(sub["assembly_rmsd_to_ref_mean"])
+                )
+            summary_rows.append(row)
+    else:
+        # No clusters — report whole-group stats
+        row = {
+            "cluster_label": "all",
+            "n_segments": len(seg),
+            "n_trajectories": seg["traj_id"].nunique() if "traj_id" in seg.columns else np.nan,
+            "total_frames": int(seg["n_frames"].sum()) if "n_frames" in seg.columns else np.nan,
+        }
+        if dist_col is not None:
+            row["endpoint_dist_mean"] = float(seg[dist_col].mean())
+            row["endpoint_dist_std"] = float(seg[dist_col].std())
+        summary_rows.append(row)
+
+    summary = pd.DataFrame(summary_rows)
+    if "endpoint_dist_mean" in summary.columns:
+        summary = summary.sort_values("endpoint_dist_mean").reset_index(drop=True)
+
+    out_csv = changepoints_dir / "endpoint_cluster_deformation_summary.csv"
+    summary.to_csv(out_csv, index=False)
+    written["endpoint_cluster_deformation_summary.csv"] = out_csv
+
+    # Bar / scatter plot
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    x = np.arange(len(summary))
+    labels = [str(v) for v in summary["cluster_label"]]
+    if "endpoint_dist_mean" in summary.columns:
+        ax.bar(
+            x,
+            summary["endpoint_dist_mean"],
+            yerr=summary.get("endpoint_dist_std"),
+            color=GROUP_COLORS.get("endpoint", "#ff7f0e"),
+            alpha=0.75,
+            label="endpoint dist mean",
+        )
+        ax.set_ylabel("Mean endpoint-site distance (Å)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_xlabel("Cluster (ordered by mean endpoint distance)")
+    ax.set_title("Endpoint clusters vs deformation proxy")
+    ax.grid(axis="y", alpha=0.25)
+
+    if "assembly_rmsd_to_ref_mean" in summary.columns:
+        ax2 = ax.twinx()
+        ax2.plot(
+            x,
+            summary["assembly_rmsd_to_ref_mean"],
+            color="#1f77b4",
+            marker="o",
+            lw=1.5,
+            label="mean RMSD",
+        )
+        ax2.set_ylabel("Mean assembly RMSD to ref (Å)")
+        # Combined legend
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, loc="upper left")
+    else:
+        ax.legend(loc="upper left")
+
+    # Annotate paper-like RMSD reference bands
+    ax.annotate(
+        "paper refs: A~1.0  B~1.5  C1~1.6–2.5  C2~2.7 Å RMSD",
+        xy=(0.5, -0.18),
+        xycoords="axes fraction",
+        ha="center",
+        fontsize=8,
+        color="0.4",
+    )
+    fig.tight_layout()
+    out_png = plot_dir / "endpoint_cluster_deformation.png"
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    written["endpoint_cluster_deformation.png"] = out_png
+
+    log_event(
+        "info",
+        f"Wrote endpoint deformation comparison ({len(summary)} cluster rows)",
+        component="endpoint_deformation_compare",
     )
     return written
