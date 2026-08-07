@@ -173,7 +173,7 @@ def generate_endpoint_features(
         use_ring_centroids=cfg.use_ring_centroids,
     )
     iterator = TrajectoryIterator(universe)
-    iterator.add_observer(observer)
+    iterator.subscribe(observer)
     iterator.iterate(start=cfg.start, stop=cfg.stop, step=cfg.step)
 
     dist_info = observer.get_endpoint_distances()
