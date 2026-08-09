@@ -84,6 +84,7 @@ Timeline plots fall back to `endpoint_dist_mean/min/max` when the usual GSA pane
 | `src/ChangepointAnalysis/segment_clustering.py` | Segment clustering |
 | `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation` |
 | `src/ChangepointAnalysis/endpoint_features.py` | Ring-site feature extraction → `*_endpoint_features.csv` |
+| `src/ChangepointAnalysis/transition_attribution.py` | Attribute cluster transitions → ranked site-pair drivers |
 | `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
 | `src/EndpointAnalyzer/endpoints_finder.py` | `find_endpoint_sites` / ring-system grouping |
 | `scripts/changepoint_feature_groups.py` | Detect CLI |
@@ -150,10 +151,13 @@ This maps chemically to:
 
 | Paper parameter | Endpoint-site proxy |
 |-----------------|---------------------|
-| Cation–π (open ≥ 6.5 Å) | Pole Py⁺ site ↔ benzene **ring-system centroid** |
-| Equatorial d1 (closed ~5 Å / elongated ≥ 7 Å) | Gear-tooth (ipso-carbon) atom-site distances |
+| **Raw endpoint atoms** `s3:A` / `s7:A` | Singleton atom endpoint sites (exocyclic / tip carbons) |
+| **Paper d1** (open cation–π ≈ **4.5–5.5 Å**) | One-step-in **ring neighbor** of each `s3:A` / `s7:A`, distance `paper_d1_m{i}s3_m{j}s7` / `paper_d1_m{i}s7_m{j}s3` |
+| Other openings / elongation | Additional `endpoint_dist_*` site–site columns (ring centroids and other atom sites) |
 
-We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å).
+**Important:** the paper’s d1 is **not** the raw `s3↔s7` endpoint-atom distance. Each endpoint atom is stepped one bond inward onto its bonded ring atom; those ring atoms define d1. Generic `step_back_from_terminals` does not perform this step because `s3`/`s7` are degree-4 carbons.
+
+We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å). For motif reading, flag a corrected d1 contact as **open cation–π** when its distance sits in **4.5–5.5 Å** (`closed` &lt; 4.5, `elongated` &gt; 5.5).
 
 ```mermaid
 flowchart TD
@@ -181,30 +185,46 @@ python scripts/run_endpoint_changepoint.py `
 | Flag | Effect |
 |------|--------|
 | `--no-ring-centroids` | Flat atom endpoints instead of ring-system centroids |
-| `--include-site-pairs` | Also emit `endpoint_dist_{i}s{a}_{j}s{b}` for individual openings |
+| `--include-site-pairs` | Also emit `endpoint_dist_{i}s{a}_{j}s{b}` (**required** for transition attribution) |
+| `--no-paper-d1` | Disable corrected paper-d1 features (enabled by default) |
+| `--paper-d1-open-lo` / `--paper-d1-open-hi` | Open cation–π window in Å (default 4.5–5.5) |
 | `--rmsd-from DIR` | Overlay mean `assembly_rmsd_to_ref` per cluster from `*_gsa_features.csv` |
 | `--step N` | Trajectory frame stride |
 | `--features-dir` | Where to write features (default: `<output-dir>/endpoint_features`) |
 | `--with-sweep` | Penalty sweep before final detection |
 | `--n-clusters` / `--k` | Segment clusters (default 5) |
+| `--skip-transition-attribution` | Skip post-clustering site-pair driver attribution |
+| `--transition-top-n` | Keep top-N drivers per directed transition (default 10) |
+| `--transition-min-abs-corr` | Drop drivers with \|point-biserial r\| below this threshold |
 
 **Outputs under `--output-dir`:**
 
 | Artifact | Role |
 |----------|------|
-| `endpoint_features/*_endpoint_features.csv` | Per-frame site-distance features |
-| `endpoint_features/endpoint_sites.csv` | Site map (monomer, kind, atom ids) |
+| `endpoint_features/*_endpoint_features.csv` | Per-frame site-distance features (+ `paper_d1_*` when enabled) |
+| `endpoint_features/endpoint_sites.csv` | Site map (monomer, kind, atom ids; s3/s7 rows include `d1_ring_atom_id`) |
+| `endpoint_features/paper_d1_atoms.csv` | Traceability: endpoint atom → one-step-in ring neighbor |
 | `endpoint_features/endpoint_sites.png` | Visual QC from topology (blue=ring system, orange=atom site); one file per prmtop |
 | `all_breakpoints.csv`, `all_segment_stats.csv`, … | Standard changepoint tables (`group=endpoint`) |
 | `clusters/` | Segment clusters |
 | `endpoint_cluster_deformation_summary.csv` | Clusters ordered by mean endpoint distance (+ optional RMSD) |
 | `plots/endpoint_cluster_deformation.png` | Bar/scatter vs deformation proxy |
+| `endpoint_transition_events.csv` | Consecutive directed cluster transitions |
+| `endpoint_transition_feature_rankings.csv` | All site-pair + paper-d1 features ranked per directed transition |
+| `endpoint_transition_top_features.csv` | Top-N drivers with site/atom mapping |
+| `paper_d1_transition_top_features.csv` | Top-N corrected d1 drivers only |
+| `paper_d1_segment_states.csv` | Per-segment mean d1 + open/closed/elongated pair lists |
+| `plots/endpoint_transition_feature_heatmap.png` | Transitions × pairs colored by signed standardized Δ |
+| `plots/endpoint_transition_network_attributed.png` | Transition network labeled by top mapped pairs |
+| `plots/endpoint_sites_transition_{from}_to_{to}.html` | Interactive 3D NGL view (raw sites + paper-d1 cylinders) |
+| `plots/endpoint_sites_transition_{from}_to_{to}_pair_ranks.png` | Ranked-pair bar chart companion |
 
 ### Reading results vs A / B / C1 / C2
 
 1. Order clusters by mean endpoint-site distance (the deformation summary CSV already sorts this way).
 2. If `--rmsd-from` was set, compare each cluster's mean RMSD to the paper peaks (A≈1.0, B≈1.5, C1≈1.6–2.5, C2≈2.7 Å).
 3. With `--include-site-pairs`, inspect which individual site-pair distances jump at breakpoints — a single large jump suggests B; two openings plus an elongated equatorial pair suggest C2.
+4. Use **transition attribution** (below) to rank which mapped site pairs drive each directed cluster change.
 
 ### Feature column schema (`*_endpoint_features.csv`)
 
@@ -214,6 +234,58 @@ python scripts/run_endpoint_changepoint.py `
 | `endpoint_dist_{i}_{j}_{min,mean,max}` | Aggregates over all site-pairs between monomers *i* and *j* |
 | `endpoint_dist_{mean,min,max,std}` | Assembly-wide aggregates |
 | `endpoint_dist_{i}s{a}_{j}s{b}` | Optional raw site–site distance (`--include-site-pairs`) |
+| `paper_d1_m{i}s3_m{j}s7` / `paper_d1_m{i}s7_m{j}s3` | Corrected directional d1 (ring-neighbor of s3/s7); enabled by default |
+| `paper_d1_min`, `paper_d1_n_open`, … | Assembly summaries over all directional d1 contacts |
+
+### Paper d1 (corrected cation–π distance)
+
+For each monomer, sites `s3:A` and `s7:A` are tip/exocyclic carbons. The paper defines **d1** on the ring atom bonded one step inward from each of those tips.
+
+| State | Distance window |
+|-------|-----------------|
+| `closed` | &lt; 4.5 Å |
+| `open` (cation–π) | 4.5–5.5 Å |
+| `elongated` | &gt; 5.5 Å |
+
+Outputs: `paper_d1_atoms.csv` (atom map), `paper_d1_*` columns in the features CSV, `paper_d1_segment_states.csv`, and d1 cylinders in the transition NGL HTML (green=open, gray=closed, magenta=elongated).
+
+### Transition driver attribution
+
+After endpoint clustering, the pipeline can attribute each **directed** consecutive-segment transition (`from_cluster → to_cluster`) to the raw site-pair columns **and** corrected paper-d1 columns that change most strongly.
+
+**Requires** `--include-site-pairs`. Without those columns, attribution is skipped with a warning. Clustering itself still uses only the eight aggregate summary columns (+ `log10_n_frames`); attribution deliberately returns to the per-frame site-pair series.
+
+**Scoring (per directed transition type):**
+
+For each site-pair feature:
+
+| Statistic | Definition |
+|-----------|------------|
+| `mean_source` / `mean_dest` | Mean distance (Å) over source / destination segment frames |
+| `mean_delta_angstrom` | `mean_dest − mean_source` (signed) |
+| `mean_standardized_delta` | Δ divided by the pooled cohort std of that feature |
+| `mean_point_biserial_corr` | Point-biserial correlation of the distance with destination-membership |
+| `combined_score` | `0.5 × (abs_std_Δ / max_abs_std_Δ) + 0.5 × \|r\|` within the directed transition |
+| `rank` | Descending `combined_score` within `from→to` |
+| `n_events` / `n_trajectories` | How often this directed transition was observed |
+| `is_descriptive` | `True` when `n_events < 2` (no replication; treat as descriptive) |
+
+Frame joins are **stride-safe**: segments select rows by actual `frame` values, not integer indices.
+
+**Interpretation notes**
+
+- Positive Δ / positive r: the site–site distance **opens** on entering the destination cluster.
+- Negative Δ / negative r: the pair **closes**.
+- When a transition type has only one observed event (common in single-trajectory tests), rankings remain useful for hypothesis generation but are marked `is_descriptive=True` — do not treat correlations as statistically replicated.
+- Prefer reading `endpoint_transition_top_features.csv` together with the attributed network PNG: edge width = transition count; edge labels = top mapped pairs with signed Δ.
+
+**CLI / skill controls**
+
+- `--transition-top-n` / `transition_top_n` (default 10)
+- `--transition-min-abs-corr` / `transition_min_abs_corr` (default 0)
+- `--skip-transition-attribution` / `skip_transition_attribution`
+
+Python API: `ChangepointPipeline.attribute_endpoint_transitions(...)` or `attribute_endpoint_transitions(...)` from `src.ChangepointAnalysis`.
 
 ---
 

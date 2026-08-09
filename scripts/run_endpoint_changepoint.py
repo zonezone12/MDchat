@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.ChangepointAnalysis import (
     ChangepointConfig,
+    EndpointTransitionAttributionConfig,
     PenaltySweepConfig,
     SegmentClusteringConfig,
 )
@@ -97,7 +98,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--include-site-pairs",
         action="store_true",
-        help="Also emit per-site-pair columns (endpoint_dist_isA_jsB)",
+        help=(
+            "Also emit per-site-pair columns (endpoint_dist_isA_jsB). "
+            "Required for transition driver attribution."
+        ),
+    )
+    p.add_argument(
+        "--no-paper-d1",
+        action="store_true",
+        help=(
+            "Disable paper-d1 features (one-step-in ring neighbors of s3/s7). "
+            "Enabled by default."
+        ),
+    )
+    p.add_argument(
+        "--paper-d1-open-lo",
+        type=float,
+        default=4.5,
+        help="Lower bound (Å) of paper open cation–π window (default: 4.5)",
+    )
+    p.add_argument(
+        "--paper-d1-open-hi",
+        type=float,
+        default=5.5,
+        help="Upper bound (Å) of paper open cation–π window (default: 5.5)",
     )
     p.add_argument("--start", type=int, default=None)
     p.add_argument("--stop", type=int, default=None)
@@ -131,6 +155,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--linkage", default="ward")
     p.add_argument("--skip-clustering", action="store_true")
     p.add_argument("--skip-summarize", action="store_true")
+    p.add_argument(
+        "--skip-transition-attribution",
+        action="store_true",
+        help="Skip attributing directed cluster transitions to site-pair features",
+    )
+    p.add_argument(
+        "--transition-top-n",
+        type=int,
+        default=10,
+        help="Top-N site-pair drivers to retain per directed transition (default: 10)",
+    )
+    p.add_argument(
+        "--transition-min-abs-corr",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum |point-biserial correlation| to retain a driver "
+            "(default: 0 = keep all ranked features)"
+        ),
+    )
     return p.parse_args()
 
 
@@ -168,6 +212,11 @@ def main() -> None:
     if args.with_sweep:
         sweep = PenaltySweepConfig(detection=detection, n_penalties=args.n_penalties)
 
+    transition_cfg = EndpointTransitionAttributionConfig(
+        top_n=int(args.transition_top_n),
+        min_abs_correlation=float(args.transition_min_abs_corr),
+    )
+
     with RunContext.from_namespace(args, name="run_endpoint_changepoint"):
         artifacts = run_endpoint_changepoint(
             args.topology,
@@ -180,6 +229,9 @@ def main() -> None:
             ring_min_gap_deg=args.ring_min_gap_deg,
             ring_max_per_ring=args.ring_max_per_ring,
             include_site_pairs=args.include_site_pairs,
+            include_paper_d1=not args.no_paper_d1,
+            paper_d1_open_lo=args.paper_d1_open_lo,
+            paper_d1_open_hi=args.paper_d1_open_hi,
             start=args.start,
             stop=args.stop,
             step=args.step,
@@ -191,6 +243,8 @@ def main() -> None:
             sweep=sweep,
             skip_clustering=args.skip_clustering,
             skip_summarize=args.skip_summarize,
+            skip_transition_attribution=args.skip_transition_attribution,
+            transition_attribution=transition_cfg,
             rmsd_from=args.rmsd_from,
         )
 

@@ -30,6 +30,11 @@ from .segment_clustering import (
     cluster_all_groups,
     load_segment_stats,
 )
+from .transition_attribution import (
+    EndpointTransitionAttributionConfig,
+    attribute_endpoint_transitions,
+    list_site_pair_columns,
+)
 
 
 class ChangepointPipeline:
@@ -177,6 +182,70 @@ class ChangepointPipeline:
         self._artifacts.update(artifacts)
         return artifacts
 
+    def attribute_endpoint_transitions(
+        self,
+        *,
+        config: Optional[EndpointTransitionAttributionConfig] = None,
+        sites_df: Optional[pd.DataFrame] = None,
+        d1_atoms_df: Optional[pd.DataFrame] = None,
+        universe: Any = None,
+        monomer_selections: Optional[Sequence[str]] = None,
+        stored_sites: Optional[Sequence[Sequence[Sequence[int]]]] = None,
+    ) -> dict[str, Path]:
+        """Attribute directed endpoint-cluster transitions to site-pair features.
+
+        Prefers in-memory ``self._clustered``; falls back to
+        ``clusters/endpoint/segments_clustered.csv``. Skips with a warning when
+        no raw site-pair or paper-d1 columns are present in the feature CSVs.
+        """
+        from src.utils.run_log import log_event
+
+        from .endpoint_features import list_paper_d1_columns
+        from .transition_attribution import list_attribution_feature_columns
+
+        cfg = config or EndpointTransitionAttributionConfig()
+        # Guard: attribution features must exist.
+        csv_paths = self.discover_feature_csvs()
+        has_feats = False
+        for path in csv_paths:
+            try:
+                header = pd.read_csv(path, nrows=0)
+            except Exception:
+                continue
+            cols = list_attribution_feature_columns(
+                header.columns, include_paper_d1=cfg.include_paper_d1
+            )
+            if cols:
+                has_feats = True
+                break
+        if not has_feats:
+            log_event(
+                "warning",
+                (
+                    "Skipping endpoint transition attribution: no "
+                    "endpoint_dist_{i}s{a}_{j}s{b} or paper_d1_* columns found. "
+                    "Re-run with --include-site-pairs and/or paper d1 enabled."
+                ),
+                component="endpoint_transition_attribution",
+            )
+            return {}
+
+        written = attribute_endpoint_transitions(
+            self.output_dir,
+            self.features_dir,
+            config=cfg,
+            clustered_df=self._clustered,
+            sites_df=sites_df,
+            d1_atoms_df=d1_atoms_df,
+            output_dir=self.output_dir,
+            plot_dir=self.plot_dir,
+            universe=universe,
+            monomer_selections=monomer_selections,
+            stored_sites=stored_sites,
+        )
+        self._artifacts.update(written)
+        return written
+
     def run_all(
         self,
         *,
@@ -241,6 +310,9 @@ def run_endpoint_changepoint(
     ring_min_gap_deg: Optional[float] = 35.0,
     ring_max_per_ring: int = 3,
     include_site_pairs: bool = False,
+    include_paper_d1: bool = True,
+    paper_d1_open_lo: float = 4.5,
+    paper_d1_open_hi: float = 5.5,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     step: int = 1,
@@ -252,6 +324,8 @@ def run_endpoint_changepoint(
     sweep: Optional[PenaltySweepConfig] = None,
     skip_clustering: bool = False,
     skip_summarize: bool = False,
+    skip_transition_attribution: bool = False,
+    transition_attribution: Optional[EndpointTransitionAttributionConfig] = None,
     rmsd_from: Optional[str | Path] = None,
     universe_factory: Optional[Any] = None,
 ) -> dict[str, Path]:
@@ -264,6 +338,11 @@ def run_endpoint_changepoint(
     rmsd_from
         Optional directory of ``*_gsa_features.csv`` used to overlay
         ``assembly_rmsd_to_ref`` on the deformation comparison.
+    skip_transition_attribution
+        If False (default), after clustering attribute directed cluster
+        transitions to raw site-pair columns. Requires ``include_site_pairs``.
+    transition_attribution
+        Optional config for top-N / correlation threshold / ranking weights.
     """
     import MDAnalysis as mda
 
@@ -294,19 +373,28 @@ def run_endpoint_changepoint(
         ring_min_gap_deg=ring_min_gap_deg,
         ring_max_per_ring=ring_max_per_ring,
         include_site_pairs=include_site_pairs,
+        include_paper_d1=include_paper_d1,
+        paper_d1_open_lo=paper_d1_open_lo,
+        paper_d1_open_hi=paper_d1_open_hi,
         start=start,
         stop=stop,
         step=step,
         time_per_frame_ps=time_per_frame_ps,
     )
 
+    last_sites_df = None
+    last_d1_atoms_df = None
+    last_universe = None
+    last_monomer_sels: Optional[list[str]] = None
+    last_stored_sites = None
+
     for i, (traj_path, traj_id) in enumerate(zip(traj_paths, ids)):
         if universe_factory is not None:
             u = universe_factory(topology, traj_path)
         else:
             u = mda.Universe(str(topology), str(traj_path))
-        features_df, sites_df, monomer_sels, stored_sites = generate_endpoint_features(
-            u, feat_cfg, traj_id=traj_id
+        features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
+            generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
         )
         # Sites are topology-defined (prmtop); write the QC PNG once.
         write_endpoint_features_csv(
@@ -314,11 +402,18 @@ def run_endpoint_changepoint(
             features_dir,
             traj_id,
             sites_df=sites_df,
+            d1_atoms_df=d1_atoms_df,
             universe=u,
             monomer_selections=monomer_sels,
             stored_sites=stored_sites,
             write_site_plot=(i == 0),
         )
+        if i == 0:
+            last_sites_df = sites_df
+            last_d1_atoms_df = d1_atoms_df
+            last_universe = u
+            last_monomer_sels = list(monomer_sels)
+            last_stored_sites = stored_sites
 
     det = detection or ChangepointConfig(groups=("endpoint",))
     if "endpoint" not in det.groups:
@@ -350,5 +445,21 @@ def run_endpoint_changepoint(
             plot_dir=pipe.plot_dir,
         )
         artifacts.update(compare_arts)
+
+        if not skip_transition_attribution:
+            attr_cfg = transition_attribution or EndpointTransitionAttributionConfig(
+                include_paper_d1=include_paper_d1,
+                paper_d1_open_lo=paper_d1_open_lo,
+                paper_d1_open_hi=paper_d1_open_hi,
+            )
+            attr_arts = pipe.attribute_endpoint_transitions(
+                config=attr_cfg,
+                sites_df=last_sites_df,
+                d1_atoms_df=last_d1_atoms_df,
+                universe=last_universe,
+                monomer_selections=last_monomer_sels,
+                stored_sites=last_stored_sites,
+            )
+            artifacts.update(attr_arts)
 
     return artifacts

@@ -156,13 +156,27 @@ def plot_jaccard_heatmap(changepoints_dir: Path, plot_dir: Path) -> Path:
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
     pairs = pd.read_csv(changepoints_dir / "cohort_timing_summary.csv")
-    if pairs.empty or "group_a" not in pairs.columns:
-        groups = list(DEFAULT_GROUPS)
-    else:
+
+    # Prefer groups that actually appear in pairwise timing comparisons.
+    # Single-group runs (e.g. endpoint-only) have an empty table — fall back to
+    # groups present in breakpoints, not DEFAULT_GROUPS (which are GSA-path only).
+    if not pairs.empty and "group_a" in pairs.columns:
         groups_in_data = sorted(
             set(pairs["group_a"].dropna().tolist() + pairs["group_b"].dropna().tolist())
         )
-        groups = groups_in_data or list(DEFAULT_GROUPS)
+    else:
+        groups_in_data = []
+
+    if not groups_in_data:
+        bkp_path = changepoints_dir / "all_breakpoints.csv"
+        if bkp_path.exists():
+            bkp = pd.read_csv(bkp_path)
+            if "group" in bkp.columns and not bkp.empty:
+                groups_in_data = sorted(bkp["group"].dropna().unique().tolist())
+        if not groups_in_data:
+            groups_in_data = list(DEFAULT_GROUPS)
+
+    groups = groups_in_data
     mat = pd.DataFrame(np.nan, index=groups, columns=groups)
     for _, row in pairs.iterrows():
         if pd.isna(row.get("group_a")) or pd.isna(row.get("group_b")):
@@ -186,7 +200,13 @@ def plot_jaccard_heatmap(changepoints_dir: Path, plot_dir: Path) -> Path:
         if (not pairs.empty and "n_trajectories" in pairs.columns)
         else 0
     )
-    ax.set_title(f"Cohort changepoint timing agreement ({n_traj} trajectories)")
+    if pairs.empty or len(groups) < 2:
+        ax.set_title(
+            f"Cohort timing agreement — no cross-group pairs "
+            f"({', '.join(groups)}; {n_traj} trajectories)"
+        )
+    else:
+        ax.set_title(f"Cohort changepoint timing agreement ({n_traj} trajectories)")
     fig.tight_layout()
     out = plot_dir / "cohort_jaccard_heatmap.png"
     fig.savefig(out, dpi=150)

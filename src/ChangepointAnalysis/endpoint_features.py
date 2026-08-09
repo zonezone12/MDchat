@@ -33,6 +33,15 @@ class EndpointFeatureConfig:
     time_per_frame_ps: float = 1.0
     pair_summaries: tuple[str, ...] = ("min", "mean", "max")
     include_site_pairs: bool = False
+    # Paper d1 = one-step-in ring neighbors of endpoint atom sites s3 and s7.
+    include_paper_d1: bool = True
+    paper_d1_s3_site: int = 3
+    paper_d1_s7_site: int = 7
+    paper_d1_open_lo: float = 4.5
+    paper_d1_open_hi: float = 5.5
+
+
+PAPER_D1_COL_PREFIX = "paper_d1_"
 
 
 def all_pairs_to_metrics_df(
@@ -120,19 +129,28 @@ def generate_endpoint_features(
     config: Optional[EndpointFeatureConfig] = None,
     *,
     traj_id: str = "traj",
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[list[list[int]]]]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    list[str],
+    list[list[list[int]]],
+    Optional[pd.DataFrame],
+]:
     """Extract per-frame endpoint-site distances from *universe*.
 
     Returns
     -------
     features_df
         Per-frame distance features with ``traj_id``, ``frame``, ``time_ps``.
+        When ``include_paper_d1`` is True, also includes ``paper_d1_*`` columns.
     sites_df
         Site map (one row per monomer site) for traceability.
     monomer_selections
         Resolved per-monomer MDAnalysis selection strings.
     stored_sites
         Per monomer → per site → MDA atom ids (for QC plots).
+    d1_atoms_df
+        Paper-d1 ring-neighbor map, or ``None`` when disabled.
     """
     from src.EndpointAnalyzer import EndpointAnalyzerObserver, EndpointsFinder
     from src.TrajectoryIterator import TrajectoryIterator
@@ -207,7 +225,58 @@ def generate_endpoint_features(
         use_ring_centroids=cfg.use_ring_centroids,
         stored_sites=observer.stored_site_indices,
     )
-    return features, sites_df, list(monomer_sels), list(observer.stored_site_indices)
+
+    d1_atoms_df: Optional[pd.DataFrame] = None
+    if cfg.include_paper_d1:
+        d1_atoms_df = resolve_paper_d1_atoms(
+            universe,
+            monomer_sels,
+            observer.stored_site_indices,
+            traj_id=traj_id,
+            s3_site=cfg.paper_d1_s3_site,
+            s7_site=cfg.paper_d1_s7_site,
+        )
+        # Annotate site map with paper-d1 ring neighbor for s3/s7 rows.
+        sites_df = sites_df.copy()
+        sites_df["d1_ring_atom_id"] = ""
+        sites_df["d1_endpoint_atom_id"] = ""
+        for _, drow in d1_atoms_df.iterrows():
+            mask = (
+                (sites_df["monomer"] == int(drow["monomer"]))
+                & (sites_df["site_index"] == int(drow["endpoint_site"]))
+            )
+            sites_df.loc[mask, "d1_ring_atom_id"] = str(int(drow["d1_ring_atom_id"]))
+            sites_df.loc[mask, "d1_endpoint_atom_id"] = str(
+                int(drow["endpoint_atom_id"])
+            )
+
+        d1_feat = compute_paper_d1_distances(
+            universe,
+            d1_atoms_df,
+            frame_indices=frame_indices,
+            s3_site=cfg.paper_d1_s3_site,
+            s7_site=cfg.paper_d1_s7_site,
+            open_lo=cfg.paper_d1_open_lo,
+            open_hi=cfg.paper_d1_open_hi,
+        )
+        # Align and merge (drop duplicate frame from d1_feat).
+        d1_feat = d1_feat.drop(columns=["frame"], errors="ignore")
+        if len(d1_feat) != len(features):
+            raise RuntimeError(
+                f"paper d1 rows ({len(d1_feat)}) != feature rows ({len(features)})"
+            )
+        features = pd.concat(
+            [features.reset_index(drop=True), d1_feat.reset_index(drop=True)],
+            axis=1,
+        )
+
+    return (
+        features,
+        sites_df,
+        list(monomer_sels),
+        list(observer.stored_site_indices),
+        d1_atoms_df,
+    )
 
 
 def _build_sites_dataframe(
@@ -236,6 +305,288 @@ def _build_sites_dataframe(
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _mda_id_to_local_index(sel: Any, atom_id: int) -> int:
+    """Map MDA atom id → local index within *sel* AtomGroup."""
+    ids = sel.ids
+    hits = np.flatnonzero(ids == int(atom_id))
+    if hits.size == 0:
+        raise ValueError(f"Atom id {atom_id} not found in selection {sel}")
+    return int(hits[0])
+
+
+def resolve_bonded_ring_neighbor_mda_id(
+    mol: Any,
+    sel: Any,
+    endpoint_atom_mda_id: int,
+) -> int:
+    """Return the MDA id of the unique ring atom bonded to *endpoint_atom_mda_id*.
+
+    Raises
+    ------
+    ValueError
+        If the endpoint atom is missing, has no bonded ring neighbor, or has
+        more than one bonded ring neighbor (ambiguous).
+    """
+    local = _mda_id_to_local_index(sel, endpoint_atom_mda_id)
+    atom = mol.GetAtomWithIdx(local)
+    ring_nbrs = [nbr for nbr in atom.GetNeighbors() if nbr.IsInRing()]
+    if not ring_nbrs:
+        raise ValueError(
+            f"Endpoint atom id={endpoint_atom_mda_id} has no bonded ring neighbor"
+        )
+    if len(ring_nbrs) > 1:
+        raise ValueError(
+            f"Endpoint atom id={endpoint_atom_mda_id} has {len(ring_nbrs)} bonded "
+            f"ring neighbors {[int(sel[n.GetIdx()].id) for n in ring_nbrs]}; "
+            "paper d1 requires a unique one-step-in ring atom"
+        )
+    return int(sel[ring_nbrs[0].GetIdx()].id)
+
+
+def resolve_paper_d1_atoms(
+    universe: Any,
+    monomer_selections: Sequence[str],
+    stored_sites: Sequence[Sequence[Sequence[int]]],
+    *,
+    traj_id: str = "traj",
+    s3_site: int = 3,
+    s7_site: int = 7,
+) -> pd.DataFrame:
+    """Map each monomer's s3/s7 atom sites to their one-step-in ring neighbors.
+
+    Returns one row per (monomer, endpoint_site) with the source endpoint atom
+    and the resolved d1 ring-neighbor atom.
+    """
+    if len(monomer_selections) != len(stored_sites):
+        raise ValueError(
+            f"monomer_selections ({len(monomer_selections)}) != "
+            f"stored_sites ({len(stored_sites)})"
+        )
+
+    rows: list[dict[str, Any]] = []
+    for mon_idx, (mon_sel, sites) in enumerate(zip(monomer_selections, stored_sites)):
+        sel = universe.select_atoms(mon_sel)
+        if len(sel) == 0:
+            raise ValueError(f"Empty monomer selection for monomer {mon_idx}: {mon_sel}")
+        mol = sel.convert_to("RDKIT")
+        if mol is None:
+            raise ValueError(f"RDKit conversion failed for monomer {mon_idx}: {mon_sel}")
+
+        for endpoint_site in (int(s3_site), int(s7_site)):
+            if endpoint_site >= len(sites):
+                raise ValueError(
+                    f"Monomer {mon_idx} has {len(sites)} sites; "
+                    f"paper d1 needs site index {endpoint_site}"
+                )
+            site_atoms = list(sites[endpoint_site])
+            if len(site_atoms) != 1:
+                raise ValueError(
+                    f"Monomer {mon_idx} site {endpoint_site} has {len(site_atoms)} "
+                    f"atoms {site_atoms}; paper d1 expects a singleton atom site"
+                )
+            endpoint_id = int(site_atoms[0])
+            ring_id = resolve_bonded_ring_neighbor_mda_id(mol, sel, endpoint_id)
+            rows.append(
+                {
+                    "traj_id": traj_id,
+                    "monomer": mon_idx,
+                    "monomer_selection": mon_sel,
+                    "endpoint_site": endpoint_site,
+                    "endpoint_kind": "atom",
+                    "endpoint_atom_id": endpoint_id,
+                    "d1_ring_atom_id": ring_id,
+                    "d1_label": f"m{mon_idx}s{endpoint_site}_ring",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def paper_d1_column_name(mon_i: int, site_i: int, mon_j: int, site_j: int) -> str:
+    """``paper_d1_m{i}s{a}_m{j}s{b}`` for directional ring-neighbor distance."""
+    return f"{PAPER_D1_COL_PREFIX}m{mon_i}s{site_i}_m{mon_j}s{site_j}"
+
+
+def list_paper_d1_columns(columns: Sequence[str]) -> list[str]:
+    """Return directional paper-d1 pair columns (exclude summary aggregates)."""
+    out = []
+    for c in columns:
+        if not str(c).startswith(PAPER_D1_COL_PREFIX):
+            continue
+        if c in ("paper_d1_min", "paper_d1_n_open", "paper_d1_n_closed", "paper_d1_n_elongated"):
+            continue
+        if "_m" in c[len(PAPER_D1_COL_PREFIX) :]:
+            out.append(str(c))
+    return out
+
+
+def classify_paper_d1_state(
+    distance: float,
+    *,
+    open_lo: float = 4.5,
+    open_hi: float = 5.5,
+) -> str:
+    """Classify a d1 distance as closed / open / elongated."""
+    if not np.isfinite(distance):
+        return "unknown"
+    if distance < open_lo:
+        return "closed"
+    if distance <= open_hi:
+        return "open"
+    return "elongated"
+
+
+def compute_paper_d1_distances(
+    universe: Any,
+    d1_atoms_df: pd.DataFrame,
+    *,
+    frame_indices: Sequence[int],
+    s3_site: int = 3,
+    s7_site: int = 7,
+    open_lo: float = 4.5,
+    open_hi: float = 5.5,
+) -> pd.DataFrame:
+    """Compute per-frame directional paper-d1 distances for the given frames.
+
+    For every ordered monomer pair ``i ≠ j`` emits:
+    - ``paper_d1_m{i}s3_m{j}s7``
+    - ``paper_d1_m{i}s7_m{j}s3``
+
+    plus assembly summaries ``paper_d1_min`` and ``paper_d1_n_open``.
+    """
+    if d1_atoms_df.empty:
+        raise ValueError("d1_atoms_df is empty")
+
+    # monomer -> {site -> MDA atom index for positions}
+    ring_index: dict[int, dict[int, int]] = {}
+    id_to_index = {int(a.id): int(a.index) for a in universe.atoms}
+    for _, row in d1_atoms_df.iterrows():
+        mon = int(row["monomer"])
+        site = int(row["endpoint_site"])
+        ring_id = int(row["d1_ring_atom_id"])
+        if ring_id not in id_to_index:
+            raise ValueError(f"d1 ring atom id {ring_id} not in universe")
+        ring_index.setdefault(mon, {})[site] = id_to_index[ring_id]
+
+    monomers = sorted(ring_index)
+    for mon in monomers:
+        for site in (int(s3_site), int(s7_site)):
+            if site not in ring_index[mon]:
+                raise ValueError(f"Missing d1 ring atom for monomer {mon} site {site}")
+
+    pair_specs: list[tuple[str, int, int, int, int]] = []
+    for i in monomers:
+        for j in monomers:
+            if i == j:
+                continue
+            pair_specs.append(
+                (paper_d1_column_name(i, s3_site, j, s7_site), i, s3_site, j, s7_site)
+            )
+            pair_specs.append(
+                (paper_d1_column_name(i, s7_site, j, s3_site), i, s7_site, j, s3_site)
+            )
+
+    rows: list[dict[str, Any]] = []
+    for frame in frame_indices:
+        universe.trajectory[int(frame)]
+        # Cache positions for this frame
+        pos: dict[tuple[int, int], np.ndarray] = {}
+        for mon, sites in ring_index.items():
+            for site, atom_idx in sites.items():
+                pos[(mon, site)] = universe.atoms[atom_idx].position.copy()
+
+        row: dict[str, Any] = {"frame": int(frame)}
+        dists: list[float] = []
+        n_open = n_closed = n_elongated = 0
+        for col, mi, si, mj, sj in pair_specs:
+            d = float(np.linalg.norm(pos[(mi, si)] - pos[(mj, sj)]))
+            row[col] = d
+            dists.append(d)
+            state = classify_paper_d1_state(d, open_lo=open_lo, open_hi=open_hi)
+            if state == "open":
+                n_open += 1
+            elif state == "closed":
+                n_closed += 1
+            elif state == "elongated":
+                n_elongated += 1
+        row["paper_d1_min"] = float(np.min(dists)) if dists else np.nan
+        row["paper_d1_n_open"] = int(n_open)
+        row["paper_d1_n_closed"] = int(n_closed)
+        row["paper_d1_n_elongated"] = int(n_elongated)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summarize_paper_d1_by_segments(
+    features_df: pd.DataFrame,
+    segments_df: pd.DataFrame,
+    *,
+    open_lo: float = 4.5,
+    open_hi: float = 5.5,
+    group: str = "endpoint",
+) -> pd.DataFrame:
+    """Per-segment mean d1 for each directional pair + open-window counts."""
+    d1_cols = list_paper_d1_columns(features_df.columns)
+    if not d1_cols or "frame" not in features_df.columns:
+        return pd.DataFrame()
+
+    segs = segments_df
+    if "group" in segs.columns:
+        segs = segs[segs["group"] == group]
+    if segs.empty:
+        return pd.DataFrame()
+
+    out_rows: list[dict[str, Any]] = []
+    for _, seg in segs.iterrows():
+        traj = str(seg["traj_id"])
+        start = int(seg["start_frame"])
+        end = int(seg["end_frame"])
+        feat = features_df
+        if "traj_id" in feat.columns:
+            feat = feat[feat["traj_id"] == traj]
+        mask = (feat["frame"] >= start) & (feat["frame"] <= end)
+        sub = feat.loc[mask]
+        base = {
+            "traj_id": traj,
+            "group": group,
+            "segment_id": int(seg.get("segment_id", -1)),
+            "cluster_label": int(seg["cluster_label"])
+            if "cluster_label" in seg and pd.notna(seg["cluster_label"])
+            else np.nan,
+            "start_frame": start,
+            "end_frame": end,
+            "n_frames_feat": int(len(sub)),
+        }
+        if sub.empty:
+            continue
+        # Assembly summaries
+        if "paper_d1_min" in sub.columns:
+            base["paper_d1_min_mean"] = float(sub["paper_d1_min"].mean())
+        if "paper_d1_n_open" in sub.columns:
+            base["paper_d1_n_open_mean"] = float(sub["paper_d1_n_open"].mean())
+
+        open_pairs: list[str] = []
+        closed_pairs: list[str] = []
+        elongated_pairs: list[str] = []
+        for col in d1_cols:
+            mean_d = float(sub[col].mean())
+            state = classify_paper_d1_state(mean_d, open_lo=open_lo, open_hi=open_hi)
+            base[f"{col}_mean"] = mean_d
+            base[f"{col}_state"] = state
+            if state == "open":
+                open_pairs.append(col)
+            elif state == "closed":
+                closed_pairs.append(col)
+            elif state == "elongated":
+                elongated_pairs.append(col)
+        base["open_pairs"] = ";".join(open_pairs)
+        base["closed_pairs"] = ";".join(closed_pairs)
+        base["n_open_pairs"] = len(open_pairs)
+        base["n_closed_pairs"] = len(closed_pairs)
+        base["n_elongated_pairs"] = len(elongated_pairs)
+        out_rows.append(base)
+    return pd.DataFrame(out_rows)
 
 
 def _draw_endpoint_site_panel(
@@ -453,6 +804,7 @@ def write_endpoint_features_csv(
     traj_id: str,
     *,
     sites_df: Optional[pd.DataFrame] = None,
+    d1_atoms_df: Optional[pd.DataFrame] = None,
     universe: Any = None,
     monomer_selections: Optional[Sequence[str]] = None,
     stored_sites: Optional[Sequence[Sequence[Sequence[int]]]] = None,
@@ -481,6 +833,17 @@ def write_endpoint_features_csv(
             combined = sites_df
         combined.to_csv(sites_path, index=False)
         written["sites"] = sites_path
+
+    if d1_atoms_df is not None and not d1_atoms_df.empty:
+        d1_path = out_dir / "paper_d1_atoms.csv"
+        if d1_path.exists():
+            existing = pd.read_csv(d1_path)
+            existing = existing[existing["traj_id"] != traj_id]
+            combined = pd.concat([existing, d1_atoms_df], ignore_index=True)
+        else:
+            combined = d1_atoms_df
+        combined.to_csv(d1_path, index=False)
+        written["paper_d1_atoms"] = d1_path
 
     if (
         write_site_plot

@@ -98,7 +98,7 @@ def main() -> None:
         summarize_changepoint_results(
             changepoints_dir,
             features_dir,
-            plot_dir=plot_dir,
+                    plot_dir=plot_dir,
             trajectories=args.trajectories,
             skip_tables=args.skip_tables,
             skip_individual_timelines=args.skip_individual_timelines,

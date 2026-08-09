@@ -714,9 +714,32 @@ class EndpointChangepointSkill(Skill):
         Parameter(
             "include_site_pairs",
             ParamType.BOOLEAN,
-            "Also emit per-site-pair distance columns.",
+            "Also emit per-site-pair distance columns (required for transition attribution).",
             required=False,
             default=False,
+        ),
+        Parameter(
+            "include_paper_d1",
+            ParamType.BOOLEAN,
+            "Emit corrected paper-d1 distances from s3/s7 one-step-in ring neighbors.",
+            required=False,
+            default=True,
+        ),
+        Parameter(
+            "paper_d1_open_lo",
+            ParamType.FLOAT,
+            "Lower bound (Å) of open cation–π d1 window.",
+            required=False,
+            default=4.5,
+            min_value=0.0,
+        ),
+        Parameter(
+            "paper_d1_open_hi",
+            ParamType.FLOAT,
+            "Upper bound (Å) of open cation–π d1 window.",
+            required=False,
+            default=5.5,
+            min_value=0.0,
         ),
         Parameter(
             "step",
@@ -778,6 +801,29 @@ class EndpointChangepointSkill(Skill):
             required=False,
             default=False,
         ),
+        Parameter(
+            "skip_transition_attribution",
+            ParamType.BOOLEAN,
+            "Skip attributing directed cluster transitions to site-pair features.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "transition_top_n",
+            ParamType.INTEGER,
+            "Top-N site-pair drivers per directed transition.",
+            required=False,
+            default=10,
+            min_value=1,
+        ),
+        Parameter(
+            "transition_min_abs_corr",
+            ParamType.FLOAT,
+            "Minimum |point-biserial correlation| to retain a driver.",
+            required=False,
+            default=0.0,
+            min_value=0.0,
+        ),
     ]
     requires: List[str] = []
     produces = ["endpoint_changepoint_artifacts"]
@@ -787,6 +833,7 @@ class EndpointChangepointSkill(Skill):
 
         from src.ChangepointAnalysis import (
             ChangepointConfig,
+            EndpointTransitionAttributionConfig,
             PenaltySweepConfig,
             SegmentClusteringConfig,
         )
@@ -815,6 +862,10 @@ class EndpointChangepointSkill(Skill):
         sweep = None
         if with_sweep:
             sweep = PenaltySweepConfig(detection=detection)
+        transition_cfg = EndpointTransitionAttributionConfig(
+            top_n=int(params.get("transition_top_n", 10)),
+            min_abs_correlation=float(params.get("transition_min_abs_corr", 0.0)),
+        )
 
         try:
             artifacts = run_endpoint_changepoint(
@@ -826,6 +877,9 @@ class EndpointChangepointSkill(Skill):
                 n_monomers=int(params.get("n_monomers", 6)),
                 use_ring_centroids=bool(params.get("use_ring_centroids", True)),
                 include_site_pairs=bool(params.get("include_site_pairs", False)),
+                include_paper_d1=bool(params.get("include_paper_d1", True)),
+                paper_d1_open_lo=float(params.get("paper_d1_open_lo", 4.5)),
+                paper_d1_open_hi=float(params.get("paper_d1_open_hi", 5.5)),
                 step=int(params.get("step", 1)),
                 time_per_frame_ps=float(params.get("time_per_frame_ps", 1.0)),
                 detection=detection,
@@ -834,6 +888,10 @@ class EndpointChangepointSkill(Skill):
                 sweep=sweep,
                 skip_clustering=bool(params.get("skip_clustering", False)),
                 skip_summarize=bool(params.get("skip_summarize", False)),
+                skip_transition_attribution=bool(
+                    params.get("skip_transition_attribution", False)
+                ),
+                transition_attribution=transition_cfg,
                 rmsd_from=params.get("rmsd_from"),
             )
         except Exception as exc:

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# Headless CI / broken Tk installs: force a non-interactive backend before pyplot.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 from pathlib import Path
 
 import numpy as np
@@ -325,3 +330,394 @@ def test_resolve_group_columns_endpoint(endpoint_features_dir: Path) -> None:
     assert cols
     assert all(c.startswith("endpoint_dist_") for c in cols)
     assert "traj_id" not in cols
+
+
+# ── Transition attribution ──────────────────────────────────────────────────
+
+
+def test_parse_site_pair_feature_and_metadata() -> None:
+    from src.ChangepointAnalysis.transition_attribution import (
+        parse_site_pair_feature,
+        resolve_site_pair_metadata,
+    )
+
+    assert parse_site_pair_feature("endpoint_dist_0s0_1s4") == (0, 0, 1, 4)
+    assert parse_site_pair_feature("endpoint_dist_0_1_mean") is None
+    assert parse_site_pair_feature("endpoint_dist_mean") is None
+
+    sites = pd.DataFrame(
+        [
+            {"monomer": 0, "site_index": 0, "kind": "ring", "atom_ids": "10|11|12", "n_atoms": 3},
+            {"monomer": 1, "site_index": 4, "kind": "atom", "atom_ids": "99", "n_atoms": 1},
+        ]
+    )
+    meta = resolve_site_pair_metadata("endpoint_dist_0s0_1s4", sites)
+    assert meta["monomer_i"] == 0
+    assert meta["site_i"] == 0
+    assert meta["kind_i"] == "ring"
+    assert meta["atom_ids_i"] == "10|11|12"
+    assert meta["monomer_j"] == 1
+    assert meta["site_j"] == 4
+    assert meta["kind_j"] == "atom"
+    assert "M0:ring0" in meta["pair_label"]
+    assert "M1:atom4" in meta["pair_label"]
+
+
+def test_build_transition_events_and_stride_safe_scoring(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.transition_attribution import (
+        EndpointTransitionAttributionConfig,
+        attribute_endpoint_transitions,
+        build_transition_events,
+        score_transition_features,
+        top_features_per_transition,
+    )
+
+    # Strided frames: 0, 10, 20, … so integer row index ≠ frame value.
+    frames = np.arange(0, 200, 10, dtype=int)
+    n = len(frames)
+    # Planted driver opens after frame 90; decoy stays flat; noise has no step.
+    rng = np.random.default_rng(0)
+    driver = np.where(frames < 100, 5.0, 8.0).astype(float)
+    decoy = np.full(n, 5.0)
+    noise = 5.0 + 0.05 * rng.normal(size=n)
+
+    feat_dir = tmp_path / "endpoint_features"
+    feat_dir.mkdir()
+    for traj in ("tA", "tB"):
+        pd.DataFrame(
+            {
+                "traj_id": traj,
+                "frame": frames,
+                "time_ps": frames.astype(float),
+                "endpoint_dist_mean": 0.5 * (driver + decoy),
+                "endpoint_dist_0s0_1s0": driver + (0.01 if traj == "tB" else 0.0),
+                "endpoint_dist_0s1_1s1": decoy,
+                "endpoint_dist_2s0_3s0": noise,
+            }
+        ).to_csv(feat_dir / f"{traj}_endpoint_features.csv", index=False)
+
+    sites = pd.DataFrame(
+        [
+            {"traj_id": "tA", "monomer": 0, "site_index": 0, "kind": "ring", "atom_ids": "1|2", "n_atoms": 2},
+            {"traj_id": "tA", "monomer": 0, "site_index": 1, "kind": "atom", "atom_ids": "3", "n_atoms": 1},
+            {"traj_id": "tA", "monomer": 1, "site_index": 0, "kind": "ring", "atom_ids": "4|5", "n_atoms": 2},
+            {"traj_id": "tA", "monomer": 1, "site_index": 1, "kind": "atom", "atom_ids": "6", "n_atoms": 1},
+            {"traj_id": "tA", "monomer": 2, "site_index": 0, "kind": "ring", "atom_ids": "7", "n_atoms": 1},
+            {"traj_id": "tA", "monomer": 3, "site_index": 0, "kind": "ring", "atom_ids": "8", "n_atoms": 1},
+        ]
+    )
+    sites.to_csv(feat_dir / "endpoint_sites.csv", index=False)
+
+    # Two trajectories with the same 0→1 transition (aggregation / n_events=2).
+    segments = pd.DataFrame(
+        [
+            {
+                "traj_id": "tA",
+                "group": "endpoint",
+                "segment_id": 0,
+                "cluster_label": 0,
+                "start_frame": 0,
+                "end_frame": 90,
+                "start_ps": 0.0,
+                "end_ps": 90.0,
+                "n_frames": 10,
+            },
+            {
+                "traj_id": "tA",
+                "group": "endpoint",
+                "segment_id": 1,
+                "cluster_label": 1,
+                "start_frame": 100,
+                "end_frame": 190,
+                "start_ps": 100.0,
+                "end_ps": 190.0,
+                "n_frames": 10,
+            },
+            {
+                "traj_id": "tB",
+                "group": "endpoint",
+                "segment_id": 0,
+                "cluster_label": 0,
+                "start_frame": 0,
+                "end_frame": 90,
+                "start_ps": 0.0,
+                "end_ps": 90.0,
+                "n_frames": 10,
+            },
+            {
+                "traj_id": "tB",
+                "group": "endpoint",
+                "segment_id": 1,
+                "cluster_label": 1,
+                "start_frame": 100,
+                "end_frame": 190,
+                "start_ps": 100.0,
+                "end_ps": 190.0,
+                "n_frames": 10,
+            },
+        ]
+    )
+
+    events = build_transition_events(segments, group="endpoint")
+    assert len(events) == 2
+    assert set(events["from_cluster"]) == {0}
+    assert set(events["to_cluster"]) == {1}
+    assert int(events.iloc[0]["boundary_frame"]) == 100
+
+    event_df, ranking = score_transition_features(events, feat_dir)
+    assert not ranking.empty
+    top = top_features_per_transition(ranking, top_n=3)
+    best = top.sort_values("rank").iloc[0]
+    assert best["feature"] == "endpoint_dist_0s0_1s0"
+    assert best["mean_delta_angstrom"] > 0
+    assert best["mean_point_biserial_corr"] > 0
+    assert int(best["n_events"]) == 2
+    assert int(best["n_trajectories"]) == 2
+    assert bool(best["is_descriptive"]) is False
+
+    out = tmp_path / "cp_out"
+    out.mkdir()
+    (out / "clusters" / "endpoint").mkdir(parents=True)
+    segments.to_csv(out / "clusters" / "endpoint" / "segments_clustered.csv", index=False)
+
+    arts = attribute_endpoint_transitions(
+        out,
+        feat_dir,
+        config=EndpointTransitionAttributionConfig(top_n=5),
+        clustered_df=segments,
+        sites_df=sites,
+        output_dir=out,
+        plot_dir=out / "plots",
+    )
+    assert (out / "endpoint_transition_events.csv").exists()
+    assert (out / "endpoint_transition_feature_rankings.csv").exists()
+    assert (out / "endpoint_transition_top_features.csv").exists()
+    assert (out / "plots" / "endpoint_transition_feature_heatmap.png").exists()
+    assert (out / "plots" / "endpoint_transition_network_attributed.png").exists()
+    site_png = out / "plots" / "endpoint_sites_transition_0_to_1.png"
+    site_html = out / "plots" / "endpoint_sites_transition_0_to_1.html"
+    assert site_png.exists() or site_html.exists()
+    assert "endpoint_transition_top_features.csv" in arts
+
+    top_csv = pd.read_csv(out / "endpoint_transition_top_features.csv")
+    assert "pair_label" in top_csv.columns
+    assert "atom_ids_i" in top_csv.columns
+    assert top_csv.iloc[0]["feature"] == "endpoint_dist_0s0_1s0"
+
+
+def test_attribution_skips_without_site_pairs(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.pipeline import ChangepointPipeline
+    from src.ChangepointAnalysis.transition_attribution import attribute_endpoint_transitions
+
+    feat_dir = tmp_path / "endpoint_features"
+    feat_dir.mkdir()
+    # Aggregate columns only — no site-pair series.
+    pd.DataFrame(
+        {
+            "traj_id": ["x"] * 5,
+            "frame": list(range(5)),
+            "time_ps": list(range(5)),
+            "endpoint_dist_mean": [1.0, 1.1, 1.2, 1.3, 1.4],
+            "endpoint_dist_0_1_mean": [1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    ).to_csv(feat_dir / "x_endpoint_features.csv", index=False)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    segments = pd.DataFrame(
+        [
+            {
+                "traj_id": "x",
+                "group": "endpoint",
+                "segment_id": 0,
+                "cluster_label": 0,
+                "start_frame": 0,
+                "end_frame": 1,
+                "n_frames": 2,
+            },
+            {
+                "traj_id": "x",
+                "group": "endpoint",
+                "segment_id": 1,
+                "cluster_label": 1,
+                "start_frame": 2,
+                "end_frame": 4,
+                "n_frames": 3,
+            },
+        ]
+    )
+    (out / "clusters" / "endpoint").mkdir(parents=True)
+    segments.to_csv(out / "clusters" / "endpoint" / "segments_clustered.csv", index=False)
+
+    pipe = ChangepointPipeline(
+        feat_dir,
+        out,
+        features_suffix="_endpoint_features.csv",
+    )
+    pipe._clustered = segments
+    skipped = pipe.attribute_endpoint_transitions()
+    assert skipped == {}
+
+    # Direct call with no site-pair columns still writes events but empty rankings.
+    arts = attribute_endpoint_transitions(out, feat_dir, clustered_df=segments)
+    assert (out / "endpoint_transition_events.csv").exists()
+    rankings = pd.read_csv(out / "endpoint_transition_feature_rankings.csv")
+    assert rankings.empty
+    assert "endpoint_transition_feature_heatmap.png" not in arts
+
+
+def test_attribution_handles_no_transitions(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.transition_attribution import build_transition_events
+
+    segments = pd.DataFrame(
+        [
+            {
+                "traj_id": "only",
+                "group": "endpoint",
+                "segment_id": 0,
+                "cluster_label": 0,
+                "start_frame": 0,
+                "end_frame": 10,
+                "n_frames": 11,
+            },
+            {
+                "traj_id": "only",
+                "group": "endpoint",
+                "segment_id": 1,
+                "cluster_label": 0,  # same cluster → not a directed transition
+                "start_frame": 11,
+                "end_frame": 20,
+                "n_frames": 10,
+            },
+        ]
+    )
+    events = build_transition_events(segments)
+    assert events.empty
+
+
+def test_classify_paper_d1_state() -> None:
+    from src.ChangepointAnalysis.endpoint_features import classify_paper_d1_state
+
+    assert classify_paper_d1_state(4.0) == "closed"
+    assert classify_paper_d1_state(4.5) == "open"
+    assert classify_paper_d1_state(5.0) == "open"
+    assert classify_paper_d1_state(5.5) == "open"
+    assert classify_paper_d1_state(6.0) == "elongated"
+
+
+def test_paper_d1_column_naming_and_parser() -> None:
+    from src.ChangepointAnalysis.endpoint_features import (
+        list_paper_d1_columns,
+        paper_d1_column_name,
+    )
+    from src.ChangepointAnalysis.transition_attribution import parse_paper_d1_feature
+
+    name = paper_d1_column_name(0, 3, 1, 7)
+    assert name == "paper_d1_m0s3_m1s7"
+    assert parse_paper_d1_feature(name) == (0, 3, 1, 7)
+    assert parse_paper_d1_feature("endpoint_dist_0s3_1s7") is None
+    cols = list_paper_d1_columns(
+        [name, "paper_d1_min", "paper_d1_n_open", "endpoint_dist_0s3_1s7"]
+    )
+    assert cols == [name]
+
+
+def test_resolve_paper_d1_atoms_bmm_topology() -> None:
+    """Live topology check: s3/s7 map to unique bonded ring neighbors."""
+    pytest.importorskip("rdkit")
+    import MDAnalysis as mda
+
+    from src.EndpointAnalyzer.EndpointAnalyzer import EndpointAnalyzer
+    from src.EndpointAnalyzer import EndpointsFinder
+    from src.ChangepointAnalysis.endpoint_features import resolve_paper_d1_atoms
+    from src.utils.gsa_selections import resolve_selections
+
+    topo = Path("traj/BMMpM_ca.prmtop")
+    traj = Path("traj/BMMpM_891249_mdcrd_v.trj")
+    if not topo.exists() or not traj.exists():
+        pytest.skip("BMMpM topology/trajectory not present")
+
+    u = mda.Universe(str(topo), str(traj))
+    u.trajectory[0]
+    sels = resolve_selections(u, gsa_resname="MOL", n_monomers=6, auto_tooth=False)
+    finder = EndpointsFinder()
+    stored = []
+    for mon_sel in sels.monomer_selections:
+        _, sites = EndpointAnalyzer.find_residue_endpoint_sites(u, mon_sel, finder)
+        stored.append(sites)
+
+    d1 = resolve_paper_d1_atoms(
+        u, sels.monomer_selections, stored, traj_id="topo", s3_site=3, s7_site=7
+    )
+    assert len(d1) == 12  # 6 monomers × {s3,s7}
+    # Known mapping for monomer 0 from earlier inspection.
+    m0 = d1[(d1["monomer"] == 0) & (d1["endpoint_site"] == 3)].iloc[0]
+    assert int(m0["endpoint_atom_id"]) == 70
+    assert int(m0["d1_ring_atom_id"]) == 65
+    m0b = d1[(d1["monomer"] == 0) & (d1["endpoint_site"] == 7)].iloc[0]
+    assert int(m0b["endpoint_atom_id"]) == 112
+    assert int(m0b["d1_ring_atom_id"]) == 103
+
+
+def test_compute_paper_d1_distances_synthetic() -> None:
+    """Synthetic two-point geometry: one open and one elongated contact."""
+    import types
+
+    from src.ChangepointAnalysis.endpoint_features import (
+        classify_paper_d1_state,
+        compute_paper_d1_distances,
+        paper_d1_column_name,
+    )
+
+    class _Atom:
+        def __init__(self, idx: int, aid: int, pos):
+            self.index = idx
+            self.id = aid
+            self.position = np.asarray(pos, dtype=float)
+
+    class _Atoms:
+        def __init__(self, atoms):
+            self._atoms = atoms
+
+        def __iter__(self):
+            return iter(self._atoms)
+
+        def __getitem__(self, idx):
+            return self._atoms[idx]
+
+    class _Traj:
+        def __init__(self):
+            self.n = 1
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, i):
+            return None
+
+    # Two monomers, each with s3 and s7 ring atoms.
+    # m0s3 at origin, m1s7 at 5.0 Å (open), m0s7 at origin+y, m1s3 far.
+    atoms = _Atoms(
+        [
+            _Atom(0, 10, [0.0, 0.0, 0.0]),  # m0 s3 ring
+            _Atom(1, 11, [0.0, 1.0, 0.0]),  # m0 s7 ring
+            _Atom(2, 20, [5.0, 0.0, 0.0]),  # m1 s7 ring → open vs m0s3
+            _Atom(3, 21, [20.0, 1.0, 0.0]),  # m1 s3 ring → elongated vs m0s7
+        ]
+    )
+    universe = types.SimpleNamespace(atoms=atoms, trajectory=_Traj())
+    d1_atoms = pd.DataFrame(
+        [
+            {"monomer": 0, "endpoint_site": 3, "d1_ring_atom_id": 10},
+            {"monomer": 0, "endpoint_site": 7, "d1_ring_atom_id": 11},
+            {"monomer": 1, "endpoint_site": 3, "d1_ring_atom_id": 21},
+            {"monomer": 1, "endpoint_site": 7, "d1_ring_atom_id": 20},
+        ]
+    )
+    out = compute_paper_d1_distances(universe, d1_atoms, frame_indices=[0])
+    c_open = paper_d1_column_name(0, 3, 1, 7)
+    c_long = paper_d1_column_name(0, 7, 1, 3)
+    assert abs(out.loc[0, c_open] - 5.0) < 1e-6
+    assert classify_paper_d1_state(out.loc[0, c_open]) == "open"
+    assert out.loc[0, c_long] > 5.5
+    assert out.loc[0, "paper_d1_n_open"] >= 1
