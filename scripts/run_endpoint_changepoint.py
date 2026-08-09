@@ -128,6 +128,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--step", type=int, default=1)
     p.add_argument("--time-per-frame-ps", type=float, default=1.0)
     p.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help=(
+            "Parallel workers for frames within one trajectory "
+            "(default: 1 when traj_jobs>1, else platform default)."
+        ),
+    )
+    p.add_argument(
+        "--traj-jobs",
+        type=int,
+        default=-1,
+        help=(
+            "Parallel workers across trajectories "
+            "(default: -1 = all CPUs, capped by traj count)."
+        ),
+    )
+    p.add_argument(
+        "--use-dask",
+        action="store_true",
+        help="Use Dask Distributed for the endpoint distance pass.",
+    )
+    p.add_argument(
+        "--max-workers-for-io",
+        type=int,
+        default=None,
+        help=(
+            "Cap parallel workers for I/O-bound trajectory reads "
+            "(TrajectoryIterator default limit is 16)."
+        ),
+    )
+    p.add_argument(
         "--output-dir",
         default="output/endpoint_changepoints",
         help="Pipeline output directory",
@@ -232,6 +264,10 @@ def main() -> None:
             include_paper_d1=not args.no_paper_d1,
             paper_d1_open_lo=args.paper_d1_open_lo,
             paper_d1_open_hi=args.paper_d1_open_hi,
+            n_jobs=args.n_jobs,
+            traj_jobs=args.traj_jobs,
+            use_dask=args.use_dask,
+            max_workers_for_io=args.max_workers_for_io,
             start=args.start,
             stop=args.stop,
             step=args.step,

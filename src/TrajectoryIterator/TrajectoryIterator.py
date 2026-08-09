@@ -48,6 +48,101 @@ except ImportError:
     mp = None
 
 # Worker-local storage for Universe instances (to avoid recreation overhead)
+
+
+def _pack_observer_results(worker_observers: List[Any]) -> str:
+    """Serialize observer ``.results`` dicts to a temp file.
+
+    Returning full observer objects (or large in-memory pickles) through
+    Windows multiprocessing pipes often fails with ``OSError`` 1450
+    (insufficient system resources). A short temp-path return stays small.
+    """
+    import tempfile
+
+    payloads: List[Optional[Dict[str, Any]]] = []
+    for obs in worker_observers:
+        if obs is None:
+            payloads.append(None)
+        else:
+            payloads.append(getattr(obs, "results", None))
+
+    fd, path = tempfile.mkstemp(prefix="traj_iter_batch_", suffix=".pkl")
+    os.close(fd)
+    try:
+        with open(path, "wb") as fh:
+            pickle.dump(payloads, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _unpack_observer_results(packed: Any) -> List[Any]:
+    """Load packed worker payloads (temp path or legacy in-memory list)."""
+    if isinstance(packed, str):
+        path = packed
+        try:
+            with open(path, "rb") as fh:
+                return pickle.load(fh)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    if packed is None:
+        return []
+    return list(packed)
+
+
+def _merge_packed_observer_result(observer: "FrameObserver", observer_result: Any) -> None:
+    """Merge one worker payload into the parent observer."""
+    if observer_result is None:
+        return
+    result_dict: Optional[Dict[str, Any]]
+    if isinstance(observer_result, dict):
+        result_dict = observer_result
+    elif hasattr(observer_result, "results"):
+        result_dict = observer_result.results
+    else:
+        observer.merge_results(observer_result)
+        return
+
+    aggregator = observer._get_aggregator()
+    if aggregator is not None:
+        aggregator.merge(observer.results, result_dict)
+    else:
+        # Legacy path: wrap dict so merge_results can still run if needed
+        class _ResultShim:
+            def __init__(self, results: Dict[str, Any]):
+                self.results = results
+
+        observer.merge_results(_ResultShim(result_dict))  # type: ignore[arg-type]
+
+
+def _merge_all_batch_results(observers: List[Any], results: List[Any]) -> None:
+    """Unpack and merge all parallel batch payloads into parent observers."""
+    for batch_results in results:
+        if batch_results is None:
+            continue
+        try:
+            unpacked = _unpack_observer_results(batch_results)
+        except Exception as e:
+            warnings.warn(f"Failed to unpack worker batch results: {e}")
+            continue
+        for observer_idx, observer_result in enumerate(unpacked):
+            if observer_idx >= len(observers) or observer_result is None:
+                continue
+            try:
+                _merge_packed_observer_result(observers[observer_idx], observer_result)
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to merge results for observer "
+                    f"{type(observers[observer_idx]).__name__}: {e}"
+                )
+
 # This is a module-level dictionary that will be keyed by (worker_id, file_hash)
 # For multiprocessing: use process name
 # For Dask: use worker address
@@ -699,25 +794,7 @@ class TrajectoryIterator:
         self.times = times_to_process
         
         # Merge observer results from parallel workers using ResultsGroup or legacy method
-        for batch_results in results:
-            if batch_results is None:
-                continue
-            for observer_idx, observer_result in enumerate(batch_results):
-                if observer_idx < len(self.observers) and observer_result is not None:
-                    try:
-                        observer = self.observers[observer_idx]
-                        aggregator = observer._get_aggregator()
-                        if aggregator is not None and hasattr(observer_result, 'results'):
-                            # Use declarative ResultsGroup aggregation
-                            aggregator.merge(observer.results, observer_result.results)
-                        else:
-                            # Fall back to legacy merge_results method
-                            observer.merge_results(observer_result)
-                    except Exception as e:
-                        warnings.warn(
-                            f"Failed to merge results for observer "
-                            f"{type(self.observers[observer_idx]).__name__}: {e}"
-                        )
+        _merge_all_batch_results(self.observers, results)
         
         # Notify observers that iteration is complete
         for observer in self.observers:
@@ -852,22 +929,7 @@ class TrajectoryIterator:
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
-        for batch_results in results:
-            if batch_results is None:
-                continue
-            for observer_idx, observer_result in enumerate(batch_results):
-                if observer_idx < len(self.observers) and observer_result is not None:
-                    try:
-                        observer = self.observers[observer_idx]
-                        aggregator = observer._get_aggregator()
-                        if aggregator is not None and hasattr(observer_result, 'results'):
-                            # Use declarative ResultsGroup aggregation
-                            aggregator.merge(observer.results, observer_result.results)
-                        else:
-                            # Fall back to legacy merge_results method
-                            observer.merge_results(observer_result)
-                    except Exception as e:
-                        warnings.warn(f"Failed to merge results: {e}")
+        _merge_all_batch_results(self.observers, results)
         
         # Notify observers that iteration is complete
         for observer in self.observers:
@@ -1014,22 +1076,7 @@ class TrajectoryIterator:
         self.frame_indices = frame_indices_to_process
         self.times = times_to_process
         
-        for batch_results in results:
-            if batch_results is None:
-                continue
-            for observer_idx, observer_result in enumerate(batch_results):
-                if observer_idx < len(self.observers) and observer_result is not None:
-                    try:
-                        observer = self.observers[observer_idx]
-                        aggregator = observer._get_aggregator()
-                        if aggregator is not None and hasattr(observer_result, 'results'):
-                            # Use declarative ResultsGroup aggregation
-                            aggregator.merge(observer.results, observer_result.results)
-                        else:
-                            # Fall back to legacy merge_results method
-                            observer.merge_results(observer_result)
-                    except Exception as e:
-                        warnings.warn(f"Failed to merge results: {e}")
+        _merge_all_batch_results(self.observers, results)
         
         for observer in self.observers:
             observer.on_frame_end(self)
@@ -1296,7 +1343,7 @@ def _process_frame_batch_with_coords(
                 context={"batch_idx": batch_idx, "n_frames": len(frame_indices)},
                 elapsed_ms=(time.perf_counter() - t0) * 1000.0,
             )
-        return worker_observers
+        return _pack_observer_results(worker_observers)
         
     except Exception as e:
         import traceback
@@ -1311,7 +1358,7 @@ def _process_frame_batch_with_coords(
                 context={"batch_idx": batch_idx, "traceback": error_traceback},
             )
         warnings.warn(f"Error in worker process: {e}\nTraceback:\n{error_traceback}")
-        return [None] * len(observers)
+        return _pack_observer_results([None] * len(observers))
 
 
 def _process_frame_batch_fork(
@@ -1417,7 +1464,7 @@ def _process_frame_batch_fork(
                 )
         except Exception:
             pass
-        return worker_observers
+        return _pack_observer_results(worker_observers)
         
     except Exception as e:
         import traceback
@@ -1437,4 +1484,5 @@ def _process_frame_batch_fork(
         except Exception:
             pass
         warnings.warn(f"Error in fork worker: {e}\n{tb}")
-        return [None] * len(_shared_observers) if _shared_observers else []
+        n_obs = len(_shared_observers) if _shared_observers else 0
+        return _pack_observer_results([None] * n_obs) if n_obs else _pack_observer_results([])

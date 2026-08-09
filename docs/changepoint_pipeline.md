@@ -190,6 +190,10 @@ python scripts/run_endpoint_changepoint.py `
 | `--paper-d1-open-lo` / `--paper-d1-open-hi` | Open cation–π window in Å (default 4.5–5.5) |
 | `--rmsd-from DIR` | Overlay mean `assembly_rmsd_to_ref` per cluster from `*_gsa_features.csv` |
 | `--step N` | Trajectory frame stride |
+| `--traj-jobs N` | Parallel workers across trajectories (default `-1` = all CPUs, capped by traj count) |
+| `--n-jobs N` | Parallel workers for frames within one trajectory (default: `1` when traj-jobs>1) |
+| `--use-dask` | Use Dask Distributed for the endpoint distance pass |
+| `--max-workers-for-io N` | Cap I/O-bound workers (iterator default limit is 16) |
 | `--features-dir` | Where to write features (default: `<output-dir>/endpoint_features`) |
 | `--with-sweep` | Penalty sweep before final detection |
 | `--n-clusters` / `--k` | Segment clusters (default 5) |
@@ -460,7 +464,7 @@ ChangepointTables          # breakpoints, segment_stats, comparison DataFrames
 PenaltySweepConfig         # grid size, thresholds, nested ChangepointConfig
 PenaltySweepResult         # summary, elbow, recommended_penalty, ...
 SegmentClusteringConfig    # n_clusters, linkage, groups, PCA / all-k options
-EndpointFeatureConfig      # gsa_resname, use_ring_centroids, include_site_pairs, stride, ...
+EndpointFeatureConfig      # gsa_resname, use_ring_centroids, include_site_pairs, n_jobs, stride, ...
 ```
 
 ---

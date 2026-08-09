@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -35,6 +37,57 @@ from .transition_attribution import (
     attribute_endpoint_transitions,
     list_site_pair_columns,
 )
+
+
+def _resolve_traj_workers(traj_jobs: Optional[int], n_traj: int) -> int:
+    """Resolve ``traj_jobs`` to a concrete worker count capped by ``n_traj``."""
+    if n_traj <= 0:
+        return 1
+    if traj_jobs is None or int(traj_jobs) == -1:
+        requested = os.cpu_count() or 1
+    else:
+        requested = max(1, int(traj_jobs))
+    return max(1, min(requested, n_traj))
+
+
+def _extract_endpoint_features_one_traj(
+    topology: str,
+    traj_path: str,
+    traj_id: str,
+    feat_cfg: Any,
+    features_dir: str,
+    write_site_plot: bool,
+) -> dict[str, Any]:
+    """Worker: load one trajectory, extract endpoint features, write CSV."""
+    import MDAnalysis as mda
+
+    from .endpoint_features import (
+        generate_endpoint_features,
+        write_endpoint_features_csv,
+    )
+
+    u = mda.Universe(str(topology), str(traj_path))
+    features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
+        generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
+    )
+    write_endpoint_features_csv(
+        features_df,
+        Path(features_dir),
+        traj_id,
+        sites_df=sites_df,
+        d1_atoms_df=d1_atoms_df,
+        universe=u,
+        monomer_selections=monomer_sels,
+        stored_sites=stored_sites,
+        write_site_plot=write_site_plot,
+    )
+    return {
+        "traj_id": traj_id,
+        "sites_df": sites_df,
+        "d1_atoms_df": d1_atoms_df,
+        "monomer_sels": list(monomer_sels),
+        "stored_sites": stored_sites,
+    }
 
 
 class ChangepointPipeline:
@@ -313,6 +366,10 @@ def run_endpoint_changepoint(
     include_paper_d1: bool = True,
     paper_d1_open_lo: float = 4.5,
     paper_d1_open_hi: float = 5.5,
+    n_jobs: Optional[int] = None,
+    traj_jobs: Optional[int] = -1,
+    use_dask: bool = False,
+    max_workers_for_io: Optional[int] = None,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     step: int = 1,
@@ -343,6 +400,19 @@ def run_endpoint_changepoint(
         transitions to raw site-pair columns. Requires ``include_site_pairs``.
     transition_attribution
         Optional config for top-N / correlation threshold / ranking weights.
+    traj_jobs
+        Parallel workers across trajectories (default ``-1`` = all CPUs,
+        capped by number of trajectories). Prefer this over ``n_jobs`` for
+        multi-replica cohorts.
+    n_jobs
+        Parallel workers for frames within one trajectory
+        (``TrajectoryIterator``). When ``traj_jobs`` uses multiple workers and
+        ``n_jobs`` is omitted, frame-level parallel defaults to ``1`` to avoid
+        nested oversubscription.
+    use_dask
+        If True, use Dask Distributed for parallel frame batches.
+    max_workers_for_io
+        Cap on workers for I/O-bound trajectory reads (iterator default is 16).
     """
     import MDAnalysis as mda
 
@@ -365,6 +435,12 @@ def run_endpoint_changepoint(
         if len(ids) != len(traj_paths):
             raise ValueError("traj_ids length must match trajectories")
 
+    n_workers = _resolve_traj_workers(traj_jobs, len(traj_paths))
+    # Avoid nested parallel: multi-traj workers → sequential frames unless set.
+    frame_n_jobs = n_jobs
+    if n_workers > 1 and frame_n_jobs is None:
+        frame_n_jobs = 1
+
     feat_cfg = EndpointFeatureConfig(
         gsa_resname=gsa_resname,
         n_monomers=n_monomers,
@@ -376,6 +452,9 @@ def run_endpoint_changepoint(
         include_paper_d1=include_paper_d1,
         paper_d1_open_lo=paper_d1_open_lo,
         paper_d1_open_hi=paper_d1_open_hi,
+        n_jobs=frame_n_jobs,
+        use_dask=use_dask,
+        max_workers_for_io=max_workers_for_io,
         start=start,
         stop=stop,
         step=step,
@@ -388,32 +467,75 @@ def run_endpoint_changepoint(
     last_monomer_sels: Optional[list[str]] = None
     last_stored_sites = None
 
-    for i, (traj_path, traj_id) in enumerate(zip(traj_paths, ids)):
-        if universe_factory is not None:
-            u = universe_factory(topology, traj_path)
-        else:
-            u = mda.Universe(str(topology), str(traj_path))
-        features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
-            generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
+    use_parallel_trajs = (
+        n_workers > 1
+        and len(traj_paths) > 1
+        and universe_factory is None
+    )
+
+    if use_parallel_trajs:
+        print(
+            f"Extracting endpoint features for {len(traj_paths)} trajectories "
+            f"with traj_jobs={n_workers} (frame n_jobs={frame_n_jobs!r})",
+            flush=True,
         )
-        # Sites are topology-defined (prmtop); write the QC PNG once.
-        write_endpoint_features_csv(
-            features_df,
-            features_dir,
-            traj_id,
-            sites_df=sites_df,
-            d1_atoms_df=d1_atoms_df,
-            universe=u,
-            monomer_selections=monomer_sels,
-            stored_sites=stored_sites,
-            write_site_plot=(i == 0),
-        )
-        if i == 0:
-            last_sites_df = sites_df
-            last_d1_atoms_df = d1_atoms_df
-            last_universe = u
-            last_monomer_sels = list(monomer_sels)
-            last_stored_sites = stored_sites
+        results_by_index: dict[int, dict[str, Any]] = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {
+                pool.submit(
+                    _extract_endpoint_features_one_traj,
+                    str(topology),
+                    str(traj_path),
+                    str(traj_id),
+                    feat_cfg,
+                    str(features_dir),
+                    i == 0,
+                ): i
+                for i, (traj_path, traj_id) in enumerate(zip(traj_paths, ids))
+            }
+            for fut in as_completed(futures):
+                i = futures[fut]
+                results_by_index[i] = fut.result()
+        first = results_by_index[0]
+        last_sites_df = first["sites_df"]
+        last_d1_atoms_df = first["d1_atoms_df"]
+        last_monomer_sels = list(first["monomer_sels"])
+        last_stored_sites = first["stored_sites"]
+        # Reload first traj for attribution / NGL (workers do not return universes).
+        last_universe = mda.Universe(str(topology), str(traj_paths[0]))
+    else:
+        if n_workers > 1 and universe_factory is not None:
+            print(
+                "traj_jobs>1 requested but universe_factory is set; "
+                "falling back to sequential trajectory extraction.",
+                flush=True,
+            )
+        for i, (traj_path, traj_id) in enumerate(zip(traj_paths, ids)):
+            if universe_factory is not None:
+                u = universe_factory(topology, traj_path)
+            else:
+                u = mda.Universe(str(topology), str(traj_path))
+            features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
+                generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
+            )
+            # Sites are topology-defined (prmtop); write the QC PNG once.
+            write_endpoint_features_csv(
+                features_df,
+                features_dir,
+                traj_id,
+                sites_df=sites_df,
+                d1_atoms_df=d1_atoms_df,
+                universe=u,
+                monomer_selections=monomer_sels,
+                stored_sites=stored_sites,
+                write_site_plot=(i == 0),
+            )
+            if i == 0:
+                last_sites_df = sites_df
+                last_d1_atoms_df = d1_atoms_df
+                last_universe = u
+                last_monomer_sels = list(monomer_sels)
+                last_stored_sites = stored_sites
 
     det = detection or ChangepointConfig(groups=("endpoint",))
     if "endpoint" not in det.groups:

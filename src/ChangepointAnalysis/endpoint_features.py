@@ -39,9 +39,146 @@ class EndpointFeatureConfig:
     paper_d1_s7_site: int = 7
     paper_d1_open_lo: float = 4.5
     paper_d1_open_hi: float = 5.5
+    # TrajectoryIterator parallelization for the endpoint-site distance pass.
+    # None = platform default (1 on Windows, -1 elsewhere); 1 = sequential;
+    # -1 = all CPUs; >1 = that many workers.
+    n_jobs: Optional[int] = None
+    use_dask: bool = False
+    max_workers_for_io: Optional[int] = None
+
+
+def _default_n_jobs() -> int:
+    """Windows coords-parallel path is usually I/O-bound; prefer sequential there."""
+    import sys
+
+    return 1 if sys.platform.startswith("win") else -1
 
 
 PAPER_D1_COL_PREFIX = "paper_d1_"
+
+
+def _paper_d1_pair_layout(
+    d1_atoms_df: pd.DataFrame,
+    universe: Any,
+    *,
+    s3_site: int = 3,
+    s7_site: int = 7,
+) -> tuple[list[int], list[tuple[str, int, int]]]:
+    """Return (MDA atom indices by slot, list of (col, slot_a, slot_b))."""
+    ring_index: dict[int, dict[int, int]] = {}
+    id_to_index = {int(a.id): int(a.index) for a in universe.atoms}
+    for _, row in d1_atoms_df.iterrows():
+        mon = int(row["monomer"])
+        site = int(row["endpoint_site"])
+        ring_id = int(row["d1_ring_atom_id"])
+        if ring_id not in id_to_index:
+            raise ValueError(f"d1 ring atom id {ring_id} not in universe")
+        ring_index.setdefault(mon, {})[site] = id_to_index[ring_id]
+
+    monomers = sorted(ring_index)
+    for mon in monomers:
+        for site in (int(s3_site), int(s7_site)):
+            if site not in ring_index[mon]:
+                raise ValueError(f"Missing d1 ring atom for monomer {mon} site {site}")
+
+    slots: list[tuple[int, int]] = []
+    atom_idxs: list[int] = []
+    for mon in monomers:
+        for site in (int(s3_site), int(s7_site)):
+            slots.append((mon, site))
+            atom_idxs.append(ring_index[mon][site])
+    slot_pos = {slot: k for k, slot in enumerate(slots)}
+
+    pair_specs: list[tuple[str, int, int]] = []
+    for i in monomers:
+        for j in monomers:
+            if i == j:
+                continue
+            for si, sj in ((s3_site, s7_site), (s7_site, s3_site)):
+                col = paper_d1_column_name(i, si, j, sj)
+                pair_specs.append((col, slot_pos[(i, si)], slot_pos[(j, sj)]))
+    return atom_idxs, pair_specs
+
+
+class PaperD1FrameObserver:
+    """Accumulate paper-d1 distances during the same TrajectoryIterator pass."""
+
+    def __init__(
+        self,
+        atom_idxs: Sequence[int],
+        pair_specs: Sequence[tuple[str, int, int]],
+        *,
+        n_frame_rows: int,
+        open_lo: float = 4.5,
+        open_hi: float = 5.5,
+    ):
+        from src.Aggregator import ResultsGroup
+
+        self.results: dict[str, Any] = {}
+        self.atom_idxs = [int(i) for i in atom_idxs]
+        self.pair_specs = list(pair_specs)
+        self.colnames = [c for c, _, _ in self.pair_specs]
+        self.open_lo = float(open_lo)
+        self.open_hi = float(open_hi)
+        self._n_frame_rows = int(n_frame_rows)
+        self._ResultsGroup = ResultsGroup
+        n_pairs = len(self.pair_specs)
+        self.results["d1_dists"] = np.full(
+            (self._n_frame_rows, n_pairs), np.nan, dtype=float
+        )
+
+    def get_selections_needed(self) -> list[str]:
+        return []
+
+    def on_frame_start(self, iterator: Any) -> None:
+        return None
+
+    def on_frame(self, ts: Any, frame_idx: int, universe: Any) -> None:
+        idx = int(frame_idx)
+        if idx < 0 or idx >= self._n_frame_rows:
+            return
+        pos = np.asarray(universe.atoms[self.atom_idxs].positions, dtype=float)
+        dists = self.results["d1_dists"]
+        for k, (_, ia, ib) in enumerate(self.pair_specs):
+            dists[idx, k] = float(np.linalg.norm(pos[ia] - pos[ib]))
+
+    def on_frame_end(self, iterator: Any) -> None:
+        return None
+
+    def _get_aggregator(self) -> Any:
+        return self._ResultsGroup(
+            lookup={"d1_dists": self._ResultsGroup.ndarray_merge_nonnan}
+        )
+
+    def merge_results(self, other: Any) -> None:
+        if other is None:
+            return
+        other_dists = None
+        if isinstance(other, dict):
+            other_dists = other.get("d1_dists")
+        elif hasattr(other, "results"):
+            other_dists = other.results.get("d1_dists")
+        if other_dists is None:
+            return
+        self_arr = self.results["d1_dists"]
+        valid = ~np.isnan(other_dists)
+        self_arr[valid] = other_dists[valid]
+
+    def to_dataframe(self) -> pd.DataFrame:
+        dists = np.asarray(self.results["d1_dists"], dtype=float)
+        data: dict[str, Any] = {}
+        for k, col in enumerate(self.colnames):
+            data[col] = dists[:, k]
+        with np.errstate(all="ignore"):
+            data["paper_d1_min"] = np.nanmin(dists, axis=1)
+            data["paper_d1_n_open"] = np.sum(
+                (dists >= self.open_lo) & (dists <= self.open_hi), axis=1
+            ).astype(int)
+            data["paper_d1_n_closed"] = np.sum(dists < self.open_lo, axis=1).astype(int)
+            data["paper_d1_n_elongated"] = np.sum(dists > self.open_hi, axis=1).astype(
+                int
+            )
+        return pd.DataFrame(data)
 
 
 def all_pairs_to_metrics_df(
@@ -64,54 +201,62 @@ def all_pairs_to_metrics_df(
         Raw distance between site *a* of monomer *i* and site *b* of monomer *j*.
     """
     summary_set = set(summaries)
-    rows: list[dict[str, Any]] = []
-    for frame in range(n_frames):
-        row: dict[str, Any] = {"frame": frame}
-        all_pair_dists: list[float] = []
-        for i in range(n_res):
-            for j in range(i + 1, n_res):
-                if (i, j) not in all_pairs:
-                    for s in summaries:
-                        row[f"endpoint_dist_{i}_{j}_{s}"] = np.nan
-                    continue
-                pair_array = all_pairs[(i, j)][frame]
-                valid = pair_array[~np.isnan(pair_array)]
-                all_pair_dists.extend(valid.tolist())
-                if len(valid) > 0:
-                    if "mean" in summary_set:
-                        row[f"endpoint_dist_{i}_{j}_mean"] = float(np.mean(valid))
-                    if "min" in summary_set:
-                        row[f"endpoint_dist_{i}_{j}_min"] = float(np.min(valid))
-                    if "max" in summary_set:
-                        row[f"endpoint_dist_{i}_{j}_max"] = float(np.max(valid))
-                    if "std" in summary_set:
-                        row[f"endpoint_dist_{i}_{j}_std"] = float(np.std(valid))
-                else:
-                    for s in summaries:
-                        row[f"endpoint_dist_{i}_{j}_{s}"] = np.nan
+    data: dict[str, Any] = {"frame": np.arange(n_frames, dtype=int)}
+    assembly_blocks: list[np.ndarray] = []
 
-                if include_site_pairs and pair_array.ndim == 2:
-                    n_a, n_b = pair_array.shape
-                    for a in range(n_a):
-                        for b in range(n_b):
-                            val = pair_array[a, b]
-                            row[f"endpoint_dist_{i}s{a}_{j}s{b}"] = (
-                                float(val) if np.isfinite(val) else np.nan
-                            )
+    for i in range(n_res):
+        for j in range(i + 1, n_res):
+            prefix = f"endpoint_dist_{i}_{j}"
+            if (i, j) not in all_pairs:
+                for s in summaries:
+                    data[f"{prefix}_{s}"] = np.full(n_frames, np.nan)
+                continue
 
-        if all_pair_dists:
-            arr = np.asarray(all_pair_dists, dtype=float)
-            row["endpoint_dist_mean"] = float(np.mean(arr))
-            row["endpoint_dist_min"] = float(np.min(arr))
-            row["endpoint_dist_max"] = float(np.max(arr))
-            row["endpoint_dist_std"] = float(np.std(arr))
-        else:
-            row["endpoint_dist_mean"] = np.nan
-            row["endpoint_dist_min"] = np.nan
-            row["endpoint_dist_max"] = np.nan
-            row["endpoint_dist_std"] = np.nan
-        rows.append(row)
-    return pd.DataFrame(rows)
+            pair_array = np.asarray(all_pairs[(i, j)], dtype=float)
+            if pair_array.ndim == 2:
+                # (n_frames, n_pairs) legacy shape
+                flat = pair_array
+            elif pair_array.ndim == 3:
+                flat = pair_array.reshape(n_frames, -1)
+            else:
+                raise ValueError(
+                    f"Unexpected all_pairs[{(i, j)}] shape {pair_array.shape}"
+                )
+
+            with np.errstate(all="ignore"):
+                if "mean" in summary_set:
+                    data[f"{prefix}_mean"] = np.nanmean(flat, axis=1)
+                if "min" in summary_set:
+                    data[f"{prefix}_min"] = np.nanmin(flat, axis=1)
+                if "max" in summary_set:
+                    data[f"{prefix}_max"] = np.nanmax(flat, axis=1)
+                if "std" in summary_set:
+                    data[f"{prefix}_std"] = np.nanstd(flat, axis=1)
+            assembly_blocks.append(flat)
+
+            if include_site_pairs and pair_array.ndim == 3:
+                n_a, n_b = pair_array.shape[1], pair_array.shape[2]
+                for a in range(n_a):
+                    for b in range(n_b):
+                        col = pair_array[:, a, b]
+                        data[f"endpoint_dist_{i}s{a}_{j}s{b}"] = np.where(
+                            np.isfinite(col), col, np.nan
+                        )
+
+    if assembly_blocks:
+        all_flat = np.concatenate(assembly_blocks, axis=1)
+        with np.errstate(all="ignore"):
+            data["endpoint_dist_mean"] = np.nanmean(all_flat, axis=1)
+            data["endpoint_dist_min"] = np.nanmin(all_flat, axis=1)
+            data["endpoint_dist_max"] = np.nanmax(all_flat, axis=1)
+            data["endpoint_dist_std"] = np.nanstd(all_flat, axis=1)
+    else:
+        data["endpoint_dist_mean"] = np.full(n_frames, np.nan)
+        data["endpoint_dist_min"] = np.full(n_frames, np.nan)
+        data["endpoint_dist_max"] = np.full(n_frames, np.nan)
+        data["endpoint_dist_std"] = np.full(n_frames, np.nan)
+
+    return pd.DataFrame(data)
 
 
 def _count_iterated_frames(
@@ -152,11 +297,12 @@ def generate_endpoint_features(
     d1_atoms_df
         Paper-d1 ring-neighbor map, or ``None`` when disabled.
     """
-    from src.EndpointAnalyzer import EndpointAnalyzerObserver, EndpointsFinder
+    from src.EndpointAnalyzer import EndpointAnalyzer, EndpointAnalyzerObserver, EndpointsFinder
     from src.TrajectoryIterator import TrajectoryIterator
     from src.utils.gsa_selections import GSAFeatureSelections, resolve_selections
 
     cfg = config or EndpointFeatureConfig()
+    n_jobs = cfg.n_jobs if cfg.n_jobs is not None else _default_n_jobs()
 
     explicit = None
     if cfg.monomer_selections:
@@ -184,15 +330,62 @@ def generate_endpoint_features(
     n_traj = len(universe.trajectory)
     n_rows = _count_iterated_frames(n_traj, cfg.start, cfg.stop, cfg.step)
 
+    # Pre-resolve sites so paper-d1 can ride the same iterator pass.
+    preview_sites: list[list[list[int]]] = []
+    for sel_str in monomer_sels:
+        if cfg.use_ring_centroids:
+            _, sites = EndpointAnalyzer.find_residue_endpoint_sites(
+                universe, sel_str, finder
+            )
+        else:
+            _, ep_indices = EndpointAnalyzer.find_residue_endpoints(
+                universe, sel_str, finder
+            )
+            sites = [[aid] for aid in ep_indices]
+        preview_sites.append(sites)
+
+    d1_atoms_df: Optional[pd.DataFrame] = None
+    d1_observer: Optional[PaperD1FrameObserver] = None
+    if cfg.include_paper_d1:
+        d1_atoms_df = resolve_paper_d1_atoms(
+            universe,
+            monomer_sels,
+            preview_sites,
+            traj_id=traj_id,
+            s3_site=cfg.paper_d1_s3_site,
+            s7_site=cfg.paper_d1_s7_site,
+        )
+        atom_idxs, pair_specs = _paper_d1_pair_layout(
+            d1_atoms_df,
+            universe,
+            s3_site=cfg.paper_d1_s3_site,
+            s7_site=cfg.paper_d1_s7_site,
+        )
+        d1_observer = PaperD1FrameObserver(
+            atom_idxs,
+            pair_specs,
+            n_frame_rows=n_rows,
+            open_lo=cfg.paper_d1_open_lo,
+            open_hi=cfg.paper_d1_open_hi,
+        )
+
     observer = EndpointAnalyzerObserver(
         residue_sel_list=list(monomer_sels),
         endpoints_finder=finder,
         n_frame_rows=n_rows,
         use_ring_centroids=cfg.use_ring_centroids,
     )
-    iterator = TrajectoryIterator(universe)
+    iterator = TrajectoryIterator(universe, use_dask=bool(cfg.use_dask))
     iterator.subscribe(observer)
-    iterator.iterate(start=cfg.start, stop=cfg.stop, step=cfg.step)
+    if d1_observer is not None:
+        iterator.subscribe(d1_observer)
+    iterator.iterate(
+        start=cfg.start,
+        stop=cfg.stop,
+        step=cfg.step,
+        n_jobs=n_jobs,
+        max_workers_for_io=cfg.max_workers_for_io,
+    )
 
     dist_info = observer.get_endpoint_distances()
     features = all_pairs_to_metrics_df(
@@ -226,16 +419,7 @@ def generate_endpoint_features(
         stored_sites=observer.stored_site_indices,
     )
 
-    d1_atoms_df: Optional[pd.DataFrame] = None
-    if cfg.include_paper_d1:
-        d1_atoms_df = resolve_paper_d1_atoms(
-            universe,
-            monomer_sels,
-            observer.stored_site_indices,
-            traj_id=traj_id,
-            s3_site=cfg.paper_d1_s3_site,
-            s7_site=cfg.paper_d1_s7_site,
-        )
+    if cfg.include_paper_d1 and d1_atoms_df is not None and d1_observer is not None:
         # Annotate site map with paper-d1 ring neighbor for s3/s7 rows.
         sites_df = sites_df.copy()
         sites_df["d1_ring_atom_id"] = ""
@@ -250,17 +434,7 @@ def generate_endpoint_features(
                 int(drow["endpoint_atom_id"])
             )
 
-        d1_feat = compute_paper_d1_distances(
-            universe,
-            d1_atoms_df,
-            frame_indices=frame_indices,
-            s3_site=cfg.paper_d1_s3_site,
-            s7_site=cfg.paper_d1_s7_site,
-            open_lo=cfg.paper_d1_open_lo,
-            open_hi=cfg.paper_d1_open_hi,
-        )
-        # Align and merge (drop duplicate frame from d1_feat).
-        d1_feat = d1_feat.drop(columns=["frame"], errors="ignore")
+        d1_feat = d1_observer.to_dataframe()
         if len(d1_feat) != len(features):
             raise RuntimeError(
                 f"paper d1 rows ({len(d1_feat)}) != feature rows ({len(features)})"
@@ -454,66 +628,56 @@ def compute_paper_d1_distances(
     - ``paper_d1_m{i}s7_m{j}s3``
 
     plus assembly summaries ``paper_d1_min`` and ``paper_d1_n_open``.
+
+    Positions for all d1 ring atoms are gathered in one trajectory sweep, then
+    pair distances are computed with NumPy (no per-frame Python pair loop).
     """
     if d1_atoms_df.empty:
         raise ValueError("d1_atoms_df is empty")
 
-    # monomer -> {site -> MDA atom index for positions}
-    ring_index: dict[int, dict[int, int]] = {}
-    id_to_index = {int(a.id): int(a.index) for a in universe.atoms}
-    for _, row in d1_atoms_df.iterrows():
-        mon = int(row["monomer"])
-        site = int(row["endpoint_site"])
-        ring_id = int(row["d1_ring_atom_id"])
-        if ring_id not in id_to_index:
-            raise ValueError(f"d1 ring atom id {ring_id} not in universe")
-        ring_index.setdefault(mon, {})[site] = id_to_index[ring_id]
+    atom_idxs, pair_specs = _paper_d1_pair_layout(
+        d1_atoms_df, universe, s3_site=s3_site, s7_site=s7_site
+    )
 
-    monomers = sorted(ring_index)
-    for mon in monomers:
-        for site in (int(s3_site), int(s7_site)):
-            if site not in ring_index[mon]:
-                raise ValueError(f"Missing d1 ring atom for monomer {mon} site {site}")
+    n_frames = len(frame_indices)
+    n_slots = len(atom_idxs)
+    coords = np.empty((n_frames, n_slots, 3), dtype=float)
+    # Prefer AtomGroup.positions when available (MDAnalysis); fall back to
+    # per-atom .position for lightweight test doubles.
+    ag = None
+    try:
+        candidate = universe.atoms[atom_idxs]
+        if hasattr(candidate, "positions"):
+            ag = candidate
+    except Exception:
+        ag = None
+    for fi, frame in enumerate(frame_indices):
+        universe.trajectory[int(frame)]
+        if ag is not None:
+            coords[fi] = np.asarray(ag.positions, dtype=float)
+        else:
+            for k, atom_idx in enumerate(atom_idxs):
+                coords[fi, k] = np.asarray(
+                    universe.atoms[int(atom_idx)].position, dtype=float
+                )
 
-    pair_specs: list[tuple[str, int, int, int, int]] = []
-    for i in monomers:
-        for j in monomers:
-            if i == j:
-                continue
-            pair_specs.append(
-                (paper_d1_column_name(i, s3_site, j, s7_site), i, s3_site, j, s7_site)
-            )
-            pair_specs.append(
-                (paper_d1_column_name(i, s7_site, j, s3_site), i, s7_site, j, s3_site)
-            )
+    # (n_frames, n_pairs) — vectorized over frames after the I/O sweep
+    diffs = np.stack(
+        [coords[:, ia, :] - coords[:, ib, :] for _, ia, ib in pair_specs],
+        axis=1,
+    )
+    dists = np.linalg.norm(diffs, axis=2)
 
     rows: list[dict[str, Any]] = []
-    for frame in frame_indices:
-        universe.trajectory[int(frame)]
-        # Cache positions for this frame
-        pos: dict[tuple[int, int], np.ndarray] = {}
-        for mon, sites in ring_index.items():
-            for site, atom_idx in sites.items():
-                pos[(mon, site)] = universe.atoms[atom_idx].position.copy()
-
+    for fi, frame in enumerate(frame_indices):
         row: dict[str, Any] = {"frame": int(frame)}
-        dists: list[float] = []
-        n_open = n_closed = n_elongated = 0
-        for col, mi, si, mj, sj in pair_specs:
-            d = float(np.linalg.norm(pos[(mi, si)] - pos[(mj, sj)]))
-            row[col] = d
-            dists.append(d)
-            state = classify_paper_d1_state(d, open_lo=open_lo, open_hi=open_hi)
-            if state == "open":
-                n_open += 1
-            elif state == "closed":
-                n_closed += 1
-            elif state == "elongated":
-                n_elongated += 1
-        row["paper_d1_min"] = float(np.min(dists)) if dists else np.nan
-        row["paper_d1_n_open"] = int(n_open)
-        row["paper_d1_n_closed"] = int(n_closed)
-        row["paper_d1_n_elongated"] = int(n_elongated)
+        frame_d = dists[fi]
+        for k, (col, _, _) in enumerate(pair_specs):
+            row[col] = float(frame_d[k])
+        row["paper_d1_min"] = float(np.min(frame_d)) if frame_d.size else np.nan
+        row["paper_d1_n_open"] = int(np.sum((frame_d >= open_lo) & (frame_d <= open_hi)))
+        row["paper_d1_n_closed"] = int(np.sum(frame_d < open_lo))
+        row["paper_d1_n_elongated"] = int(np.sum(frame_d > open_hi))
         rows.append(row)
     return pd.DataFrame(rows)
 

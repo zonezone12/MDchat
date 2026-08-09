@@ -721,3 +721,13 @@ def test_compute_paper_d1_distances_synthetic() -> None:
     assert classify_paper_d1_state(out.loc[0, c_open]) == "open"
     assert out.loc[0, c_long] > 5.5
     assert out.loc[0, "paper_d1_n_open"] >= 1
+
+
+def test_resolve_traj_workers() -> None:
+    from src.ChangepointAnalysis.pipeline import _resolve_traj_workers
+
+    assert _resolve_traj_workers(-1, 1) == 1
+    assert _resolve_traj_workers(1, 10) == 1
+    assert _resolve_traj_workers(4, 3) == 3
+    assert _resolve_traj_workers(2, 5) == 2
+    assert _resolve_traj_workers(None, 2) >= 1

@@ -750,6 +750,35 @@ class EndpointChangepointSkill(Skill):
             min_value=1,
         ),
         Parameter(
+            "n_jobs",
+            ParamType.INTEGER,
+            "Parallel workers for frames within one trajectory (omit for auto: 1 when traj_jobs>1).",
+            required=False,
+            default=None,
+        ),
+        Parameter(
+            "traj_jobs",
+            ParamType.INTEGER,
+            "Parallel workers across trajectories (-1 = all CPUs, capped by traj count).",
+            required=False,
+            default=-1,
+        ),
+        Parameter(
+            "use_dask",
+            ParamType.BOOLEAN,
+            "Use Dask Distributed for the endpoint distance pass.",
+            required=False,
+            default=False,
+        ),
+        Parameter(
+            "max_workers_for_io",
+            ParamType.INTEGER,
+            "Cap on I/O-bound parallel workers (iterator default is 16).",
+            required=False,
+            default=None,
+            min_value=1,
+        ),
+        Parameter(
             "time_per_frame_ps",
             ParamType.FLOAT,
             "Time between consecutive trajectory frames (ps).",
@@ -880,6 +909,20 @@ class EndpointChangepointSkill(Skill):
                 include_paper_d1=bool(params.get("include_paper_d1", True)),
                 paper_d1_open_lo=float(params.get("paper_d1_open_lo", 4.5)),
                 paper_d1_open_hi=float(params.get("paper_d1_open_hi", 5.5)),
+                n_jobs=(
+                    int(params["n_jobs"]) if params.get("n_jobs") is not None else None
+                ),
+                traj_jobs=(
+                    int(params["traj_jobs"])
+                    if params.get("traj_jobs") is not None
+                    else -1
+                ),
+                use_dask=bool(params.get("use_dask", False)),
+                max_workers_for_io=(
+                    int(params["max_workers_for_io"])
+                    if params.get("max_workers_for_io") is not None
+                    else None
+                ),
                 step=int(params.get("step", 1)),
                 time_per_frame_ps=float(params.get("time_per_frame_ps", 1.0)),
                 detection=detection,
