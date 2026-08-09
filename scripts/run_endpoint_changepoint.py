@@ -208,6 +208,14 @@ def parse_args() -> argparse.Namespace:
             "'$TRAJ_DIR/*/mdcrd_v' (ids become <run>_mdcrd_v)."
         ),
     )
+    p.add_argument(
+        "--traj-format",
+        default=None,
+        help=(
+            "MDAnalysis trajectory format (default: TRJ for extensionless "
+            "mdcrd_v / .trj; auto-detect otherwise)."
+        ),
+    )
     p.add_argument("--gsa-resname", default="MOL")
     p.add_argument("--n-monomers", type=int, default=6)
     p.add_argument(
@@ -393,6 +401,7 @@ def main() -> None:
             paper_d1_open_hi=args.paper_d1_open_hi,
             n_jobs=args.n_jobs,
             traj_jobs=args.traj_jobs,
+            traj_format=args.traj_format,
             use_dask=args.use_dask,
             max_workers_for_io=args.max_workers_for_io,
             start=args.start,

@@ -764,6 +764,13 @@ class EndpointChangepointSkill(Skill):
             default=-1,
         ),
         Parameter(
+            "traj_format",
+            ParamType.STRING,
+            "MDAnalysis trajectory format (omit for TRJ on extensionless mdcrd_v).",
+            required=False,
+            default=None,
+        ),
+        Parameter(
             "use_dask",
             ParamType.BOOLEAN,
             "Use Dask Distributed for the endpoint distance pass.",
@@ -917,6 +924,7 @@ class EndpointChangepointSkill(Skill):
                     if params.get("traj_jobs") is not None
                     else -1
                 ),
+                traj_format=params.get("traj_format"),
                 use_dask=bool(params.get("use_dask", False)),
                 max_workers_for_io=(
                     int(params["max_workers_for_io"])

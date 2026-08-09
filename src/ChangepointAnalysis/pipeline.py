@@ -50,6 +50,28 @@ def _resolve_traj_workers(traj_jobs: Optional[int], n_traj: int) -> int:
     return max(1, min(requested, n_traj))
 
 
+def _load_universe(
+    topology: str | Path,
+    traj_path: str | Path,
+    *,
+    traj_format: Optional[str] = None,
+) -> Any:
+    """Load topology + trajectory, defaulting extensionless Amber files to TRJ."""
+    import MDAnalysis as mda
+
+    path = Path(traj_path)
+    fmt = traj_format
+    if fmt is None and path.suffix == "":
+        # HPC nested layout: ``$TRAJ_DIR/<run>/mdcrd_v`` (no extension).
+        fmt = "TRJ"
+    elif fmt is None and path.suffix.lower() in {".trj", ".mdcrd", ".crd"}:
+        fmt = "TRJ"
+    kwargs: dict[str, Any] = {}
+    if fmt:
+        kwargs["format"] = fmt
+    return mda.Universe(str(topology), str(path), **kwargs)
+
+
 def _extract_endpoint_features_one_traj(
     topology: str,
     traj_path: str,
@@ -57,16 +79,15 @@ def _extract_endpoint_features_one_traj(
     feat_cfg: Any,
     features_dir: str,
     write_site_plot: bool,
+    traj_format: Optional[str] = None,
 ) -> dict[str, Any]:
     """Worker: load one trajectory, extract endpoint features, write CSV."""
-    import MDAnalysis as mda
-
     from .endpoint_features import (
         generate_endpoint_features,
         write_endpoint_features_csv,
     )
 
-    u = mda.Universe(str(topology), str(traj_path))
+    u = _load_universe(topology, traj_path, traj_format=traj_format)
     features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
         generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
     )
@@ -368,6 +389,7 @@ def run_endpoint_changepoint(
     paper_d1_open_hi: float = 5.5,
     n_jobs: Optional[int] = None,
     traj_jobs: Optional[int] = -1,
+    traj_format: Optional[str] = None,
     use_dask: bool = False,
     max_workers_for_io: Optional[int] = None,
     start: Optional[int] = None,
@@ -404,6 +426,10 @@ def run_endpoint_changepoint(
         Parallel workers across trajectories (default ``-1`` = all CPUs,
         capped by number of trajectories). Prefer this over ``n_jobs`` for
         multi-replica cohorts.
+    traj_format
+        MDAnalysis trajectory format. ``None`` (default) uses ``TRJ`` for
+        extensionless paths (HPC ``mdcrd_v``) and ``.trj``/``.crd`` files;
+        other extensions keep MDAnalysis auto-detection.
     n_jobs
         Parallel workers for frames within one trajectory
         (``TrajectoryIterator``). When ``traj_jobs`` uses multiple workers and
@@ -414,8 +440,6 @@ def run_endpoint_changepoint(
     max_workers_for_io
         Cap on workers for I/O-bound trajectory reads (iterator default is 16).
     """
-    import MDAnalysis as mda
-
     from .endpoint_features import (
         EndpointFeatureConfig,
         generate_endpoint_features,
@@ -490,6 +514,7 @@ def run_endpoint_changepoint(
                     feat_cfg,
                     str(features_dir),
                     i == 0,
+                    traj_format,
                 ): i
                 for i, (traj_path, traj_id) in enumerate(zip(traj_paths, ids))
             }
@@ -502,7 +527,9 @@ def run_endpoint_changepoint(
         last_monomer_sels = list(first["monomer_sels"])
         last_stored_sites = first["stored_sites"]
         # Reload first traj for attribution / NGL (workers do not return universes).
-        last_universe = mda.Universe(str(topology), str(traj_paths[0]))
+        last_universe = _load_universe(
+            topology, traj_paths[0], traj_format=traj_format
+        )
     else:
         if n_workers > 1 and universe_factory is not None:
             print(
@@ -514,7 +541,9 @@ def run_endpoint_changepoint(
             if universe_factory is not None:
                 u = universe_factory(topology, traj_path)
             else:
-                u = mda.Universe(str(topology), str(traj_path))
+                u = _load_universe(
+                    topology, traj_path, traj_format=traj_format
+                )
             features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
                 generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
             )
