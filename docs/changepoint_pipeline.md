@@ -182,6 +182,20 @@ python scripts/run_endpoint_changepoint.py `
   --with-sweep
 ```
 
+Nested HPC layout (`$TRAJ_DIR/<run_id>/mdcrd_v`), with trajectory-level parallel by default:
+
+```bash
+python scripts/run_endpoint_changepoint.py \
+  --topology "$TOPOLOGY" \
+  --trajectories "$TRAJ_DIR/*/mdcrd_v" \
+  --gsa-resname MOL \
+  --output-dir output/endpoint_changepoints \
+  --include-site-pairs \
+  --traj-jobs -1
+```
+
+IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcrd_v`).
+
 | Flag | Effect |
 |------|--------|
 | `--no-ring-centroids` | Flat atom endpoints instead of ring-system centroids |

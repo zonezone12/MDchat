@@ -8,12 +8,21 @@ features directory for comparison against the paper's A/B/C1/C2 RMSD peaks.
 
 Example
 -------
+# Flat layout
 python scripts/run_endpoint_changepoint.py \\
     --topology traj/BHHpH_ca.prmtop \\
     --trajectories traj/BHHpH_*_mdcrd_v.trj \\
     --gsa-resname MOL \\
     --output-dir output/endpoint_changepoints \\
     --rmsd-from output/gsa_features
+
+# HPC nested layout ($TRAJ_DIR/<run_id>/mdcrd_v)
+python scripts/run_endpoint_changepoint.py \\
+    --topology "$TOPOLOGY" \\
+    --trajectories "$TRAJ_DIR/*/mdcrd_v" \\
+    --gsa-resname MOL \\
+    --output-dir output/endpoint_changepoints \\
+    --include-site-pairs --traj-jobs -1
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from src.utils.run_log import RunContext
 _GENERIC_TRAJ_STEMS = frozenset({
     "mdcrd", "mdcrd_v", "crd", "dcd", "xtc", "trj", "nc", "prod", "equil",
 })
+_TRAJ_EXTENSIONS = (".trj", ".xtc", ".dcd", ".nc", ".crd")
 
 
 def _trajectory_output_id(traj_path: Path) -> str:
@@ -49,22 +59,74 @@ def _trajectory_output_id(traj_path: Path) -> str:
     return stem
 
 
+def _concrete_traj_files(path: Path) -> list[Path]:
+    """Resolve a glob hit to one or more readable trajectory files.
+
+    Supports HPC nested layouts such as ``$TRAJ_DIR/<run_id>/mdcrd_v``
+    (extensionless Amber mdcrd) as well as ``mdcrd_v.trj`` / directory hits.
+    """
+    if path.is_file():
+        return [path]
+
+    out: list[Path] = []
+    if path.is_dir():
+        for name in ("mdcrd_v", "mdcrd"):
+            base = path / name
+            if base.is_file():
+                out.append(base)
+                continue
+            for ext in _TRAJ_EXTENSIONS:
+                cand = Path(f"{base}{ext}")
+                if cand.is_file():
+                    out.append(cand)
+        if out:
+            return out
+        for ext in ("*.xtc", "*.trj", "*.dcd", "*.nc", "*.crd"):
+            out.extend(sorted(path.glob(ext)))
+        return out
+
+    # Path does not exist as written — try common extensions on the basename.
+    for ext in _TRAJ_EXTENSIONS:
+        cand = Path(f"{path}{ext}")
+        if cand.is_file():
+            out.append(cand)
+    return out
+
+
 def _expand_trajectories(patterns: list[str]) -> list[Path]:
+    """Expand globs / paths into concrete trajectory files.
+
+    Typical HPC pattern::
+
+        --trajectories "$TRAJ_DIR/*/mdcrd_v"
+    """
     paths: list[Path] = []
     for pat in patterns:
         matches = sorted(glob.glob(pat))
+        # Also accept mdcrd_v.trj etc. when the pattern ends with a bare basename.
+        if not matches and not any(ch in Path(pat).name for ch in "*?[]"):
+            for ext in _TRAJ_EXTENSIONS:
+                matches.extend(sorted(glob.glob(f"{pat}{ext}")))
+        elif not matches and Path(pat).name in _GENERIC_TRAJ_STEMS:
+            matches = sorted(glob.glob(f"{pat}.*"))
+
         if matches:
-            paths.extend(Path(m) for m in matches)
+            for m in matches:
+                paths.extend(_concrete_traj_files(Path(m)))
         else:
             p = Path(pat)
-            if p.is_file():
-                paths.append(p)
+            resolved = _concrete_traj_files(p)
+            if resolved:
+                paths.extend(resolved)
             elif p.is_dir():
-                for ext in ("*.xtc", "*.trj", "*.dcd", "*.nc"):
+                for ext in ("*.xtc", "*.trj", "*.dcd", "*.nc", "*.crd"):
                     paths.extend(sorted(p.glob(ext)))
+
     seen: set[Path] = set()
     unique: list[Path] = []
     for p in paths:
+        if not p.is_file():
+            continue
         rp = p.resolve()
         if rp not in seen:
             seen.add(rp)
@@ -84,7 +146,10 @@ def parse_args() -> argparse.Namespace:
         "--trajectories",
         nargs="+",
         required=True,
-        help="Trajectory paths or glob patterns",
+        help=(
+            "Trajectory paths or globs. Nested HPC layout: "
+            "'$TRAJ_DIR/*/mdcrd_v' (ids become <run>_mdcrd_v)."
+        ),
     )
     p.add_argument("--gsa-resname", default="MOL")
     p.add_argument("--n-monomers", type=int, default=6)
