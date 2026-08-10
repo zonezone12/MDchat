@@ -8,6 +8,7 @@ Computes per-frame distances between chemically meaningful endpoint *sites*
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -973,40 +974,36 @@ def write_endpoint_features_csv(
     monomer_selections: Optional[Sequence[str]] = None,
     stored_sites: Optional[Sequence[Sequence[Sequence[int]]]] = None,
     write_site_plot: bool = False,
+    write_shared_maps: bool = True,
+    write_features: bool = True,
 ) -> dict[str, Path]:
     """Write ``<traj_id>_endpoint_features.csv`` and optionally sites map + QC PNG.
 
     The site QC plot is topology-only (one ``endpoint_sites.png`` for the
     shared prmtop). Pass ``write_site_plot=True`` once; later calls skip if
     the file already exists.
+
+    When extracting trajectories in parallel, set ``write_shared_maps=False``
+    in workers and write ``endpoint_sites.csv`` / ``paper_d1_atoms.csv`` once
+    from the parent process to avoid empty-file races.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    feat_path = out_dir / f"{traj_id}_endpoint_features.csv"
-    features_df.to_csv(feat_path, index=False)
-    written: dict[str, Path] = {"features": feat_path}
+    written: dict[str, Path] = {}
 
-    if sites_df is not None and not sites_df.empty:
+    if write_features:
+        feat_path = out_dir / f"{traj_id}_endpoint_features.csv"
+        features_df.to_csv(feat_path, index=False)
+        written["features"] = feat_path
+
+    if write_shared_maps and sites_df is not None and not sites_df.empty:
         sites_path = out_dir / "endpoint_sites.csv"
-        if sites_path.exists():
-            existing = pd.read_csv(sites_path)
-            # Drop prior rows for this traj_id then append
-            existing = existing[existing["traj_id"] != traj_id]
-            combined = pd.concat([existing, sites_df], ignore_index=True)
-        else:
-            combined = sites_df
-        combined.to_csv(sites_path, index=False)
+        _merge_traj_table_csv(sites_path, sites_df, traj_id=traj_id)
         written["sites"] = sites_path
 
-    if d1_atoms_df is not None and not d1_atoms_df.empty:
+    if write_shared_maps and d1_atoms_df is not None and not d1_atoms_df.empty:
         d1_path = out_dir / "paper_d1_atoms.csv"
-        if d1_path.exists():
-            existing = pd.read_csv(d1_path)
-            existing = existing[existing["traj_id"] != traj_id]
-            combined = pd.concat([existing, d1_atoms_df], ignore_index=True)
-        else:
-            combined = d1_atoms_df
-        combined.to_csv(d1_path, index=False)
+        _merge_traj_table_csv(d1_path, d1_atoms_df, traj_id=traj_id)
         written["paper_d1_atoms"] = d1_path
 
     if (
@@ -1027,3 +1024,31 @@ def write_endpoint_features_csv(
         written["sites_plot"] = cohort_plot
 
     return written
+
+
+def _read_csv_or_empty(path: Path) -> pd.DataFrame:
+    """Read a CSV, treating missing/empty/corrupt partial writes as empty."""
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return pd.DataFrame()
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
+def _merge_traj_table_csv(
+    path: Path,
+    new_df: pd.DataFrame,
+    *,
+    traj_id: str,
+) -> None:
+    """Append/replace rows for ``traj_id`` with an atomic rewrite."""
+    existing = _read_csv_or_empty(path)
+    if not existing.empty and "traj_id" in existing.columns:
+        existing = existing[existing["traj_id"] != traj_id]
+        combined = pd.concat([existing, new_df], ignore_index=True)
+    else:
+        combined = new_df
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    combined.to_csv(tmp, index=False)
+    tmp.replace(path)

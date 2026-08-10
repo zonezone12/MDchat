@@ -91,16 +91,19 @@ def _extract_endpoint_features_one_traj(
     features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
         generate_endpoint_features(u, feat_cfg, traj_id=traj_id)
     )
+    # Per-traj CSV only — shared sites/d1 maps are written by the parent to
+    # avoid parallel empty-file races on endpoint_sites.csv.
     write_endpoint_features_csv(
         features_df,
         Path(features_dir),
         traj_id,
-        sites_df=sites_df,
-        d1_atoms_df=d1_atoms_df,
+        sites_df=None,
+        d1_atoms_df=None,
         universe=u,
         monomer_selections=monomer_sels,
         stored_sites=stored_sites,
         write_site_plot=write_site_plot,
+        write_shared_maps=False,
     )
     return {
         "traj_id": traj_id,
@@ -530,6 +533,21 @@ def run_endpoint_changepoint(
         last_universe = _load_universe(
             topology, traj_paths[0], traj_format=traj_format
         )
+        # Write shared topology maps once in the parent (workers skip these).
+        from .endpoint_features import write_endpoint_features_csv
+
+        for i in sorted(results_by_index):
+            res = results_by_index[i]
+            write_endpoint_features_csv(
+                pd.DataFrame(),
+                features_dir,
+                res["traj_id"],
+                sites_df=res["sites_df"],
+                d1_atoms_df=res["d1_atoms_df"],
+                write_site_plot=False,
+                write_shared_maps=True,
+                write_features=False,
+            )
     else:
         if n_workers > 1 and universe_factory is not None:
             print(
