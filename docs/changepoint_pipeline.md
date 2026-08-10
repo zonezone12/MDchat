@@ -259,6 +259,8 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 
 For each monomer, sites `s3:A` and `s7:A` are tip/exocyclic carbons. The paper defines **d1** on the ring atom bonded one step inward from each of those tips.
 
+When methyl (or other exocyclic) tips are absent—common for BHHpM—the s3/s7 site index may collapse to a **multi-atom ring site**. Paper-d1 resolution then falls back to exocyclic C tips on that ring, or to the hull/candidate tooth ring carbon on that site (`endpoint_kind` = `exocyclic_tip` or `ring_site` in `paper_d1_atoms.csv`). For `ring_site`, the tooth ring carbon **is** the d1 atom (no further inward step — that would be ambiguous on a 6-membered ring).
+
 | State | Distance window |
 |-------|-----------------|
 | `closed` | &lt; 4.5 Å |

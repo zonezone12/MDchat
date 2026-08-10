@@ -622,6 +622,71 @@ def test_paper_d1_column_naming_and_parser() -> None:
     assert cols == [name]
 
 
+def test_resolve_paper_d1_ring_site_fallback() -> None:
+    """When s3/s7 collapse to a ring site, recover exocyclic tip on that ring."""
+    pytest.importorskip("rdkit")
+
+    import numpy as np
+
+    from src.ChangepointAnalysis.endpoint_features import _resolve_paper_d1_endpoint_pair
+
+    class _Nbr:
+        def __init__(self, idx, sym, in_ring, nbrs=None):
+            self._idx = idx
+            self._sym = sym
+            self._in_ring = in_ring
+            self._nbrs = nbrs or []
+
+        def GetIdx(self):
+            return self._idx
+
+        def GetSymbol(self):
+            return self._sym
+
+        def IsInRing(self):
+            return self._in_ring
+
+        def GetNeighbors(self):
+            return self._nbrs
+
+    ring2 = _Nbr(2, "C", True)
+    exo_tip = _Nbr(0, "C", False)
+    ring_attach = _Nbr(1, "C", True, [exo_tip, ring2])
+    exo_tip._nbrs = [ring_attach]
+    ring2._nbrs = [ring_attach]
+
+    class _Atom:
+        def __init__(self, nbrs, in_ring=True):
+            self._nbrs = nbrs
+            self._in_ring = in_ring
+
+        def IsInRing(self):
+            return self._in_ring
+
+        def GetNeighbors(self):
+            return self._nbrs
+
+    atoms = {
+        1: _Atom([exo_tip, ring2]),
+        2: _Atom([ring_attach]),
+        0: _Atom([ring_attach], in_ring=False),
+    }
+    mol_stub = type("Mol", (), {"GetAtomWithIdx": lambda self, i: atoms[i]})()
+
+    class _Sel:
+        ids = np.array([0, 1, 2, 3, 4, 5, 6])
+
+        def __getitem__(self, idx):
+            class _A:
+                id = idx
+
+            return _A()
+
+    ep, ring, kind = _resolve_paper_d1_endpoint_pair(mol_stub, _Sel(), [1, 2])
+    assert kind == "exocyclic_tip"
+    assert ep == 0 and ring == 1
+
+
 def test_resolve_paper_d1_atoms_bmm_topology() -> None:
     """Live topology check: s3/s7 map to unique bonded ring neighbors."""
     pytest.importorskip("rdkit")
@@ -647,7 +712,7 @@ def test_resolve_paper_d1_atoms_bmm_topology() -> None:
         stored.append(sites)
 
     d1 = resolve_paper_d1_atoms(
-        u, sels.monomer_selections, stored, traj_id="topo", s3_site=3, s7_site=7
+        u, sels.monomer_selections, stored, traj_id="topo", s3_site=3, s7_site=7, finder=finder
     )
     assert len(d1) == 12  # 6 monomers × {s3,s7}
     # Known mapping for monomer 0 from earlier inspection.
@@ -731,3 +796,15 @@ def test_resolve_traj_workers() -> None:
     assert _resolve_traj_workers(4, 3) == 3
     assert _resolve_traj_workers(2, 5) == 2
     assert _resolve_traj_workers(None, 2) >= 1
+
+
+def test_median_pair_jaccard_empty_comparison() -> None:
+    from src.ChangepointAnalysis.penalty_sweep import (
+        _group_pair_labels,
+        _median_pair_jaccard,
+    )
+
+    empty = pd.DataFrame()
+    assert np.isnan(_median_pair_jaccard(empty, "gsa", "combined"))
+    assert _group_pair_labels(("endpoint",)) == []
+    assert ("gsa", "combined") in _group_pair_labels(("endpoint", "gsa", "combined"))

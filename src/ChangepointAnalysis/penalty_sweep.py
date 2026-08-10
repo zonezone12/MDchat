@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
@@ -22,12 +23,22 @@ from .detection import (
 )
 from .feature_groups import DEFAULT_GROUPS, REGIME_COLS, traj_id_from_features_stem
 
+# Legacy GSA cross-group pairs (used only when those groups are active).
 _PAIR_LABELS = (
     ("gsa", "combined"),
     ("gsa", "iodine"),
     ("gsa", "na_water"),
     ("iodine", "na_water"),
 )
+
+
+def _group_pair_labels(groups: Sequence[str]) -> list[tuple[str, str]]:
+    """Ordered group pairs for cross-group Jaccard columns in sweep summaries."""
+    group_set = set(groups)
+    # Prefer stable GSA ordering when multiple default groups are present.
+    if group_set >= {"gsa", "combined", "iodine", "na_water"}:
+        return [(a, b) for a, b in _PAIR_LABELS if a in group_set and b in group_set]
+    return list(itertools.combinations(groups, 2))
 
 
 @dataclass
@@ -161,6 +172,13 @@ def _run_sweep_for_penalty(
 
 
 def _median_pair_jaccard(cmp_df: pd.DataFrame, grp_a: str, grp_b: str) -> float:
+    if (
+        cmp_df.empty
+        or "group_a" not in cmp_df.columns
+        or "group_b" not in cmp_df.columns
+        or "jaccard" not in cmp_df.columns
+    ):
+        return float("nan")
     sub = cmp_df[
         ((cmp_df["group_a"] == grp_a) & (cmp_df["group_b"] == grp_b))
         | ((cmp_df["group_a"] == grp_b) & (cmp_df["group_b"] == grp_a))
@@ -249,33 +267,34 @@ def find_stable_plateaus(
         length = j - i
         if length >= min_plateau_steps:
             block = df.iloc[i:j]
-            rows.append(
-                {
-                    "penalty_min": float(block["penalty"].iloc[0]),
-                    "penalty_max": float(block["penalty"].iloc[-1]),
-                    "penalty_mid": float(
-                        np.sqrt(block["penalty"].iloc[0] * block["penalty"].iloc[-1])
-                    ),
-                    "n_penalty_steps": length,
-                    "total_breakpoints_min": int(block["total_breakpoints"].min()),
-                    "total_breakpoints_max": int(block["total_breakpoints"].max()),
-                    "median_timing_jaccard": float(
-                        block["timing_jaccard_vs_prev"].median()
-                    ),
-                    "median_regime_agreement": float(
-                        block["regime_agreement_vs_ref"].median()
-                    ),
-                    "median_jaccard_gsa_combined": float(
-                        block["median_jaccard_gsa_combined"].median()
-                    ),
-                    "median_count_rel_change": float(
-                        block["count_rel_change"].median()
-                    ),
-                    "passes_regime_threshold": bool(
-                        (block["regime_agreement_vs_ref"] >= regime_threshold).all()
-                    ),
-                }
-            )
+            jaccard_cols = [c for c in block.columns if c.startswith("median_jaccard_")]
+            row = {
+                "penalty_min": float(block["penalty"].iloc[0]),
+                "penalty_max": float(block["penalty"].iloc[-1]),
+                "penalty_mid": float(
+                    np.sqrt(block["penalty"].iloc[0] * block["penalty"].iloc[-1])
+                ),
+                "n_penalty_steps": length,
+                "total_breakpoints_min": int(block["total_breakpoints"].min()),
+                "total_breakpoints_max": int(block["total_breakpoints"].max()),
+                "median_timing_jaccard": float(
+                    block["timing_jaccard_vs_prev"].median()
+                ),
+                "median_regime_agreement": float(
+                    block["regime_agreement_vs_ref"].median()
+                ),
+                "median_count_rel_change": float(
+                    block["count_rel_change"].median()
+                ),
+                "passes_regime_threshold": bool(
+                    (block["regime_agreement_vs_ref"] >= regime_threshold).all()
+                ),
+            }
+            if jaccard_cols:
+                row["median_jaccard_gsa_combined"] = float(
+                    block[jaccard_cols[0]].median()
+                )
+            rows.append(row)
         i = j if j > i else i + 1
 
     if not rows:
@@ -291,6 +310,31 @@ def find_stable_plateaus(
     return out.sort_values("stability_score", ascending=False)
 
 
+def _sweep_overview_panels(summary: pd.DataFrame) -> list[tuple[str, str]]:
+    """Return (column, ylabel) for the 2×2 penalty sweep overview."""
+    panels: list[tuple[str, str]] = [
+        ("total_breakpoints", "Total breakpoints (cohort)"),
+        ("timing_jaccard_vs_prev", "Timing Jaccard vs previous penalty"),
+        ("regime_agreement_vs_ref", "Regime direction agreement vs reference"),
+    ]
+    jaccard_cols = [c for c in summary.columns if c.startswith("median_jaccard_")]
+    if jaccard_cols:
+        col = jaccard_cols[0]
+        pair = col.replace("median_jaccard_", "").replace("_", " ↔ ")
+        panels.append((col, f"Median Jaccard ({pair})"))
+    else:
+        count_cols = [c for c in summary.columns if c.startswith("n_bkps_")]
+        if count_cols:
+            col = count_cols[0]
+            grp = col.replace("n_bkps_", "")
+            panels.append((col, f"Breakpoint count ({grp})"))
+        else:
+            panels.append(
+                ("timing_jaccard_vs_prev", "Timing Jaccard vs previous penalty")
+            )
+    return panels
+
+
 def plot_sweep(
     summary: pd.DataFrame,
     plot_dir: Path,
@@ -303,21 +347,7 @@ def plot_sweep(
 
     fig, axes = plt.subplots(2, 2, figsize=(11, 8), sharex=True)
     x = summary["penalty"]
-    for ax, col, label in zip(
-        axes.ravel(),
-        [
-            "total_breakpoints",
-            "timing_jaccard_vs_prev",
-            "regime_agreement_vs_ref",
-            "median_jaccard_gsa_combined",
-        ],
-        [
-            "Total breakpoints (cohort)",
-            "Timing Jaccard vs previous penalty",
-            "Regime direction agreement vs reference",
-            "Median Jaccard (gsa ↔ combined)",
-        ],
-    ):
+    for ax, (col, label) in zip(axes.ravel(), _sweep_overview_panels(summary)):
         y = summary[col]
         ax.plot(x, y, "o-", lw=1.2, ms=4)
         ax.set_xscale("log")
@@ -506,6 +536,7 @@ def sweep_penalties(
     detail_rows: list[dict] = []
     prev_per_traj_bkps: Optional[dict[tuple[str, str], list[int]]] = None
     groups = list(det.groups) if det.groups else list(DEFAULT_GROUPS)
+    pair_labels = _group_pair_labels(groups)
 
     for pen in penalties:
         with step(f"penalty={pen:.4g}"):
@@ -541,7 +572,7 @@ def sweep_penalties(
                 row[f"n_bkps_{grp}"] = int(
                     len(bkp_df[bkp_df["group"] == grp]) if not bkp_df.empty else 0
                 )
-            for grp_a, grp_b in _PAIR_LABELS:
+            for grp_a, grp_b in pair_labels:
                 row[f"median_jaccard_{grp_a}_{grp_b}"] = _median_pair_jaccard(
                     cmp_df, grp_a, grp_b
                 )

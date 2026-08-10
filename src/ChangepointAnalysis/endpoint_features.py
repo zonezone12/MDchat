@@ -355,6 +355,7 @@ def generate_endpoint_features(
             traj_id=traj_id,
             s3_site=cfg.paper_d1_s3_site,
             s7_site=cfg.paper_d1_s7_site,
+            finder=finder,
         )
         atom_idxs, pair_specs = _paper_d1_pair_layout(
             d1_atoms_df,
@@ -520,6 +521,95 @@ def resolve_bonded_ring_neighbor_mda_id(
     return int(sel[ring_nbrs[0].GetIdx()].id)
 
 
+def _site_mda_to_rdkit_locals(sel: Any, site_mda_ids: Sequence[int]) -> list[int]:
+    return [_mda_id_to_local_index(sel, int(aid)) for aid in site_mda_ids]
+
+
+def _exocyclic_tip_candidates(
+    mol: Any, site_locals: set[int]
+) -> list[tuple[int, int]]:
+    """Return ``(tip_local, ring_attachment_local)`` for exocyclic C tips on a ring site."""
+    pairs: list[tuple[int, int]] = []
+    for r in site_locals:
+        ring_atom = mol.GetAtomWithIdx(int(r))
+        if not ring_atom.IsInRing():
+            continue
+        for nbr in ring_atom.GetNeighbors():
+            nidx = int(nbr.GetIdx())
+            if nidx in site_locals:
+                continue
+            if nbr.GetSymbol() == "C" and not nbr.IsInRing():
+                pairs.append((nidx, int(r)))
+    return pairs
+
+
+def _resolve_paper_d1_endpoint_pair(
+    mol: Any,
+    sel: Any,
+    site_mda_ids: Sequence[int],
+    *,
+    finder: Any | None = None,
+) -> tuple[int, int, str]:
+    """Return ``(endpoint_mda_id, d1_ring_mda_id, endpoint_kind)`` for one s3/s7 site."""
+    if len(site_mda_ids) == 1:
+        endpoint_id = int(site_mda_ids[0])
+        ring_id = resolve_bonded_ring_neighbor_mda_id(mol, sel, endpoint_id)
+        return endpoint_id, ring_id, "atom"
+
+    site_locals = set(_site_mda_to_rdkit_locals(sel, site_mda_ids))
+    exo = _exocyclic_tip_candidates(mol, site_locals)
+    if exo:
+        chosen = exo
+        if len(exo) > 1 and finder is not None:
+            _, cands = finder._candidate_endpoints(mol)
+            cand_set = set(cands)
+            filtered = [(t, r) for t, r in exo if t in cand_set or r in cand_set]
+            if len(filtered) == 1:
+                chosen = filtered
+            elif filtered:
+                chosen = filtered
+        if len(chosen) > 1:
+            from rdkit.Chem import GetDistanceMatrix
+
+            D = GetDistanceMatrix(mol)
+            tip_local, ring_local = max(chosen, key=lambda tr: float(D[tr[0]].max()))
+        else:
+            tip_local, ring_local = chosen[0]
+        return int(sel[tip_local].id), int(sel[ring_local].id), "exocyclic_tip"
+
+    # Ring-only site (e.g. BHHpM without methyl): endpoint hull landed on the ring.
+    from src.EndpointAnalyzer import EndpointsFinder
+
+    ep_finder = finder or EndpointsFinder(step_back_from_terminals=True)
+    _, cands = ep_finder._candidate_endpoints(mol)
+    in_site = [c for c in cands if c in site_locals]
+    if not in_site:
+        for r in site_locals:
+            atom = mol.GetAtomWithIdx(int(r))
+            if atom.IsInRing() and any(n.GetSymbol() == "H" for n in atom.GetNeighbors()):
+                in_site.append(int(r))
+    if not in_site:
+        raise ValueError(
+            f"Cannot resolve paper-d1 endpoint on ring site with "
+            f"{len(site_mda_ids)} atoms {list(site_mda_ids)}"
+        )
+    if len(in_site) > 1:
+        from rdkit.Chem import GetDistanceMatrix
+
+        D = GetDistanceMatrix(mol)
+        ep_local = max(in_site, key=lambda i: float(D[i].max()))
+    else:
+        ep_local = in_site[0]
+    endpoint_id = int(sel[ep_local].id)
+    atom = mol.GetAtomWithIdx(int(ep_local))
+    if atom.IsInRing():
+        # No exocyclic tip (e.g. BHHpM): the tooth / hull ring carbon *is*
+        # the paper-d1 atom — do not step further into the ring.
+        return endpoint_id, endpoint_id, "ring_site"
+    ring_id = resolve_bonded_ring_neighbor_mda_id(mol, sel, endpoint_id)
+    return endpoint_id, ring_id, "ring_site"
+
+
 def resolve_paper_d1_atoms(
     universe: Any,
     monomer_selections: Sequence[str],
@@ -528,11 +618,16 @@ def resolve_paper_d1_atoms(
     traj_id: str = "traj",
     s3_site: int = 3,
     s7_site: int = 7,
+    finder: Any | None = None,
 ) -> pd.DataFrame:
     """Map each monomer's s3/s7 atom sites to their one-step-in ring neighbors.
 
     Returns one row per (monomer, endpoint_site) with the source endpoint atom
     and the resolved d1 ring-neighbor atom.
+
+    When s3/s7 collapsed to a multi-atom ring site (common without methyl
+    substituents, e.g. BHHpM), exocyclic tips or candidate hull endpoints on
+    that ring are used instead of failing.
     """
     if len(monomer_selections) != len(stored_sites):
         raise ValueError(
@@ -556,23 +651,20 @@ def resolve_paper_d1_atoms(
                     f"paper d1 needs site index {endpoint_site}"
                 )
             site_atoms = list(sites[endpoint_site])
-            if len(site_atoms) != 1:
-                raise ValueError(
-                    f"Monomer {mon_idx} site {endpoint_site} has {len(site_atoms)} "
-                    f"atoms {site_atoms}; paper d1 expects a singleton atom site"
-                )
-            endpoint_id = int(site_atoms[0])
-            ring_id = resolve_bonded_ring_neighbor_mda_id(mol, sel, endpoint_id)
+            endpoint_id, ring_id, kind = _resolve_paper_d1_endpoint_pair(
+                mol, sel, site_atoms, finder=finder
+            )
             rows.append(
                 {
                     "traj_id": traj_id,
                     "monomer": mon_idx,
                     "monomer_selection": mon_sel,
                     "endpoint_site": endpoint_site,
-                    "endpoint_kind": "atom",
+                    "endpoint_kind": kind,
                     "endpoint_atom_id": endpoint_id,
                     "d1_ring_atom_id": ring_id,
                     "d1_label": f"m{mon_idx}s{endpoint_site}_ring",
+                    "n_site_atoms": len(site_atoms),
                 }
             )
     return pd.DataFrame(rows)
