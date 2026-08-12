@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -33,17 +34,462 @@ DEFAULT_ENDPOINT_TIMELINE_PANELS: list[tuple[str, str]] = [
     ("endpoint_dist_max", "Endpoint-site dist max (Å)"),
 ]
 
+_ENDPOINT_PAIR_MEAN_RE = re.compile(r"^endpoint_dist_(\d+)_(\d+)_mean$")
+
 
 def resolve_timeline_panels(
     df: pd.DataFrame,
     panels: list[tuple[str, str]] | None = None,
+    fallback: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Keep requested panels that exist in *df*; fall back to endpoint aggregates."""
     requested = list(panels) if panels is not None else list(DEFAULT_TIMELINE_PANELS)
     present = [(c, lab) for c, lab in requested if c in df.columns]
     if present:
         return present
-    return [(c, lab) for c, lab in DEFAULT_ENDPOINT_TIMELINE_PANELS if c in df.columns]
+    fb = fallback if fallback is not None else DEFAULT_ENDPOINT_TIMELINE_PANELS
+    return [(c, lab) for c, lab in fb if c in df.columns]
+
+
+def list_endpoint_pair_mean_columns(
+    columns: Sequence[str],
+) -> list[tuple[str, int, int]]:
+    """Return ``(col, monomer_i, monomer_j)`` for ``endpoint_dist_{i}_{j}_mean``."""
+    out: list[tuple[str, int, int]] = []
+    for col in columns:
+        m = _ENDPOINT_PAIR_MEAN_RE.match(str(col))
+        if m:
+            out.append((str(col), int(m.group(1)), int(m.group(2))))
+    return out
+
+
+def list_endpoint_site_pair_columns(
+    columns: Sequence[str],
+) -> list[tuple[str, int, int, int, int]]:
+    """Return ``(col, mon_i, site_a, mon_j, site_b)`` for site-pair distance columns."""
+    from .transition_attribution import parse_site_pair_feature
+
+    out: list[tuple[str, int, int, int, int]] = []
+    for col in columns:
+        parsed = parse_site_pair_feature(str(col))
+        if parsed is not None:
+            mon_i, site_a, mon_j, site_b = parsed
+            out.append((str(col), mon_i, site_a, mon_j, site_b))
+    return out
+
+
+def format_endpoint_site_pair_label(
+    mon_i: int,
+    site_a: int,
+    mon_j: int,
+    site_b: int,
+) -> str:
+    """Human label like ``M0S3-M1S6``."""
+    return f"M{mon_i}S{site_a}-M{mon_j}S{site_b}"
+
+
+def _discover_cluster_correlation_features(
+    columns: Sequence[str],
+) -> tuple[list[str], str, list[tuple]]:
+    """Prefer raw site-pair columns; fall back to monomer-pair means."""
+    site_specs = list_endpoint_site_pair_columns(columns)
+    if site_specs:
+        return [c for c, *_ in site_specs], "site_pair", site_specs
+    mean_specs = list_endpoint_pair_mean_columns(columns)
+    if mean_specs:
+        return [c for c, *_ in mean_specs], "pair_mean", mean_specs
+    return [], "none", []
+
+
+def _feature_metadata_row(spec: tuple, feature_kind: str) -> dict:
+    """Identity fields for a ranked endpoint feature."""
+    if feature_kind == "site_pair":
+        col, mon_i, site_a, mon_j, site_b = spec
+        return {
+            "feature": str(col),
+            "feature_kind": feature_kind,
+            "monomer_i": mon_i,
+            "site_i": site_a,
+            "monomer_j": mon_j,
+            "site_j": site_b,
+            "endpoint_label": format_endpoint_site_pair_label(
+                mon_i, site_a, mon_j, site_b
+            ),
+        }
+    col, mon_i, mon_j = spec
+    return {
+        "feature": str(col),
+        "feature_kind": feature_kind,
+        "monomer_i": mon_i,
+        "monomer_j": mon_j,
+        "endpoint_label": f"M{mon_i}-M{mon_j} pair mean",
+    }
+
+
+def _eta_squared(x: np.ndarray, y: np.ndarray, cluster_ids: Sequence[int]) -> float:
+    """Fraction of variance in *x* explained by cluster labels *y*."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y)
+    finite = np.isfinite(x)
+    if finite.sum() < 2:
+        return float("nan")
+    xv = x[finite]
+    yv = y[finite]
+    gm = float(np.mean(xv))
+    sst = float(np.sum((xv - gm) ** 2))
+    if sst <= 0:
+        return float("nan")
+    ssb = 0.0
+    for c in cluster_ids:
+        mask = yv == c
+        if not np.any(mask):
+            continue
+        ssb += float(mask.sum()) * (float(np.mean(xv[mask])) - gm) ** 2
+    return float(ssb / sst)
+
+
+def _epsilon_squared_kw(
+    x: np.ndarray,
+    y: np.ndarray,
+    cluster_ids: Sequence[int],
+) -> float:
+    """Kruskal–Wallis epsilon-squared effect size."""
+    from scipy import stats
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y)
+    groups = []
+    for c in cluster_ids:
+        vals = x[y == c]
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            groups.append(vals)
+    if len(groups) < 2:
+        return float("nan")
+    n = int(sum(g.size for g in groups))
+    k = len(groups)
+    if n <= k:
+        return float("nan")
+    try:
+        h = float(stats.kruskal(*groups).statistic)
+    except ValueError:
+        return float("nan")
+    return float((h - k + 1) / (n - k))
+
+
+def _cohens_d_one_vs_rest(x: np.ndarray, mask: np.ndarray) -> float:
+    """Cohen's d for in-cluster vs out-of-cluster means."""
+    x = np.asarray(x, dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    a = x[mask]
+    b = x[~mask]
+    a = a[np.isfinite(a)]
+    b = b[np.isfinite(b)]
+    if a.size < 2 or b.size < 2:
+        return float("nan")
+    var_a = float(np.var(a, ddof=1))
+    var_b = float(np.var(b, ddof=1))
+    pooled = np.sqrt(((a.size - 1) * var_a + (b.size - 1) * var_b) / (a.size + b.size - 2))
+    if not np.isfinite(pooled) or pooled == 0:
+        return float("nan")
+    return float((np.mean(a) - np.mean(b)) / pooled)
+
+
+def _point_biserial_from_sums(
+    n: float,
+    sum_x: float,
+    sum_x2: float,
+    n_c: float,
+    sum_x_c: float,
+) -> float:
+    """Point-biserial of continuous x vs binary cluster membership from sums."""
+    n_rest = n - n_c
+    if n < 2 or n_c < 1 or n_rest < 1:
+        return float("nan")
+    mean_all = sum_x / n
+    var = sum_x2 / n - mean_all * mean_all
+    if var <= 0:
+        return float("nan")
+    s_x = np.sqrt(var)
+    mean_c = sum_x_c / n_c
+    mean_rest = (sum_x - sum_x_c) / n_rest
+    return float((mean_c - mean_rest) / s_x * np.sqrt(n_c * n_rest / (n * n)))
+
+
+def load_clustered_segments(
+    changepoints_dir: Path | str,
+    *,
+    group: str = "endpoint",
+    clustered_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Load clustered segments for *group*.
+
+    Preference order:
+    1. In-memory ``clustered_df`` (filtered to *group* when a ``group`` column exists)
+    2. ``clusters/{group}/segments_clustered.csv``
+    3. ``clusters/all_segments_clustered.csv`` (filtered to *group*)
+    """
+    changepoints_dir = Path(changepoints_dir)
+    if clustered_df is not None and len(clustered_df):
+        work = clustered_df
+        if "group" in work.columns:
+            work = work[work["group"] == group]
+        return work.reset_index(drop=True)
+
+    group_path = changepoints_dir / "clusters" / group / "segments_clustered.csv"
+    if group_path.exists():
+        return pd.read_csv(group_path)
+
+    alt = changepoints_dir / "clusters" / "all_segments_clustered.csv"
+    if alt.exists():
+        df = pd.read_csv(alt)
+        if "group" in df.columns:
+            df = df[df["group"] == group]
+        return df.reset_index(drop=True)
+
+    log_event(
+        "warning",
+        f"No clustered segments found under {changepoints_dir}/clusters for group={group}",
+        component="summarize_changepoint_results",
+    )
+    return pd.DataFrame()
+
+
+def rank_cluster_discriminating_endpoint_features(
+    changepoints_dir: Path | str,
+    features_dir: Path | str,
+    *,
+    group: str = "endpoint",
+    clustered_df: Optional[pd.DataFrame] = None,
+    features_suffix: Optional[str] = None,
+) -> pd.DataFrame:
+    """Rank endpoint features by segment-level cluster discrimination.
+
+    Prefers raw site-pair columns ``endpoint_dist_{i}s{a}_{j}s{b}`` when present;
+    otherwise falls back to ``endpoint_dist_{i}_{j}_mean``.
+
+    Primary score is segment-level eta-squared on raw (Å) per-segment means.
+    Also reports Kruskal–Wallis epsilon-squared, Cohen's d for the best
+    one-vs-rest cluster, and frame-level max |point-biserial| (per-traj
+    z-scored) for comparison with older frame-level rankings.
+    """
+    changepoints_dir = Path(changepoints_dir)
+    features_dir = Path(features_dir)
+    segments = load_clustered_segments(
+        changepoints_dir, group=group, clustered_df=clustered_df
+    )
+    required = {"traj_id", "cluster_label", "start_frame", "end_frame"}
+    if segments.empty or not required.issubset(segments.columns):
+        return pd.DataFrame()
+
+    cluster_counts = segments["cluster_label"].value_counts()
+    if len(cluster_counts) < 2 or int(cluster_counts.min()) < 2:
+        return pd.DataFrame()
+
+    feature_cols: list[str] = []
+    feature_kind = "none"
+    feature_specs: list[tuple] = []
+    for tid in segments["traj_id"].astype(str).unique():
+        path = resolve_features_csv(features_dir, tid, suffix=features_suffix)
+        if path is None:
+            continue
+        header = pd.read_csv(path, nrows=0)
+        feature_cols, feature_kind, feature_specs = _discover_cluster_correlation_features(
+            header.columns
+        )
+        if feature_cols:
+            break
+    if not feature_cols:
+        return pd.DataFrame()
+
+    n_feat = len(feature_cols)
+    usecols = set(feature_cols) | {"frame", "time_ps"}
+    seg_means: list[np.ndarray] = []
+    seg_labels: list[int] = []
+
+    # Per-feature streaming frame-level sums for max |point-biserial|.
+    frame_n = np.zeros(n_feat, dtype=float)
+    frame_sum = np.zeros(n_feat, dtype=float)
+    frame_sum2 = np.zeros(n_feat, dtype=float)
+    frame_n_c: dict[int, np.ndarray] = {}
+    frame_sum_c: dict[int, np.ndarray] = {}
+
+    for traj_id, traj_segs in segments.groupby(segments["traj_id"].astype(str)):
+        feat_path = resolve_features_csv(
+            features_dir, str(traj_id), suffix=features_suffix
+        )
+        if feat_path is None:
+            continue
+        feat = pd.read_csv(feat_path, usecols=lambda c: c in usecols)
+        missing = [c for c in feature_cols if c not in feat.columns]
+        if missing or "frame" not in feat.columns:
+            continue
+
+        frames = feat["frame"].to_numpy(dtype=int)
+        raw = feat[feature_cols].to_numpy(dtype=float)
+
+        labels = np.full(len(feat), -1, dtype=int)
+        for _, seg in traj_segs.iterrows():
+            start_f = int(seg["start_frame"])
+            end_f = int(seg["end_frame"])
+            cl = int(seg["cluster_label"])
+            mask = (frames >= start_f) & (frames <= end_f)
+            if not np.any(mask):
+                continue
+            labels[mask] = cl
+            # Segment means in raw Å — absolute levels carry cluster signal
+            # across trajectories; per-traj z-scoring collapses that.
+            seg_means.append(np.nanmean(raw[mask], axis=0))
+            seg_labels.append(cl)
+
+        labeled = labels >= 0
+        if not np.any(labeled):
+            continue
+        # Frame-level comparison uses per-traj z-scores so baselines do not
+        # dominate the pooled point-biserial.
+        mu = np.nanmean(raw, axis=0)
+        sigma = np.nanstd(raw, axis=0)
+        sigma = np.where(np.isfinite(sigma) & (sigma > 0), sigma, np.nan)
+        z = (raw - mu) / sigma
+        z_lab = z[labeled]
+        lab = labels[labeled]
+        ok = np.isfinite(z_lab)
+        z_filled = np.where(ok, z_lab, 0.0)
+        frame_n += ok.sum(axis=0).astype(float)
+        frame_sum += z_filled.sum(axis=0)
+        frame_sum2 += (z_filled * z_filled).sum(axis=0)
+        for c in np.unique(lab):
+            c = int(c)
+            cmask = lab == c
+            cok = ok[cmask]
+            cvals = np.where(cok, z_lab[cmask], 0.0)
+            if c not in frame_n_c:
+                frame_n_c[c] = np.zeros(n_feat, dtype=float)
+                frame_sum_c[c] = np.zeros(n_feat, dtype=float)
+            frame_n_c[c] += cok.sum(axis=0).astype(float)
+            frame_sum_c[c] += cvals.sum(axis=0)
+
+    if not seg_means:
+        return pd.DataFrame()
+
+    X = np.vstack(seg_means)
+    y = np.asarray(seg_labels, dtype=int)
+    cluster_ids = sorted(set(y.tolist()))
+
+    rows: list[dict] = []
+    for j, spec in enumerate(feature_specs):
+        xj = X[:, j]
+        eta = _eta_squared(xj, y, cluster_ids)
+        eps = _epsilon_squared_kw(xj, y, cluster_ids)
+
+        best_c = cluster_ids[0]
+        best_d = float("nan")
+        best_abs = -1.0
+        for c in cluster_ids:
+            d = _cohens_d_one_vs_rest(xj, y == c)
+            if not np.isfinite(d):
+                continue
+            if abs(d) > best_abs:
+                best_abs = abs(d)
+                best_d = d
+                best_c = c
+
+        frame_abs: list[float] = []
+        for c in cluster_ids:
+            if c not in frame_n_c:
+                continue
+            r = _point_biserial_from_sums(
+                float(frame_n[j]),
+                float(frame_sum[j]),
+                float(frame_sum2[j]),
+                float(frame_n_c[c][j]),
+                float(frame_sum_c[c][j]),
+            )
+            if np.isfinite(r):
+                frame_abs.append(abs(r))
+        frame_max = float(max(frame_abs)) if frame_abs else float("nan")
+
+        if not np.isfinite(eta):
+            continue
+        row = _feature_metadata_row(spec, feature_kind)
+        row.update(
+            {
+                "eta_squared": eta,
+                "epsilon_squared_kw": eps,
+                "cohens_d_best": best_d,
+                "best_cluster": int(best_c),
+                "frame_max_abs_corr": frame_max,
+            }
+        )
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    ranking = pd.DataFrame(rows)
+    ranking = ranking.sort_values(
+        ["eta_squared", "epsilon_squared_kw"], ascending=False
+    ).reset_index(drop=True)
+    ranking["rank"] = np.arange(1, len(ranking) + 1)
+    return ranking
+
+
+def rank_cluster_correlated_pair_means(
+    changepoints_dir: Path | str,
+    features_dir: Path | str,
+    *,
+    group: str = "endpoint",
+    clustered_df: Optional[pd.DataFrame] = None,
+    features_suffix: Optional[str] = None,
+) -> pd.DataFrame:
+    """Compatibility alias for :func:`rank_cluster_discriminating_endpoint_features`."""
+    return rank_cluster_discriminating_endpoint_features(
+        changepoints_dir,
+        features_dir,
+        group=group,
+        clustered_df=clustered_df,
+        features_suffix=features_suffix,
+    )
+
+
+def cluster_correlated_timeline_panels(
+    ranking: pd.DataFrame,
+    *,
+    top_n: int = 5,
+    include_global_mean: bool = True,
+) -> list[tuple[str, str]]:
+    """Build timeline panels from a cluster-discrimination ranking.
+
+    Always puts ``endpoint_dist_mean`` first (when requested) so the assembly
+    aggregate remains visible next to the top discriminating endpoint pairs.
+    """
+    if ranking is None or ranking.empty or top_n <= 0:
+        return []
+
+    panels: list[tuple[str, str]] = []
+    if include_global_mean:
+        panels.append(("endpoint_dist_mean", "Endpoint-site dist mean (Å)"))
+
+    top = ranking.head(int(top_n))
+    for _, row in top.iterrows():
+        if "endpoint_label" in row and pd.notna(row["endpoint_label"]):
+            name = str(row["endpoint_label"])
+        elif {"monomer_i", "site_i", "monomer_j", "site_j"}.issubset(row.index):
+            name = format_endpoint_site_pair_label(
+                int(row["monomer_i"]),
+                int(row["site_i"]),
+                int(row["monomer_j"]),
+                int(row["site_j"]),
+            )
+        else:
+            name = f"M{int(row['monomer_i'])}-M{int(row['monomer_j'])} pair mean"
+        if "eta_squared" in row and pd.notna(row["eta_squared"]):
+            label = f"{name} (Å)  η²={float(row['eta_squared']):.2f}"
+        else:
+            max_abs = float(row.get("frame_max_abs_corr", row.get("max_abs_corr", np.nan)))
+            label = f"{name} (Å)  |r|={max_abs:.2f}"
+        panels.append((str(row["feature"]), label))
+    return panels
 
 
 def write_cohort_tables(changepoints_dir: Path) -> dict[str, Path]:
@@ -372,11 +818,30 @@ def plot_breakpoint_histogram(changepoints_dir: Path, plot_dir: Path) -> Path:
 
 
 def discover_cluster_representatives_csvs(changepoints_dir: Path) -> list[Path]:
-    """Find cluster_representatives.csv under {changepoints_dir}/clusters/."""
-    clusters_root = Path(changepoints_dir)
+    """Find chosen-k ``cluster_representatives.csv`` under ``clusters/``.
+
+    Prefers ``clusters/<group>/cluster_representatives.csv`` and ignores
+    ``by_k/`` inspection outputs unless no top-level file exists.
+    """
+    clusters_root = Path(changepoints_dir) / "clusters"
     if not clusters_root.is_dir():
-        return []
-    return sorted(clusters_root.glob("**/cluster_representatives.csv"))
+        # Also accept changepoints_dir itself if it already is the clusters root.
+        clusters_root = Path(changepoints_dir)
+        if not clusters_root.is_dir():
+            return []
+
+    top_level = sorted(
+        p
+        for p in clusters_root.glob("*/cluster_representatives.csv")
+        if "by_k" not in p.parts
+    )
+    if top_level:
+        return top_level
+
+    # Fallback: any representatives CSV, still skipping by_k when possible.
+    all_found = sorted(clusters_root.glob("**/cluster_representatives.csv"))
+    non_by_k = [p for p in all_found if "by_k" not in p.parts]
+    return non_by_k if non_by_k else all_found
 
 
 def resolve_cluster_representatives_csvs(
@@ -640,6 +1105,9 @@ def summarize_changepoint_results(
     cluster_representatives_csv: Optional[Sequence[str | Path]] = None,
     skip_cluster_rep_timelines: bool = False,
     features_suffix: Optional[str] = None,
+    cluster_timeline_top_pairs: int = 5,
+    cluster_timeline_group: str = "endpoint",
+    clustered_df: Optional[pd.DataFrame] = None,
 ) -> dict[str, Path]:
     """Full summarize stage: cohort tables + plots + optional timelines."""
     changepoints_dir = Path(changepoints_dir)
@@ -724,12 +1192,40 @@ def summarize_changepoint_results(
         )
         reps = load_cluster_representatives(rep_csvs)
         if len(reps):
+            cluster_panels = sample_panels if sample_panels else None
+            if cluster_timeline_top_pairs > 0:
+                ranking = rank_cluster_correlated_pair_means(
+                    changepoints_dir,
+                    features_dir,
+                    group=cluster_timeline_group,
+                    clustered_df=clustered_df,
+                    features_suffix=features_suffix,
+                )
+                if len(ranking):
+                    corr_csv = (
+                        changepoints_dir / "endpoint_pair_cluster_correlation.csv"
+                    )
+                    ranking.to_csv(corr_csv, index=False)
+                    written["endpoint_pair_cluster_correlation.csv"] = corr_csv
+                    correlated = cluster_correlated_timeline_panels(
+                        ranking, top_n=cluster_timeline_top_pairs
+                    )
+                    if correlated:
+                        cluster_panels = correlated
+                        log_event(
+                            "info",
+                            (
+                                f"Cluster timeline panels: top {cluster_timeline_top_pairs} "
+                                f"endpoint features by segment-level η² vs cluster"
+                            ),
+                            component="summarize_changepoint_results",
+                        )
             cluster_written = plot_cluster_representative_timelines(
                 reps,
                 changepoints_dir=changepoints_dir,
                 features_dir=features_dir,
                 plot_dir=plot_dir,
-                panels=sample_panels if sample_panels else None,
+                panels=cluster_panels,
                 features_suffix=features_suffix,
             )
             for name in cluster_written:

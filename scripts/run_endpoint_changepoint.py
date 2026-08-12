@@ -311,12 +311,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--jump", type=int, default=5)
     p.add_argument("--tolerance-frames", type=int, default=50)
     p.add_argument("--no-normalize", action="store_true")
+    p.add_argument(
+        "--include-site-pairs-in-detection",
+        action="store_true",
+        help=(
+            "Include raw endpoint_dist_{i}s{a}_{j}s{b} columns in changepoint "
+            "detection (default: aggregates only)"
+        ),
+    )
     p.add_argument("--with-sweep", action="store_true")
     p.add_argument("--n-penalties", type=int, default=15)
     p.add_argument("--n-clusters", "--k", type=int, default=5, dest="n_clusters")
     p.add_argument("--linkage", default="ward")
     p.add_argument("--skip-clustering", action="store_true")
     p.add_argument("--skip-summarize", action="store_true")
+    p.add_argument(
+        "--timeline-top-pairs",
+        type=int,
+        default=5,
+        help=(
+            "Top-N endpoint_dist_{i}_{j}_mean features (by |point-biserial| vs "
+            "cluster membership) for timeline_cluster plots. 0 disables and "
+            "keeps aggregate endpoint panels (default: 5)."
+        ),
+    )
     p.add_argument(
         "--skip-transition-attribution",
         action="store_true",
@@ -369,6 +387,7 @@ def main() -> None:
         tolerance_frames=args.tolerance_frames,
         normalize=not args.no_normalize,
         groups=("endpoint",),
+        include_site_pairs_in_detection=args.include_site_pairs_in_detection,
     )
     clustering = SegmentClusteringConfig(
         groups=("endpoint",),
@@ -415,6 +434,7 @@ def main() -> None:
             sweep=sweep,
             skip_clustering=args.skip_clustering,
             skip_summarize=args.skip_summarize,
+            cluster_timeline_top_pairs=args.timeline_top_pairs,
             skip_transition_attribution=args.skip_transition_attribution,
             transition_attribution=transition_cfg,
             rmsd_from=args.rmsd_from,

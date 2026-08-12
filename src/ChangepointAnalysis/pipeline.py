@@ -234,6 +234,8 @@ class ChangepointPipeline:
         skip_individual_timelines: bool = False,
         cluster_representatives_csv: Optional[list[str | Path]] = None,
         skip_cluster_rep_timelines: bool = False,
+        cluster_timeline_top_pairs: int = 5,
+        cluster_timeline_group: str = "endpoint",
     ) -> dict[str, Path]:
         """Write cohort summary CSVs and plots."""
         # Ensure detection outputs exist on disk for the reporting stage.
@@ -255,6 +257,9 @@ class ChangepointPipeline:
             cluster_representatives_csv=cluster_representatives_csv,
             skip_cluster_rep_timelines=skip_cluster_rep_timelines,
             features_suffix=self.features_suffix,
+            cluster_timeline_top_pairs=cluster_timeline_top_pairs,
+            cluster_timeline_group=cluster_timeline_group,
+            clustered_df=self._clustered,
         )
         self._artifacts.update(artifacts)
         return artifacts
@@ -330,6 +335,7 @@ class ChangepointPipeline:
         run_final_after_sweep: bool = True,
         skip_clustering: bool = False,
         skip_summarize: bool = False,
+        cluster_timeline_top_pairs: int = 5,
     ) -> dict[str, Path]:
         """Run the full pipeline and return a flat artifact map."""
         artifacts: dict[str, Path] = {}
@@ -358,7 +364,9 @@ class ChangepointPipeline:
             self.cluster_segments()
 
         if not skip_summarize:
-            artifacts.update(self.summarize())
+            artifacts.update(
+                self.summarize(cluster_timeline_top_pairs=cluster_timeline_top_pairs)
+            )
 
         # Collect primary detection outputs.
         for name in (
@@ -406,6 +414,7 @@ def run_endpoint_changepoint(
     sweep: Optional[PenaltySweepConfig] = None,
     skip_clustering: bool = False,
     skip_summarize: bool = False,
+    cluster_timeline_top_pairs: int = 5,
     skip_transition_attribution: bool = False,
     transition_attribution: Optional[EndpointTransitionAttributionConfig] = None,
     rmsd_from: Optional[str | Path] = None,
@@ -603,6 +612,7 @@ def run_endpoint_changepoint(
         with_sweep=with_sweep,
         skip_clustering=skip_clustering,
         skip_summarize=skip_summarize,
+        cluster_timeline_top_pairs=cluster_timeline_top_pairs,
     )
     artifacts["features_dir"] = features_dir
 

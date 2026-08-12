@@ -6,12 +6,18 @@ combined) and their summary / regime headline columns.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional, Sequence
 
 import pandas as pd
 
 METADATA_COLS: frozenset[str] = frozenset({"traj_id", "frame", "time_ps"})
+
+# Raw site–site distances: endpoint_dist_{i}s{a}_{j}s{b}
+_ENDPOINT_SITE_PAIR_RE = re.compile(r"^endpoint_dist_\d+s\d+_\d+s\d+$")
+# Per-monomer-pair means: endpoint_dist_{i}_{j}_mean
+_ENDPOINT_PAIR_MEAN_RE = re.compile(r"^endpoint_dist_\d+_\d+_mean$")
 
 DEFAULT_GROUPS: tuple[str, ...] = ("gsa", "iodine", "na_water", "combined")
 
@@ -158,11 +164,34 @@ REGIME_COLS: dict[str, list[str]] = {
 }
 
 
-def resolve_group_columns(df: pd.DataFrame, group: str) -> list[str]:
+def is_endpoint_site_pair_column(name: str) -> bool:
+    """True for raw ``endpoint_dist_{i}s{a}_{j}s{b}`` site–site distance columns."""
+    return bool(_ENDPOINT_SITE_PAIR_RE.fullmatch(str(name)))
+
+
+def endpoint_aggregate_columns(df: pd.DataFrame) -> list[str]:
+    """Endpoint columns excluding raw site–site pairs (assembly + per-pair aggregates)."""
+    return [
+        c
+        for c in df.columns
+        if c.startswith("endpoint_dist_")
+        and c not in METADATA_COLS
+        and pd.api.types.is_numeric_dtype(df[c])
+        and not is_endpoint_site_pair_column(c)
+    ]
+
+
+def resolve_group_columns(
+    df: pd.DataFrame,
+    group: str,
+    *,
+    include_site_pairs: bool = False,
+) -> list[str]:
     """Return the column list for *group*, intersecting with available columns.
 
     For ``combined``, returns all numeric non-metadata columns present in *df*.
-    For ``endpoint``, returns every column whose name starts with ``endpoint_dist_``.
+    For ``endpoint``, returns aggregate ``endpoint_dist_*`` columns by default;
+    pass ``include_site_pairs=True`` to also include raw site–site pairs.
     """
     if group == "combined":
         return [
@@ -171,13 +200,15 @@ def resolve_group_columns(df: pd.DataFrame, group: str) -> list[str]:
             if c not in METADATA_COLS and pd.api.types.is_numeric_dtype(df[c])
         ]
     if group == "endpoint":
-        return [
-            c
-            for c in df.columns
-            if c.startswith("endpoint_dist_")
-            and c not in METADATA_COLS
-            and pd.api.types.is_numeric_dtype(df[c])
-        ]
+        if include_site_pairs:
+            return [
+                c
+                for c in df.columns
+                if c.startswith("endpoint_dist_")
+                and c not in METADATA_COLS
+                and pd.api.types.is_numeric_dtype(df[c])
+            ]
+        return endpoint_aggregate_columns(df)
     col_map = {
         "gsa": GSA_COLS,
         "iodine": IODINE_COLS,
@@ -190,9 +221,48 @@ def resolve_group_columns(df: pd.DataFrame, group: str) -> list[str]:
     return [c for c in col_map[group] if c in df.columns]
 
 
-def summary_feature_columns(group: str) -> list[str]:
+def summary_base_columns(
+    group: str,
+    df: pd.DataFrame | None = None,
+) -> list[str]:
+    """Base feature columns summarized as mean/std per changepoint segment.
+
+    For ``endpoint`` with a features or segment-stats DataFrame, includes the
+    fixed assembly bases plus every ``endpoint_dist_{i}_{j}_mean`` present
+    (as a feature-CSV column or already expanded ``*_mean`` / ``*_std``).
+    """
+    bases = list(SUMMARY_COLS.get(group, []))
+    if group != "endpoint" or df is None:
+        return bases
+
+    seen = set(bases)
+    for col in df.columns:
+        name = str(col)
+        if _ENDPOINT_PAIR_MEAN_RE.fullmatch(name):
+            if name not in seen:
+                bases.append(name)
+                seen.add(name)
+            continue
+        # Segment-stats tables already store ``{base}_mean`` / ``{base}_std``.
+        if name.endswith("_mean") and _ENDPOINT_PAIR_MEAN_RE.fullmatch(name[:-5]):
+            base = name[:-5]
+            if base not in seen:
+                bases.append(base)
+                seen.add(base)
+        elif name.endswith("_std") and _ENDPOINT_PAIR_MEAN_RE.fullmatch(name[:-4]):
+            base = name[:-4]
+            if base not in seen:
+                bases.append(base)
+                seen.add(base)
+    return bases
+
+
+def summary_feature_columns(
+    group: str,
+    df: pd.DataFrame | None = None,
+) -> list[str]:
     """Expand summary base columns to mean + std CSV column names."""
-    bases = SUMMARY_COLS.get(group, [])
+    bases = summary_base_columns(group, df=df)
     cols: list[str] = []
     for base in bases:
         cols.append(f"{base}_mean")
@@ -271,10 +341,18 @@ def all_numeric_feature_columns(df: pd.DataFrame) -> list[str]:
     ]
 
 
-def group_column_map(df: pd.DataFrame, groups: Sequence[str] | None = None) -> dict[str, list[str]]:
+def group_column_map(
+    df: pd.DataFrame,
+    groups: Sequence[str] | None = None,
+    *,
+    include_site_pairs: bool = False,
+) -> dict[str, list[str]]:
     """Map group name -> candidate columns (not filtered to available)."""
     all_numeric = all_numeric_feature_columns(df)
-    endpoint_cols = [c for c in all_numeric if c.startswith("endpoint_dist_")]
+    if include_site_pairs:
+        endpoint_cols = [c for c in all_numeric if c.startswith("endpoint_dist_")]
+    else:
+        endpoint_cols = endpoint_aggregate_columns(df)
     full = {
         "gsa": GSA_COLS,
         "iodine": IODINE_COLS,

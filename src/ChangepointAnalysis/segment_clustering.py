@@ -77,7 +77,7 @@ def build_segment_feature_matrix(
     if sub.empty:
         raise ValueError(f"No segments for group '{group}'")
 
-    candidate_cols = summary_feature_columns(group)
+    candidate_cols = summary_feature_columns(group, df=sub)
     available = [c for c in candidate_cols if c in sub.columns]
     keep: list[str] = []
     for col in available:
@@ -114,7 +114,7 @@ def build_feature_matrix_from_segments_df(
         ]
     else:
         group = str(df["group"].iloc[0]) if "group" in df.columns else "gsa"
-        bases = summary_feature_columns(group)
+        bases = summary_feature_columns(group, df=df)
         keep = [c for c in bases if c in df.columns and df[c].notna().any()]
         feature_names = keep + ["log10_n_frames"]
 

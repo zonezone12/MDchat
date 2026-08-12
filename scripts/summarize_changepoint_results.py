@@ -72,6 +72,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip timeline plots derived from cluster_representatives.csv",
     )
+    parser.add_argument(
+        "--features-suffix",
+        default=None,
+        help=(
+            "Feature CSV suffix (e.g. _endpoint_features.csv). "
+            "Auto-detected when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--timeline-top-pairs",
+        type=int,
+        default=5,
+        help=(
+            "Top-N endpoint_dist_{i}_{j}_mean features for timeline_cluster "
+            "panels (by |point-biserial| vs cluster). 0 disables (default: 5)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -98,12 +115,14 @@ def main() -> None:
         summarize_changepoint_results(
             changepoints_dir,
             features_dir,
-                    plot_dir=plot_dir,
+            plot_dir=plot_dir,
             trajectories=args.trajectories,
             skip_tables=args.skip_tables,
             skip_individual_timelines=args.skip_individual_timelines,
             cluster_representatives_csv=args.cluster_representatives_csv,
             skip_cluster_rep_timelines=args.skip_cluster_rep_timelines,
+            features_suffix=args.features_suffix,
+            cluster_timeline_top_pairs=args.timeline_top_pairs,
         )
 
     print("\nPlots:")

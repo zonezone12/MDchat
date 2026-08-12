@@ -16,8 +16,8 @@ from src.utils.run_log import log_event, step
 
 from .feature_groups import (
     DEFAULT_GROUPS,
-    SUMMARY_COLS,
     group_column_map,
+    summary_base_columns,
     traj_id_from_features_stem,
 )
 
@@ -35,6 +35,7 @@ class ChangepointConfig:
     tolerance_frames: int = 50
     normalize: bool = True
     groups: tuple[str, ...] = DEFAULT_GROUPS
+    include_site_pairs_in_detection: bool = False
 
 
 @dataclass
@@ -186,7 +187,11 @@ def detect_trajectory_changepoints(
         else np.arange(n_signal, dtype=np.float64)
     )
 
-    col_map = group_column_map(df, config.groups)
+    col_map = group_column_map(
+        df,
+        config.groups,
+        include_site_pairs=config.include_site_pairs_in_detection,
+    )
 
     bkp_rows: list[dict] = []
     seg_rows: list[dict] = []
@@ -240,7 +245,7 @@ def detect_trajectory_changepoints(
                     "n_cols_used": len(used_cols),
                 })
 
-            summary_cols = SUMMARY_COLS.get(grp, [])
+            summary_cols = summary_base_columns(grp, df=df)
             boundaries = [0] + cp.breakpoints + [n_signal]
             for seg_id, (s_start, s_end) in enumerate(
                 zip(boundaries[:-1], boundaries[1:])

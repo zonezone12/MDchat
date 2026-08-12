@@ -481,6 +481,16 @@ class SummarizeChangepointResultsSkill(Skill):
             required=False,
             default=False,
         ),
+        Parameter(
+            "cluster_timeline_top_pairs",
+            ParamType.INTEGER,
+            (
+                "Top-N endpoint_dist_{i}_{j}_mean features (by |point-biserial| "
+                "vs cluster) for timeline_cluster panels. 0 disables."
+            ),
+            required=False,
+            default=5,
+        ),
     ]
     requires: List[str] = []
     produces = ["changepoint_summary_artifacts"]
@@ -505,6 +515,9 @@ class SummarizeChangepointResultsSkill(Skill):
                 ),
                 skip_cluster_rep_timelines=bool(
                     params.get("skip_cluster_rep_timelines", False)
+                ),
+                cluster_timeline_top_pairs=int(
+                    params.get("cluster_timeline_top_pairs", 5)
                 ),
             )
         except Exception as exc:
@@ -719,6 +732,16 @@ class EndpointChangepointSkill(Skill):
             default=False,
         ),
         Parameter(
+            "include_site_pairs_in_detection",
+            ParamType.BOOLEAN,
+            (
+                "Include raw site-pair columns in changepoint detection "
+                "(default False = aggregates only)."
+            ),
+            required=False,
+            default=False,
+        ),
+        Parameter(
             "include_paper_d1",
             ParamType.BOOLEAN,
             "Emit corrected paper-d1 distances from s3/s7 one-step-in ring neighbors.",
@@ -838,6 +861,16 @@ class EndpointChangepointSkill(Skill):
             default=False,
         ),
         Parameter(
+            "cluster_timeline_top_pairs",
+            ParamType.INTEGER,
+            (
+                "Top-N endpoint_dist_{i}_{j}_mean features for timeline_cluster "
+                "panels (by |point-biserial| vs cluster). 0 disables."
+            ),
+            required=False,
+            default=5,
+        ),
+        Parameter(
             "skip_transition_attribution",
             ParamType.BOOLEAN,
             "Skip attributing directed cluster transitions to site-pair features.",
@@ -889,6 +922,9 @@ class EndpointChangepointSkill(Skill):
         detection = ChangepointConfig(
             groups=("endpoint",),
             penalty=params.get("penalty"),
+            include_site_pairs_in_detection=bool(
+                params.get("include_site_pairs_in_detection", False)
+            ),
         )
         clustering = SegmentClusteringConfig(
             groups=("endpoint",),
@@ -939,6 +975,9 @@ class EndpointChangepointSkill(Skill):
                 sweep=sweep,
                 skip_clustering=bool(params.get("skip_clustering", False)),
                 skip_summarize=bool(params.get("skip_summarize", False)),
+                cluster_timeline_top_pairs=int(
+                    params.get("cluster_timeline_top_pairs", 5)
+                ),
                 skip_transition_attribution=bool(
                     params.get("skip_transition_attribution", False)
                 ),
