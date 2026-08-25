@@ -808,3 +808,37 @@ def test_median_pair_jaccard_empty_comparison() -> None:
     assert np.isnan(_median_pair_jaccard(empty, "gsa", "combined"))
     assert _group_pair_labels(("endpoint",)) == []
     assert ("gsa", "combined") in _group_pair_labels(("endpoint", "gsa", "combined"))
+
+
+def test_canonicalize_traj_id_and_cross_dir_timing() -> None:
+    from src.ChangepointAnalysis import canonicalize_traj_id, compare_changepoint_timing
+
+    assert canonicalize_traj_id("BMMpM_109345_mdcrd_v") == "109345_mdcrd_v"
+    assert canonicalize_traj_id("109345_mdcrd_v") == "109345_mdcrd_v"
+    assert canonicalize_traj_id("BMMpM_109345_mdcrd_v_gsa_features") == "109345_mdcrd_v"
+
+    endpoint = pd.DataFrame(
+        {
+            "traj_id": ["109345_mdcrd_v", "109345_mdcrd_v"],
+            "group": ["endpoint", "endpoint"],
+            "frame": [100, 400],
+            "time_ps": [100.0, 400.0],
+        }
+    )
+    gsa = pd.DataFrame(
+        {
+            "traj_id": ["BMMpM_109345_mdcrd_v", "BMMpM_109345_mdcrd_v"],
+            "group": ["gsa", "gsa"],
+            "frame": [110, 405],
+            "time_ps": [110.0, 405.0],
+        }
+    )
+    cmp = compare_changepoint_timing(endpoint, gsa, tolerance_frames=50)
+    assert len(cmp) == 1
+    row = cmp.iloc[0]
+    assert row["traj_id"] == "109345_mdcrd_v"
+    assert {row["group_a"], row["group_b"]} == {"endpoint", "gsa"}
+    assert row["n_bkps_a"] == 2
+    assert row["n_bkps_b"] == 2
+    assert row["n_shared"] == 2
+    assert row["jaccard"] >= 0.5

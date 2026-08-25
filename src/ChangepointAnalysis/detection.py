@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -141,6 +142,229 @@ def compare_breakpoints(
         "mean_timing_offset_frames": mean_off_frames,
         "mean_timing_offset_ps": mean_off_ps,
     }
+
+
+_CUBE_PREFIX_RE = re.compile(
+    r"^(?:BHHpH|BHHpM|BMHpH|BMHpM|BMMpH|BMMpM)_"
+)
+_FEATURE_SUFFIX_RE = re.compile(r"_(?:gsa|endpoint)_features$")
+
+
+def canonicalize_traj_id(traj_id: str) -> str:
+    """Strip cube prefix / feature-CSV suffix so GSA and endpoint IDs match.
+
+    ``BMMpM_109345_mdcrd_v`` and ``109345_mdcrd_v`` both become ``109345_mdcrd_v``.
+    """
+    s = str(traj_id).strip()
+    s = _CUBE_PREFIX_RE.sub("", s)
+    s = _FEATURE_SUFFIX_RE.sub("", s)
+    return s
+
+
+def _load_breakpoints_table(source: Path | str | pd.DataFrame) -> pd.DataFrame:
+    """Load ``all_breakpoints.csv`` from a path, directory, or DataFrame."""
+    if isinstance(source, pd.DataFrame):
+        df = source.copy()
+    else:
+        path = Path(source)
+        if path.is_dir():
+            path = path / "all_breakpoints.csv"
+        if not path.exists():
+            raise FileNotFoundError(f"No breakpoints table at {path}")
+        df = pd.read_csv(path)
+    if df.empty:
+        return df
+    if "traj_id" not in df.columns or "group" not in df.columns:
+        raise ValueError(
+            f"Breakpoints table must include traj_id and group columns; got {list(df.columns)}"
+        )
+    df["source_traj_id"] = df["traj_id"].astype(str)
+    df["traj_id"] = df["traj_id"].map(canonicalize_traj_id)
+    return df
+
+
+def _frame_times(sub: pd.DataFrame) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    loc_col = "frame" if "frame" in sub.columns else "signal_index"
+    frames = sub[loc_col].to_numpy(dtype=np.int64)
+    times = (
+        sub["time_ps"].to_numpy(dtype=np.float64)
+        if "time_ps" in sub.columns
+        else None
+    )
+    return frames, times
+
+
+def _mean_time_offset_ps(
+    frames_a: np.ndarray,
+    frames_b: np.ndarray,
+    times_a: Optional[np.ndarray],
+    times_b: Optional[np.ndarray],
+    mean_off_frames: float,
+) -> float:
+    if (
+        times_a is not None
+        and times_b is not None
+        and len(frames_a)
+        and len(frames_b)
+    ):
+        offsets = []
+        for t, fa in zip(times_a, frames_a):
+            if not np.isfinite(t):
+                continue
+            j = int(np.argmin(np.abs(frames_b - fa)))
+            tb = times_b[j]
+            if np.isfinite(tb):
+                offsets.append(abs(float(t) - float(tb)))
+        if offsets:
+            return float(np.mean(offsets))
+    dt = 1.0
+    for frames, times in ((frames_a, times_a), (frames_b, times_b)):
+        if times is None or len(frames) < 2:
+            continue
+        order = np.argsort(frames)
+        dts = np.diff(np.asarray(times, dtype=float)[order])
+        dts = dts[np.isfinite(dts) & (dts > 0)]
+        if len(dts):
+            dt = float(np.median(dts))
+            break
+    return float(mean_off_frames * dt)
+
+
+def compare_changepoint_timing(
+    *sources: Path | str | pd.DataFrame,
+    tolerance_frames: int = 50,
+    output_dir: Optional[Path | str] = None,
+) -> pd.DataFrame:
+    """Compare breakpoint timing across already-computed changepoint tables.
+
+    Each *source* is an ``all_breakpoints.csv`` path, a changepoints directory,
+    or a DataFrame. Trajectory IDs are canonicalized so endpoint IDs
+    (``109345_mdcrd_v``) match GSA IDs (``BMMpM_109345_mdcrd_v``).
+
+    A group pair is reported for a trajectory only when that trajectory is
+    present in a source that contains each group (missing groups count as
+    zero breakpoints). Writes ``changepoint_timing_comparison.csv`` (and a
+    merged ``all_breakpoints.csv``) when *output_dir* is set.
+    """
+    if len(sources) < 1:
+        raise ValueError("Need at least one breakpoints source")
+
+    loaded: list[pd.DataFrame] = []
+    coverage: dict[str, set[str]] = {}
+    all_groups: set[str] = set()
+    for src in sources:
+        df = _load_breakpoints_table(src)
+        if df.empty:
+            continue
+        groups = {str(g) for g in df["group"].dropna().unique()}
+        all_groups.update(groups)
+        for tid in df["traj_id"].astype(str).unique():
+            coverage.setdefault(tid, set()).update(groups)
+        loaded.append(df)
+
+    if not loaded:
+        cmp = pd.DataFrame(
+            columns=[
+                "traj_id",
+                "group_a",
+                "group_b",
+                "tolerance_frames",
+                "n_bkps_a",
+                "n_bkps_b",
+                "n_shared",
+                "jaccard",
+                "mean_timing_offset_frames",
+                "mean_timing_offset_ps",
+            ]
+        )
+        if output_dir is not None:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            cmp.to_csv(Path(output_dir) / "changepoint_timing_comparison.csv", index=False)
+        return cmp
+
+    merged = pd.concat(loaded, ignore_index=True)
+    groups = sorted(all_groups)
+    rows: list[dict] = []
+    for tid, covered in sorted(coverage.items()):
+        tdf = merged[merged["traj_id"] == tid]
+        comparable = sorted(covered)
+        if len(comparable) < 2:
+            continue
+        for grp_a, grp_b in itertools.combinations(comparable, 2):
+            sub_a = tdf[tdf["group"] == grp_a]
+            sub_b = tdf[tdf["group"] == grp_b]
+            frames_a, times_a = _frame_times(sub_a)
+            frames_b, times_b = _frame_times(sub_b)
+            dummy_t = np.array([0.0, 1.0])
+            metrics = compare_breakpoints(
+                [int(x) for x in frames_a],
+                [int(x) for x in frames_b],
+                tolerance_frames,
+                dummy_t,
+            )
+            metrics["mean_timing_offset_ps"] = _mean_time_offset_ps(
+                frames_a,
+                frames_b,
+                times_a,
+                times_b,
+                float(metrics["mean_timing_offset_frames"]),
+            )
+            rows.append(
+                {
+                    "traj_id": tid,
+                    "group_a": grp_a,
+                    "group_b": grp_b,
+                    "tolerance_frames": int(tolerance_frames),
+                    **metrics,
+                }
+            )
+
+    cmp = pd.DataFrame(rows)
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(output_dir / "all_breakpoints.csv", index=False)
+        cmp.to_csv(output_dir / "changepoint_timing_comparison.csv", index=False)
+        if not cmp.empty:
+            pairs = (
+                cmp.groupby(["group_a", "group_b"], as_index=False)
+                .agg(
+                    n_trajectories=("traj_id", "count"),
+                    median_jaccard=("jaccard", "median"),
+                    mean_jaccard=("jaccard", "mean"),
+                    median_offset_ps=("mean_timing_offset_ps", "median"),
+                    mean_offset_ps=("mean_timing_offset_ps", "mean"),
+                    median_n_shared=("n_shared", "median"),
+                    median_n_bkps_a=("n_bkps_a", "median"),
+                    median_n_bkps_b=("n_bkps_b", "median"),
+                )
+                .sort_values("median_jaccard", ascending=False)
+            )
+        else:
+            pairs = pd.DataFrame(
+                columns=[
+                    "group_a",
+                    "group_b",
+                    "n_trajectories",
+                    "median_jaccard",
+                    "mean_jaccard",
+                    "median_offset_ps",
+                    "mean_offset_ps",
+                    "median_n_shared",
+                    "median_n_bkps_a",
+                    "median_n_bkps_b",
+                ]
+            )
+        pairs.to_csv(output_dir / "cohort_timing_summary.csv", index=False)
+        log_event(
+            "info",
+            (
+                f"Wrote timing comparison ({len(cmp)} traj-pairs, "
+                f"{len(coverage)} trajectories, groups={groups})"
+            ),
+            component="changepoint_timing_comparison",
+        )
+    return cmp
 
 
 def _segment_stats(

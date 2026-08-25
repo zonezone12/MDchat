@@ -66,11 +66,19 @@ flowchart TD
 | `iodine` | IOD guest location and contacts | `IODINE_COLS` |
 | `na_water` | Cavity water / Na⁺ environment | `NA_WATER_COLS` |
 | `combined` | All numeric non-metadata columns | derived from the CSV |
-| `endpoint` | Site-centroid distances (`endpoint_dist_*`) | every column with prefix `endpoint_dist_` |
+| `endpoint` | Site-centroid distances (`endpoint_dist_*`) | **aggregates only by default** (~49 cols); raw site pairs optional |
 
 Constants and helpers: `src/ChangepointAnalysis/feature_groups.py` (`DEFAULT_GROUPS` = the four GSA groups; `ALL_GROUPS` also includes `endpoint`).
 
-Timeline plots fall back to `endpoint_dist_mean/min/max` when the usual GSA panel columns are absent, so summarize works on endpoint-only CSVs.
+**Endpoint detection vs clustering vs attribution (important):**
+
+| Stage | Features used (default) | Why |
+|-------|-------------------------|-----|
+| **Detect** | Assembly + per-monomer-pair aggregates (~49 cols); excludes raw `endpoint_dist_{i}s{a}_{j}s{b}` | 960 raw site pairs are highly redundant (~26 PCs for 80% variance) and swamp the signal after z-score |
+| **Cluster** | Assembly aggregates + every `endpoint_dist_{i}_{j}_mean` mean/std (~39 dims + `log10_n_frames`) | Clusters must encode *which* monomer pair deformed, not only the global mean |
+| **Timeline / attribution** | Raw site-pair columns (when present) ranked by **segment-level η²** (or transition standardized Δ) | Frame-level point-biserial against segment labels is attenuated; η² matches the unit clusters were defined on |
+
+Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dist_*`” detection matrix. Timeline plots fall back to `endpoint_dist_mean/min/max` when GSA panel columns are absent, or when `--timeline-top-pairs 0`.
 
 ---
 
@@ -82,7 +90,7 @@ Timeline plots fall back to `endpoint_dist_mean/min/max` when the usual GSA pane
 | `src/ChangepointAnalysis/detection.py` | `ChangepointConfig`, detection + CSV writers, `discover_feature_csvs(..., suffix=)` |
 | `src/ChangepointAnalysis/penalty_sweep.py` | Elbow / plateau sweep |
 | `src/ChangepointAnalysis/segment_clustering.py` | Segment clustering |
-| `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation` |
+| `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation`, segment-η² timeline panels |
 | `src/ChangepointAnalysis/endpoint_features.py` | Ring-site feature extraction → `*_endpoint_features.csv` |
 | `src/ChangepointAnalysis/transition_attribution.py` | Attribute cluster transitions → ranked site-pair drivers |
 | `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
@@ -91,6 +99,7 @@ Timeline plots fall back to `endpoint_dist_mean/min/max` when the usual GSA pane
 | `scripts/sweep_changepoint_penalty.py` | Sweep CLI |
 | `scripts/cluster_changepoint_segments.py` | Cluster CLI |
 | `scripts/summarize_changepoint_results.py` | Summarize CLI |
+| `scripts/compare_changepoint_timing.py` | Post-hoc endpoint vs GSA timing comparison |
 | `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features) |
 | `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
 | `src/mdchat/skills/changepoint_pipeline.py` | MDChat skills |
@@ -199,7 +208,8 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 | Flag | Effect |
 |------|--------|
 | `--no-ring-centroids` | Flat atom endpoints instead of ring-system centroids |
-| `--include-site-pairs` | Also emit `endpoint_dist_{i}s{a}_{j}s{b}` (**required** for transition attribution) |
+| `--include-site-pairs` | Also emit `endpoint_dist_{i}s{a}_{j}s{b}` (**required** for transition attribution and η² timeline panels) |
+| `--include-site-pairs-in-detection` | Feed raw site-pair columns into Pelt (default **off** = aggregates only, ~49 cols) |
 | `--no-paper-d1` | Disable corrected paper-d1 features (enabled by default) |
 | `--paper-d1-open-lo` / `--paper-d1-open-hi` | Open cation–π window in Å (default 4.5–5.5) |
 | `--rmsd-from DIR` | Overlay mean `assembly_rmsd_to_ref` per cluster from `*_gsa_features.csv` |
@@ -211,6 +221,7 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 | `--features-dir` | Where to write features (default: `<output-dir>/endpoint_features`) |
 | `--with-sweep` | Penalty sweep before final detection |
 | `--n-clusters` / `--k` | Segment clusters (default 5) |
+| `--timeline-top-pairs` | Top-N site-pair (or pair-mean) features for `timeline_cluster_*.png` by segment η² (default 5; `0` = aggregate panels only) |
 | `--skip-transition-attribution` | Skip post-clustering site-pair driver attribution |
 | `--transition-top-n` | Keep top-N drivers per directed transition (default 10) |
 | `--transition-min-abs-corr` | Drop drivers with \|point-biserial r\| below this threshold |
@@ -223,10 +234,12 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 | `endpoint_features/endpoint_sites.csv` | Site map (monomer, kind, atom ids; s3/s7 rows include `d1_ring_atom_id`) |
 | `endpoint_features/paper_d1_atoms.csv` | Traceability: endpoint atom → one-step-in ring neighbor |
 | `endpoint_features/endpoint_sites.png` | Visual QC from topology (blue=ring system, orange=atom site); one file per prmtop |
-| `all_breakpoints.csv`, `all_segment_stats.csv`, … | Standard changepoint tables (`group=endpoint`) |
-| `clusters/` | Segment clusters |
+| `all_breakpoints.csv`, `all_segment_stats.csv`, … | Standard changepoint tables (`group=endpoint`; segment stats include per-monomer-pair aggregates) |
+| `clusters/` | Segment clusters (chosen-k under `clusters/endpoint/`; `by_k/` is inspection-only) |
 | `endpoint_cluster_deformation_summary.csv` | Clusters ordered by mean endpoint distance (+ optional RMSD) |
+| `endpoint_pair_cluster_correlation.csv` | Site-pair (or pair-mean) ranking by segment-level η² vs cluster |
 | `plots/endpoint_cluster_deformation.png` | Bar/scatter vs deformation proxy |
+| `plots/timeline_cluster_{k}_{traj}.png` | Medoid-segment timelines: `endpoint_dist_mean` + top-N pairs labeled `M0S3-M1S6 (Å)  η²=…` |
 | `endpoint_transition_events.csv` | Consecutive directed cluster transitions |
 | `endpoint_transition_feature_rankings.csv` | All site-pair + paper-d1 features ranked per directed transition |
 | `endpoint_transition_top_features.csv` | Top-N drivers with site/atom mapping |
@@ -242,7 +255,8 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 1. Order clusters by mean endpoint-site distance (the deformation summary CSV already sorts this way).
 2. If `--rmsd-from` was set, compare each cluster's mean RMSD to the paper peaks (A≈1.0, B≈1.5, C1≈1.6–2.5, C2≈2.7 Å).
 3. With `--include-site-pairs`, inspect which individual site-pair distances jump at breakpoints — a single large jump suggests B; two openings plus an elongated equatorial pair suggest C2.
-4. Use **transition attribution** (below) to rank which mapped site pairs drive each directed cluster change.
+4. Check `endpoint_pair_cluster_correlation.csv` / `timeline_cluster_*.png` for the site pairs with highest **segment-level η²** (fraction of between-cluster variance). Labels look like `M2S0-M5S0`.
+5. Use **transition attribution** (below) to rank which mapped site pairs drive each directed cluster change.
 
 ### Feature column schema (`*_endpoint_features.csv`)
 
@@ -269,11 +283,24 @@ When methyl (or other exocyclic) tips are absent—common for BHHpM—the s3/s7 
 
 Outputs: `paper_d1_atoms.csv` (atom map), `paper_d1_*` columns in the features CSV, `paper_d1_segment_states.csv`, and d1 cylinders in the transition NGL HTML (green=open, gray=closed, magenta=elongated).
 
+### Cluster timeline panels (segment-level η²)
+
+After clustering, summarize ranks endpoint features for `plots/timeline_cluster_*.png`:
+
+1. Prefer raw site-pair columns `endpoint_dist_{i}s{a}_{j}s{b}` when present (`--include-site-pairs`); else fall back to `endpoint_dist_{i}_{j}_mean`.
+2. For each clustered segment, take the **mean** of each candidate feature over `[start_frame, end_frame]` (raw Å; not per-traj z-scored — absolute levels carry cross-trajectory cluster signal).
+3. Score each feature by **η²** (fraction of between-cluster variance), with Kruskal–Wallis ε² as a robustness column.
+4. Plot `endpoint_dist_mean` plus the top-N pairs, labeled e.g. `M2S0-M5S0 (Å)  η²=0.81`.
+
+Auditable ranking: `endpoint_pair_cluster_correlation.csv`. Medoid CSVs are taken from `clusters/<group>/cluster_representatives.csv` only (`by_k/` inspection outputs are ignored unless you pass `--cluster-representatives-csv` explicitly).
+
 ### Transition driver attribution
 
 After endpoint clustering, the pipeline can attribute each **directed** consecutive-segment transition (`from_cluster → to_cluster`) to the raw site-pair columns **and** corrected paper-d1 columns that change most strongly.
 
-**Requires** `--include-site-pairs`. Without those columns, attribution is skipped with a warning. Clustering itself still uses only the eight aggregate summary columns (+ `log10_n_frames`); attribution deliberately returns to the per-frame site-pair series.
+**Requires** `--include-site-pairs`. Without those columns, attribution is skipped with a warning.
+
+**Clustering** uses assembly + per-monomer-pair aggregate summaries written into `all_segment_stats.csv` (not the raw site-pair series). Attribution deliberately returns to the per-frame site-pair / paper-d1 series.
 
 **Scoring (per directed transition type):**
 
@@ -371,7 +398,54 @@ python scripts/summarize_changepoint_results.py `
 
 **Writes:** `cohort_timing_summary.csv`, `cohort_segment_regime_summary.csv`, `breakpoints_per_trajectory.csv`, and plots under `plots/` (Jaccard heatmap, breakpoint histogram, cohort overview, optional timelines).
 
-To summarize an endpoint-only run, point `--features-dir` at the `*_endpoint_features.csv` directory (timeline panels auto-fall back to endpoint aggregates).
+### 5. Compare endpoint vs GSA timing (post-hoc)
+
+Endpoint runs are `group=endpoint` only, so their `changepoint_timing_comparison.csv` is header-only. After both an **endpoint** changepoint directory and a **GSA** changepoint directory exist, compare them without re-detecting:
+
+```powershell
+python scripts/compare_changepoint_timing.py `
+    --changepoints-dirs output/endpoint_changepoints_BMMpM output/changepoints `
+    --output-dir output/endpoint_vs_gsa_timing_BMMpM `
+    --tolerance-frames 50
+```
+
+Trajectory IDs are matched after stripping cube prefixes (`BMMpM_109345_mdcrd_v` ↔ `109345_mdcrd_v`). Only trajectories present in both sources are compared.
+
+**Writes:** `changepoint_timing_comparison.csv`, `cohort_timing_summary.csv`, merged `all_breakpoints.csv`, `plots/cohort_jaccard_heatmap.png`.
+
+Python:
+
+```python
+from src.ChangepointAnalysis import compare_changepoint_timing
+
+cmp = compare_changepoint_timing(
+    "output/endpoint_changepoints_BMMpM",
+    "output/changepoints",
+    tolerance_frames=50,
+    output_dir="output/endpoint_vs_gsa_timing_BMMpM",
+)
+```
+
+Endpoint-only re-plot (reuse existing features; refresh cluster timelines):
+
+```powershell
+python scripts/summarize_changepoint_results.py `
+    --changepoints-dir output/endpoint_changepoints_BHHpM `
+    --features-dir output/endpoint_changepoints_BHHpM/endpoint_features `
+    --features-suffix "_endpoint_features.csv" `
+    --skip-tables `
+    --skip-individual-timelines `
+    --timeline-top-pairs 5
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--features-suffix` | e.g. `_endpoint_features.csv` (auto-detected when omitted) |
+| `--timeline-top-pairs` | Top-N endpoint pairs for `timeline_cluster_*.png` by segment η² (default 5; `0` disables) |
+| `--skip-cluster-rep-timelines` | Skip medoid timelines |
+| `--cluster-representatives-csv` | Explicit medoid CSV(s); default = `clusters/*/cluster_representatives.csv` (ignores `by_k/`) |
+
+Cluster medoid timelines prefer raw site-pair columns when present, ranked by **segment-level η²**, with labels like `M0S3-M1S6 (Å)  η²=0.81`. Ranking is written to `endpoint_pair_cluster_correlation.csv`.
 
 ---
 
@@ -413,10 +487,16 @@ Pass `features_suffix="_endpoint_features.csv"` when the features directory hold
 pipe = ChangepointPipeline(
     "output/endpoint_changepoints/endpoint_features",
     "output/endpoint_changepoints",
-    detection=ChangepointConfig(groups=("endpoint",)),
+    detection=ChangepointConfig(
+        groups=("endpoint",),
+        # include_site_pairs_in_detection=False  # default: aggregates only
+    ),
     clustering=SegmentClusteringConfig(groups=("endpoint",)),
     features_suffix="_endpoint_features.csv",
 )
+pipe.detect()
+pipe.cluster_segments()
+pipe.summarize(cluster_timeline_top_pairs=5)
 ```
 
 ### Endpoint sites end-to-end
@@ -475,7 +555,8 @@ print(tables.breakpoints.head())
 ### Key dataclasses
 
 ```python
-ChangepointConfig          # method, cost_model, penalty, groups, min_size, jump, ...
+ChangepointConfig          # method, cost_model, penalty, groups, min_size, jump,
+                           # include_site_pairs_in_detection (default False), ...
 ChangepointTables          # breakpoints, segment_stats, comparison DataFrames
 PenaltySweepConfig         # grid size, thresholds, nested ChangepointConfig
 PenaltySweepResult         # summary, elbow, recommended_penalty, ...
@@ -518,13 +599,19 @@ Downstream scripts (`compare_state_methods.py`, PT analysis helpers, cluster str
 ### `all_segment_stats.csv`
 
 Core: `traj_id`, `group`, `segment_id`, `start_frame`, `end_frame`, `start_ps`, `end_ps`, `n_frames`, `n_cols_used`  
-Plus per-group `*_mean` / `*_std` columns from `SUMMARY_COLS`.
+Plus per-group `*_mean` / `*_std` columns from summary bases.
+
+For `group=endpoint`, summary bases are the four assembly aggregates plus every `endpoint_dist_{i}_{j}_mean` present in the features CSV (~38 endpoint columns + metadata). That is what segment clustering consumes (plus `log10_n_frames`).
+
+### `endpoint_pair_cluster_correlation.csv`
+
+Written by summarize when cluster medoid timelines are enabled. Columns include `feature`, `endpoint_label` (e.g. `M2S0-M5S0`), `eta_squared`, `epsilon_squared_kw`, `cohens_d_best`, `best_cluster`, `frame_max_abs_corr`, `rank`. Primary sort key is segment-level η².
 
 ### `changepoint_timing_comparison.csv`
 
 `traj_id`, `group_a`, `group_b`, `tolerance_frames`, `n_bkps_a`, `n_bkps_b`, `n_shared`, `jaccard`, `mean_timing_offset_frames`, `mean_timing_offset_ps`
 
-Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file — there are no pairwise group comparisons.
+Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file — there are no pairwise group comparisons. Use `scripts/compare_changepoint_timing.py` (or `compare_changepoint_timing`) to compare an endpoint directory against a GSA `output/changepoints` directory after both exist.
 
 ### `endpoint_cluster_deformation_summary.csv`
 
@@ -542,6 +629,9 @@ Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file
 | `jump` | 5 | Speed vs resolution trade-off |
 | Timing tolerance | 50 frames | Used for Jaccard “shared” matches |
 | Clustering | Ward, k=5 | Fixed k by default; `--auto-select-k` available |
+| Endpoint detection cols | aggregates (~49) | Raw site pairs off unless `--include-site-pairs-in-detection` |
+| Endpoint clustering dims | ~39 | Assembly + per-pair means/stds + `log10_n_frames` |
+| Timeline top pairs | 5 | Segment-η² ranking; `--timeline-top-pairs 0` disables |
 | Ring centroids | on for endpoint path | `use_ring_centroids=True`; opt out with `--no-ring-centroids` |
 
 ---

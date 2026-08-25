@@ -1005,6 +1005,85 @@ class EndpointChangepointSkill(Skill):
         )
 
 
+class CompareChangepointTimingSkill(Skill):
+    name = "compare_changepoint_timing"
+    description = (
+        "Compare breakpoint timing between already-computed changepoint "
+        "directories (e.g. endpoint results vs GSA feature-group results). "
+        "Matches trajectory IDs after stripping cube prefixes. Writes "
+        "changepoint_timing_comparison.csv and a Jaccard heatmap. "
+        "Does not require a loaded universe."
+    )
+    category = "changepoint"
+    parameters = [
+        Parameter(
+            "changepoints_dirs",
+            ParamType.ARRAY,
+            "Directories containing all_breakpoints.csv (endpoint + GSA).",
+            required=True,
+            items_type=ParamType.STRING,
+        ),
+        Parameter(
+            "output_dir",
+            ParamType.FILE_PATH,
+            "Directory for comparison CSVs and heatmap.",
+            required=True,
+        ),
+        Parameter(
+            "tolerance_frames",
+            ParamType.INTEGER,
+            "Window for counting a breakpoint as shared.",
+            required=False,
+            default=50,
+            min_value=1,
+        ),
+    ]
+    requires: List[str] = []
+    produces = ["changepoint_timing_comparison"]
+
+    def execute(self, context: "AnalysisContext", **params: Any) -> SkillResult:
+        from pathlib import Path
+
+        from src.ChangepointAnalysis import compare_changepoint_timing
+        from src.ChangepointAnalysis.reporting import plot_jaccard_heatmap
+
+        dirs = params.get("changepoints_dirs") or []
+        if isinstance(dirs, str):
+            dirs = [dirs]
+        dirs = [Path(d) for d in dirs]
+        output_dir = Path(params["output_dir"])
+        try:
+            cmp = compare_changepoint_timing(
+                *dirs,
+                tolerance_frames=int(params.get("tolerance_frames", 50)),
+                output_dir=output_dir,
+            )
+            heatmap = plot_jaccard_heatmap(output_dir, output_dir / "plots")
+        except Exception as exc:
+            return SkillResult(
+                success=False,
+                summary=f"Timing comparison failed: {exc}",
+                error=str(exc),
+            )
+
+        artifacts = {
+            "changepoint_timing_comparison.csv": str(
+                output_dir / "changepoint_timing_comparison.csv"
+            ),
+            "cohort_timing_summary.csv": str(output_dir / "cohort_timing_summary.csv"),
+            "cohort_jaccard_heatmap.png": str(heatmap),
+        }
+        return SkillResult(
+            success=True,
+            data={"n_rows": int(len(cmp))},
+            artifacts=artifacts,
+            summary=(
+                f"Compared {len(dirs)} changepoint directories → "
+                f"{len(cmp)} traj-pair rows in {output_dir}"
+            ),
+        )
+
+
 _registry = get_default_registry()
 _registry.register(ChangepointFeatureGroupsSkill())
 _registry.register(SweepChangepointPenaltySkill())
@@ -1012,3 +1091,4 @@ _registry.register(ClusterChangepointSegmentsSkill())
 _registry.register(SummarizeChangepointResultsSkill())
 _registry.register(RunChangepointPipelineSkill())
 _registry.register(EndpointChangepointSkill())
+_registry.register(CompareChangepointTimingSkill())
