@@ -1430,3 +1430,421 @@ def compare_endpoint_clusters_to_deformation(
         component="endpoint_deformation_compare",
     )
     return written
+
+
+_ENDPOINT_CHANGPOINTS_PREFIX = "endpoint_changepoints_"
+_GSA_CHANGPOINTS_PREFIX = "gsa_changepoints_"
+_LOW_CONFIDENCE_N_SEGMENTS = 5
+
+
+def cohort_name_from_changepoints_dir(changepoints_dir: Path | str) -> str:
+    """Extract cube cohort id (e.g. ``BMMpM``) from a changepoints path."""
+    name = Path(changepoints_dir).name
+    for prefix in (_ENDPOINT_CHANGPOINTS_PREFIX, _GSA_CHANGPOINTS_PREFIX):
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+    return name
+
+
+def _cohens_d_direction(d: float) -> str:
+    if not np.isfinite(d) or abs(d) < 1e-12:
+        return "neutral"
+    return "open" if d > 0 else "closed"
+
+
+def _aggregate_paper_d1_by_cluster(d1_df: pd.DataFrame) -> pd.DataFrame:
+    """Cluster-level means from ``paper_d1_segment_states.csv``."""
+    if d1_df.empty or "cluster_label" not in d1_df.columns:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for label, sub in d1_df.groupby("cluster_label"):
+        row: dict = {"cluster_label": label}
+        for col in (
+            "paper_d1_min_mean",
+            "paper_d1_n_open_mean",
+            "n_open_pairs",
+            "n_closed_pairs",
+            "n_elongated_pairs",
+        ):
+            if col in sub.columns:
+                row[col] = float(sub[col].mean())
+        if "n_open_pairs" in sub.columns:
+            row["open_pair_segment_fraction"] = float((sub["n_open_pairs"] > 0).mean())
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summarize_endpoint_cluster_proxies(
+    changepoints_dir: Path | str,
+    *,
+    top_pairs: int = 10,
+    low_confidence_n_segments: int = _LOW_CONFIDENCE_N_SEGMENTS,
+) -> pd.DataFrame:
+    """Per-cluster deformation proxies for one endpoint changepoint cohort.
+
+    Combines endpoint distance (structural), paper d1 (cation–π), site-pair η²,
+    and Cohen's *d* direction from existing pipeline CSVs. Assigns
+    ``deformation_rank`` 0 = most closed (smallest mean endpoint distance).
+    """
+    changepoints_dir = Path(changepoints_dir)
+    cohort = cohort_name_from_changepoints_dir(changepoints_dir)
+
+    deform_path = changepoints_dir / "endpoint_cluster_deformation_summary.csv"
+    if not deform_path.exists():
+        log_event(
+            "warning",
+            f"Missing {deform_path.name} in {changepoints_dir}",
+            component="endpoint_cluster_proxies",
+        )
+        return pd.DataFrame()
+
+    deform = pd.read_csv(deform_path)
+    if deform.empty or "endpoint_dist_mean" not in deform.columns:
+        return pd.DataFrame()
+
+    deform = deform.sort_values("endpoint_dist_mean").reset_index(drop=True)
+    deform["deformation_rank"] = np.arange(len(deform), dtype=int)
+    deform["cohort"] = cohort
+
+    d1_path = changepoints_dir / "paper_d1_segment_states.csv"
+    if d1_path.exists():
+        d1_agg = _aggregate_paper_d1_by_cluster(pd.read_csv(d1_path))
+        if not d1_agg.empty:
+            deform = deform.merge(d1_agg, on="cluster_label", how="left")
+
+    pairs_path = changepoints_dir / "endpoint_pair_cluster_correlation.csv"
+    top_pair_df = pd.DataFrame()
+    if pairs_path.exists():
+        pairs = pd.read_csv(pairs_path)
+        if not pairs.empty and "rank" in pairs.columns:
+            top_pair_df = pairs.sort_values("rank").head(int(top_pairs)).copy()
+        elif not pairs.empty and "eta_squared" in pairs.columns:
+            top_pair_df = pairs.sort_values("eta_squared", ascending=False).head(
+                int(top_pairs)
+            ).copy()
+
+    cohort_top_labels = (
+        ";".join(top_pair_df["endpoint_label"].astype(str).tolist())
+        if not top_pair_df.empty and "endpoint_label" in top_pair_df.columns
+        else ""
+    )
+
+    dominant_labels: list[str] = []
+    dominant_eta2: list[float] = []
+    dominant_d: list[float] = []
+    dominant_direction: list[str] = []
+    n_marking: list[int] = []
+
+    for _, row in deform.iterrows():
+        label = row["cluster_label"]
+        if top_pair_df.empty:
+            dominant_labels.append("")
+            dominant_eta2.append(np.nan)
+            dominant_d.append(np.nan)
+            dominant_direction.append("")
+            n_marking.append(0)
+            continue
+
+        marked = top_pair_df[top_pair_df["best_cluster"] == label]
+        n_marking.append(len(marked))
+        if marked.empty:
+            dominant_labels.append("")
+            dominant_eta2.append(np.nan)
+            dominant_d.append(np.nan)
+            dominant_direction.append("")
+        else:
+            best = marked.sort_values("eta_squared", ascending=False).iloc[0]
+            d_val = float(best.get("cohens_d_best", np.nan))
+            dominant_labels.append(str(best.get("endpoint_label", "")))
+            dominant_eta2.append(float(best.get("eta_squared", np.nan)))
+            dominant_d.append(d_val)
+            dominant_direction.append(_cohens_d_direction(d_val))
+
+    deform["cohort_top_pair_labels"] = cohort_top_labels
+    deform["dominant_top_pair"] = dominant_labels
+    deform["dominant_top_pair_eta2"] = dominant_eta2
+    deform["dominant_top_pair_cohens_d"] = dominant_d
+    deform["cohens_d_direction"] = dominant_direction
+    deform["n_top_pairs_marking_cluster"] = n_marking
+    deform["low_confidence"] = deform["n_segments"] < int(low_confidence_n_segments)
+
+    return deform
+
+
+def compare_endpoint_clusters_across_cohorts(
+    cohort_dirs: Sequence[Path | str],
+    out_dir: Path | str,
+    *,
+    top_pairs: int = 10,
+) -> dict[str, Path]:
+    """Aggregate endpoint cluster proxies across multiple B* cohort directories."""
+    out_dir = Path(out_dir)
+    plot_dir = out_dir / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+
+    frames: list[pd.DataFrame] = []
+    for d in cohort_dirs:
+        summary = summarize_endpoint_cluster_proxies(d, top_pairs=top_pairs)
+        if not summary.empty:
+            frames.append(summary)
+
+    if not frames:
+        log_event(
+            "warning",
+            "No cohort summaries produced for cross-cohort comparison",
+            component="endpoint_cluster_cross_cohort",
+        )
+        return written
+
+    all_summary = pd.concat(frames, ignore_index=True)
+    summary_path = out_dir / "cluster_proxy_summary.csv"
+    all_summary.to_csv(summary_path, index=False)
+    written["cluster_proxy_summary.csv"] = summary_path
+
+    confident = all_summary[~all_summary["low_confidence"]].copy()
+    rank_rows: list[dict] = []
+    for rank in sorted(confident["deformation_rank"].unique()):
+        row: dict = {"deformation_rank": int(rank)}
+        for cohort in sorted(confident["cohort"].unique()):
+            sub = confident[
+                (confident["cohort"] == cohort)
+                & (confident["deformation_rank"] == rank)
+            ]
+            if sub.empty:
+                continue
+            s = sub.iloc[0]
+            row[f"{cohort}_endpoint_dist_mean"] = s.get("endpoint_dist_mean", np.nan)
+            row[f"{cohort}_paper_d1_min_mean"] = s.get("paper_d1_min_mean", np.nan)
+            row[f"{cohort}_n_open_pairs"] = s.get("n_open_pairs", np.nan)
+            row[f"{cohort}_dominant_top_pair"] = s.get("dominant_top_pair", "")
+            row[f"{cohort}_dominant_top_pair_eta2"] = s.get(
+                "dominant_top_pair_eta2", np.nan
+            )
+        rank_rows.append(row)
+    by_rank = pd.DataFrame(rank_rows)
+    by_rank_path = out_dir / "cluster_proxy_by_rank.csv"
+    by_rank.to_csv(by_rank_path, index=False)
+    written["cluster_proxy_by_rank.csv"] = by_rank_path
+
+    pair_rows: list[dict] = []
+    matrix_rows: list[dict] = []
+    for d in cohort_dirs:
+        cohort = cohort_name_from_changepoints_dir(d)
+        pairs_path = Path(d) / "endpoint_pair_cluster_correlation.csv"
+        if not pairs_path.exists():
+            continue
+        pairs = pd.read_csv(pairs_path)
+        if pairs.empty:
+            continue
+        if "rank" in pairs.columns:
+            top = pairs.sort_values("rank").head(int(top_pairs))
+        else:
+            top = pairs.sort_values("eta_squared", ascending=False).head(int(top_pairs))
+        for _, pr in top.iterrows():
+            pair_rows.append(
+                {
+                    "cohort": cohort,
+                    "rank": int(pr.get("rank", 0)),
+                    "endpoint_label": str(pr.get("endpoint_label", "")),
+                    "eta_squared": float(pr.get("eta_squared", np.nan)),
+                    "cohens_d_best": float(pr.get("cohens_d_best", np.nan)),
+                    "best_cluster": pr.get("best_cluster", np.nan),
+                    "cohens_d_direction": _cohens_d_direction(
+                        float(pr.get("cohens_d_best", np.nan))
+                    ),
+                }
+            )
+        for _, pr in top.iterrows():
+            matrix_rows.append(
+                {
+                    "cohort": cohort,
+                    "endpoint_label": str(pr.get("endpoint_label", "")),
+                    "eta_squared": float(pr.get("eta_squared", np.nan)),
+                    "best_cluster": pr.get("best_cluster", np.nan),
+                    "deformation_rank_of_best_cluster": np.nan,
+                }
+            )
+
+    top_pairs_df = pd.DataFrame(pair_rows)
+    if not top_pairs_df.empty:
+        freq = (
+            top_pairs_df.groupby("endpoint_label")
+            .size()
+            .reset_index(name="cohort_count")
+            .sort_values("cohort_count", ascending=False)
+        )
+        top_pairs_df = top_pairs_df.merge(freq, on="endpoint_label", how="left")
+        top_path = out_dir / "top_site_pairs_by_cohort.csv"
+        top_pairs_df.to_csv(top_path, index=False)
+        written["top_site_pairs_by_cohort.csv"] = top_path
+
+    matrix_df = pd.DataFrame(matrix_rows)
+    if not matrix_df.empty and not all_summary.empty:
+        rank_map = all_summary.set_index(["cohort", "cluster_label"])[
+            "deformation_rank"
+        ]
+        for i, mrow in matrix_df.iterrows():
+            key = (mrow["cohort"], mrow["best_cluster"])
+            if key in rank_map.index:
+                matrix_df.at[i, "deformation_rank_of_best_cluster"] = float(
+                    rank_map.loc[key]
+                )
+        matrix_path = out_dir / "pair_best_cluster_matrix.csv"
+        matrix_df.to_csv(matrix_path, index=False)
+        written["pair_best_cluster_matrix.csv"] = matrix_path
+
+    _write_cross_cohort_proxy_plots(
+        all_summary,
+        top_pairs_df,
+        plot_dir,
+        written,
+    )
+
+    log_event(
+        "info",
+        f"Wrote cross-cohort endpoint cluster proxy comparison ({len(all_summary)} rows)",
+        component="endpoint_cluster_cross_cohort",
+    )
+    return written
+
+
+def _write_cross_cohort_proxy_plots(
+    summary: pd.DataFrame,
+    top_pairs: pd.DataFrame,
+    plot_dir: Path,
+    written: dict[str, Path],
+) -> None:
+    """Matplotlib figures for cross-cohort cluster proxy comparison."""
+    cohorts = sorted(summary["cohort"].unique())
+    confident = summary[~summary["low_confidence"]]
+
+    if not confident.empty and "endpoint_dist_mean" in confident.columns:
+        pivot_dist = confident.pivot_table(
+            index="deformation_rank",
+            columns="cohort",
+            values="endpoint_dist_mean",
+            aggfunc="first",
+        )
+        fig, ax = plt.subplots(figsize=(max(6, len(cohorts) * 0.9), 4.5))
+        im = ax.imshow(pivot_dist.values, aspect="auto", cmap="YlOrRd")
+        ax.set_xticks(np.arange(len(pivot_dist.columns)))
+        ax.set_xticklabels(pivot_dist.columns, rotation=45, ha="right")
+        ax.set_yticks(np.arange(len(pivot_dist.index)))
+        ax.set_yticklabels([str(int(v)) for v in pivot_dist.index])
+        ax.set_xlabel("Cohort")
+        ax.set_ylabel("Deformation rank (0=closed)")
+        ax.set_title("Mean endpoint distance (Å) by deformation rank")
+        fig.colorbar(im, ax=ax, label="endpoint_dist_mean (Å)")
+        fig.tight_layout()
+        p = plot_dir / "deformation_rank_vs_endpoint_dist.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["plots/deformation_rank_vs_endpoint_dist.png"] = p
+
+    if not confident.empty and "paper_d1_min_mean" in confident.columns:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+        for ax, col, title in (
+            (axes[0], "paper_d1_min_mean", "paper_d1_min mean"),
+            (axes[1], "n_open_pairs", "n_open_pairs mean"),
+        ):
+            if col not in confident.columns:
+                ax.set_visible(False)
+                continue
+            pivot = confident.pivot_table(
+                index="deformation_rank",
+                columns="cohort",
+                values=col,
+                aggfunc="first",
+            )
+            im = ax.imshow(pivot.values, aspect="auto", cmap="viridis")
+            ax.set_xticks(np.arange(len(pivot.columns)))
+            ax.set_xticklabels(pivot.columns, rotation=45, ha="right")
+            ax.set_yticks(np.arange(len(pivot.index)))
+            ax.set_yticklabels([str(int(v)) for v in pivot.index])
+            ax.set_xlabel("Cohort")
+            ax.set_ylabel("Deformation rank")
+            ax.set_title(title)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.suptitle("Paper d1 proxies by deformation rank", y=1.02)
+        fig.tight_layout()
+        p = plot_dir / "deformation_rank_vs_paper_d1.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["plots/deformation_rank_vs_paper_d1.png"] = p
+
+    if not top_pairs.empty:
+        top5 = (
+            top_pairs.sort_values(["cohort", "rank"])
+            .groupby("cohort")
+            .head(5)
+        )
+        labels = sorted(top5["endpoint_label"].unique())
+        label_to_i = {lab: i for i, lab in enumerate(labels)}
+        mat = np.full((len(cohorts), len(labels)), np.nan)
+        for i, cohort in enumerate(cohorts):
+            sub = top5[top5["cohort"] == cohort]
+            for _, row in sub.iterrows():
+                j = label_to_i.get(str(row["endpoint_label"]))
+                if j is not None:
+                    mat[i, j] = float(row["eta_squared"])
+        fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.35), max(4, len(cohorts) * 0.6)))
+        im = ax.imshow(mat, aspect="auto", cmap="magma", vmin=0, vmax=1)
+        ax.set_xticks(np.arange(len(labels)))
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticks(np.arange(len(cohorts)))
+        ax.set_yticklabels(cohorts)
+        ax.set_title("Top-5 site-pair η² by cohort")
+        fig.colorbar(im, ax=ax, label="η²")
+        fig.tight_layout()
+        p = plot_dir / "top_pairs_eta2_heatmap.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["plots/top_pairs_eta2_heatmap.png"] = p
+
+    if (
+        not confident.empty
+        and "endpoint_dist_mean" in confident.columns
+        and "paper_d1_min_mean" in confident.columns
+    ):
+        n_c = len(cohorts)
+        ncols = min(3, n_c)
+        nrows = int(np.ceil(n_c / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3.5 * nrows))
+        axes_flat = np.atleast_1d(axes).ravel()
+        for ax, cohort in zip(axes_flat, cohorts):
+            sub = confident[confident["cohort"] == cohort]
+            sc = ax.scatter(
+                sub["endpoint_dist_mean"],
+                sub["paper_d1_min_mean"],
+                c=sub["deformation_rank"],
+                cmap="coolwarm",
+                s=60,
+                edgecolors="k",
+                linewidths=0.4,
+            )
+            for _, r in sub.iterrows():
+                ax.annotate(
+                    str(int(r["deformation_rank"])),
+                    (r["endpoint_dist_mean"], r["paper_d1_min_mean"]),
+                    fontsize=7,
+                    ha="center",
+                    va="center",
+                    color="white",
+                )
+            ax.set_xlabel("endpoint_dist_mean (Å)")
+            ax.set_ylabel("paper_d1_min_mean (Å)")
+            ax.set_title(cohort)
+            ax.grid(alpha=0.25)
+        for ax in axes_flat[len(cohorts) :]:
+            ax.set_visible(False)
+        cbar = fig.colorbar(sc, ax=axes_flat[: len(cohorts)], shrink=0.6)
+        cbar.set_label("deformation_rank")
+        fig.suptitle("Endpoint distance vs paper d1 (annotated by rank)", y=1.01)
+        fig.subplots_adjust(top=0.88, wspace=0.35)
+        p = plot_dir / "proxy_consistency_scatter.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["plots/proxy_consistency_scatter.png"] = p

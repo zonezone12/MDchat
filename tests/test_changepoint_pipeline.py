@@ -842,3 +842,391 @@ def test_canonicalize_traj_id_and_cross_dir_timing() -> None:
     assert row["n_bkps_b"] == 2
     assert row["n_shared"] == 2
     assert row["jaccard"] >= 0.5
+
+
+def test_summarize_endpoint_cluster_proxies_schema(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.reporting import (
+        cohort_name_from_changepoints_dir,
+        compare_endpoint_clusters_across_cohorts,
+        summarize_endpoint_cluster_proxies,
+    )
+
+    cohort_dir = tmp_path / "endpoint_changepoints_BMMpM"
+    cohort_dir.mkdir()
+    pd.DataFrame(
+        {
+            "cluster_label": [1, 0, 2],
+            "n_segments": [10, 20, 5],
+            "n_trajectories": [5, 8, 3],
+            "total_frames": [1000, 2000, 500],
+            "endpoint_dist_mean": [17.0, 16.5, 17.5],
+            "endpoint_dist_std": [0.1, 0.2, 0.15],
+        }
+    ).to_csv(cohort_dir / "endpoint_cluster_deformation_summary.csv", index=False)
+    pd.DataFrame(
+        {
+            "cluster_label": [0, 0, 1, 2],
+            "paper_d1_min_mean": [9.5, 9.7, 9.6, 10.0],
+            "paper_d1_n_open_mean": [0.0, 0.0, 0.0, 0.0],
+            "n_open_pairs": [0, 0, 0, 1],
+            "n_closed_pairs": [0, 0, 0, 0],
+            "n_elongated_pairs": [60, 60, 60, 59],
+        }
+    ).to_csv(cohort_dir / "paper_d1_segment_states.csv", index=False)
+    pd.DataFrame(
+        {
+            "feature": ["endpoint_dist_2s2_3s3", "endpoint_dist_0s3_5s2"],
+            "endpoint_label": ["M2S2-M3S3", "M0S3-M5S2"],
+            "eta_squared": [0.84, 0.81],
+            "cohens_d_best": [-5.4, -3.8],
+            "best_cluster": [2, 1],
+            "rank": [1, 2],
+        }
+    ).to_csv(cohort_dir / "endpoint_pair_cluster_correlation.csv", index=False)
+
+    assert cohort_name_from_changepoints_dir(cohort_dir) == "BMMpM"
+
+    summary = summarize_endpoint_cluster_proxies(cohort_dir, top_pairs=2)
+    assert len(summary) == 3
+    ranked = summary.sort_values("deformation_rank")
+    assert list(ranked["cluster_label"]) == [0, 1, 2]
+    assert ranked.iloc[0]["endpoint_dist_mean"] == pytest.approx(16.5)
+    assert ranked.iloc[2]["cluster_label"] == 2
+    assert "dominant_top_pair" in summary.columns
+    assert summary.loc[summary["cluster_label"] == 2, "dominant_top_pair"].iloc[0] == "M2S2-M3S3"
+    assert summary.loc[summary["cluster_label"] == 2, "cohens_d_direction"].iloc[0] == "closed"
+
+    out_dir = tmp_path / "cross_cohort"
+    written = compare_endpoint_clusters_across_cohorts([cohort_dir], out_dir, top_pairs=2)
+    assert (out_dir / "cluster_proxy_summary.csv").exists()
+    assert (out_dir / "cluster_proxy_by_rank.csv").exists()
+    assert (out_dir / "top_site_pairs_by_cohort.csv").exists()
+    assert "cluster_proxy_summary.csv" in written
+    cross = pd.read_csv(out_dir / "cluster_proxy_summary.csv")
+    assert set(cross["cohort"]) == {"BMMpM"}
+    assert "deformation_rank" in cross.columns
+
+
+def _write_k_diag_cohort(
+    root: Path,
+    name: str,
+    *,
+    sil_by_k: dict[int, float],
+    n_traj: int,
+    segs_per_traj: int,
+    cluster_sizes_k5: list[int],
+    cluster_sizes_k6: list[int],
+    paper_d1_min: float,
+    n_open_pairs: int,
+    site_kinds: list[str],
+    d1_kinds: list[str],
+    endpoint_eq_d1: bool,
+) -> Path:
+    cohort = root / f"endpoint_changepoints_{name}"
+    cdir = cohort / "clusters" / "endpoint"
+    by_k5 = cdir / "by_k" / "k_05"
+    by_k6 = cdir / "by_k" / "k_06"
+    feat = cohort / "endpoint_features"
+    for p in (cdir, by_k5, by_k6, feat):
+        p.mkdir(parents=True, exist_ok=True)
+
+    sil_df = pd.DataFrame(
+        {"k": list(sil_by_k), "silhouette": list(sil_by_k.values()), "n_clusters_effective": list(sil_by_k)}
+    )
+    sil_df.to_csv(cdir / "silhouette_by_k.csv", index=False)
+    (cdir / "cluster_summary.txt").write_text("Selection mode: fixed k=5\n", encoding="utf-8")
+
+    rows = []
+    traj_i = 0
+    remaining = list(cluster_sizes_k5)
+    label = 0
+    for size in remaining:
+        for _ in range(size):
+            tid = f"{100000 + traj_i}_mdcrd_v"
+            n_on_traj = 0
+            # pack segs_per_traj segments onto sequential traj ids
+            traj_i_use = traj_i // max(segs_per_traj, 1)
+            tid = f"{100000 + traj_i_use}_mdcrd_v"
+            rows.append(
+                {
+                    "traj_id": tid,
+                    "group": "endpoint",
+                    "segment_id": traj_i % max(segs_per_traj, 1),
+                    "cluster_label": label,
+                    "n_frames": 1000 if segs_per_traj == 1 else 80,
+                    "endpoint_dist_mean_mean": 16.5 + 0.1 * label,
+                    "start_frame": 0,
+                    "end_frame": 79,
+                }
+            )
+            traj_i += 1
+        label += 1
+    segs = pd.DataFrame(rows)
+    segs.to_csv(cdir / "segments_clustered.csv", index=False)
+
+    rows6 = []
+    traj_i = 0
+    for label, size in enumerate(cluster_sizes_k6):
+        for _ in range(size):
+            traj_i_use = traj_i // max(segs_per_traj, 1)
+            rows6.append(
+                {
+                    "traj_id": f"{100000 + traj_i_use}_mdcrd_v",
+                    "cluster_label": label,
+                    "n_frames": 80,
+                }
+            )
+            traj_i += 1
+    pd.DataFrame(rows6).to_csv(by_k6 / "segments_clustered.csv", index=False)
+
+    d1_rows = []
+    for i, lab in enumerate(segs["cluster_label"]):
+        d1_rows.append(
+            {
+                "traj_id": segs["traj_id"].iloc[i],
+                "cluster_label": lab,
+                "paper_d1_min_mean": paper_d1_min,
+                "n_open_pairs": n_open_pairs,
+            }
+        )
+    pd.DataFrame(d1_rows).to_csv(cohort / "paper_d1_segment_states.csv", index=False)
+
+    pd.DataFrame({"kind": site_kinds}).to_csv(feat / "endpoint_sites.csv", index=False)
+    pd.DataFrame(
+        {
+            "traj_id": ["t0"] * len(d1_kinds),
+            "endpoint_kind": d1_kinds,
+            "endpoint_atom_id": list(range(len(d1_kinds))),
+            "d1_ring_atom_id": (
+                list(range(len(d1_kinds)))
+                if endpoint_eq_d1
+                else [100 + i for i in range(len(d1_kinds))]
+            ),
+        }
+    ).to_csv(feat / "paper_d1_atoms.csv", index=False)
+    return cohort
+
+
+def test_endpoint_cluster_k_diagnostics(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis import (
+        compare_endpoint_cluster_k_diagnostics,
+        discover_endpoint_k_cohort_dirs,
+    )
+
+    bhh = _write_k_diag_cohort(
+        tmp_path,
+        "BHHpM",
+        sil_by_k={2: 0.16, 5: 0.20, 6: 0.22, 7: 0.21, 10: 0.15},
+        n_traj=4,
+        segs_per_traj=4,
+        cluster_sizes_k5=[2, 3, 4, 4, 3],
+        cluster_sizes_k6=[2, 3, 4, 4, 1, 2],
+        paper_d1_min=4.4,
+        n_open_pairs=6,
+        site_kinds=["ring"] * 8 + ["atom"] * 2,
+        d1_kinds=["ring_site"] * 4,
+        endpoint_eq_d1=True,
+    )
+    bmm = _write_k_diag_cohort(
+        tmp_path,
+        "BMMpM",
+        sil_by_k={2: 0.30, 5: 0.36, 6: 0.38, 7: 0.39, 10: 0.41},
+        n_traj=8,
+        segs_per_traj=1,
+        cluster_sizes_k5=[4, 2, 2, 2, 2],
+        cluster_sizes_k6=[4, 2, 2, 2, 1, 1],
+        paper_d1_min=9.5,
+        n_open_pairs=0,
+        site_kinds=["atom"] * 8 + ["ring"] * 2,
+        d1_kinds=["atom"] * 4,
+        endpoint_eq_d1=False,
+    )
+
+    found = discover_endpoint_k_cohort_dirs(tmp_path, "endpoint_changepoints_B*")
+    assert {p.name for p in found} == {bhh.name, bmm.name}
+
+    out = tmp_path / "k_diag"
+    written = compare_endpoint_cluster_k_diagnostics([bhh, bmm], out)
+    assert (out / "silhouette_by_k.csv").exists()
+    assert (out / "silhouette_peaks.csv").exists()
+    assert (out / "segment_dynamics.csv").exists()
+    assert (out / "site_and_d1.csv").exists()
+    assert (out / "k_split.csv").exists()
+    assert (out / "k_diagnostics_summary.txt").exists()
+    assert "plots/silhouette_vs_k.png" in written
+    assert "plots/paper_d1_open.png" in written
+
+    peaks = pd.read_csv(out / "silhouette_peaks.csv").set_index("cohort")
+    assert int(peaks.loc["BHHpM", "global_max_k"]) == 6
+    assert peaks.loc["BHHpM", "curve_shape"] == "global_peak_k6"
+    assert peaks.loc["BMMpM", "curve_shape"] == "increasing"
+    assert int(peaks.loc["BHHpM", "chosen_k"]) == 5
+
+    sites = pd.read_csv(out / "site_and_d1.csv").set_index("cohort")
+    assert sites.loc["BHHpM", "frac_seg_any_open"] == pytest.approx(1.0)
+    assert sites.loc["BMMpM", "frac_seg_any_open"] == pytest.approx(0.0)
+    assert sites.loc["BMMpM", "paper_d1_min_mean"] == pytest.approx(9.5)
+    assert sites.loc["BMMpM", "s3s7_atom"] == 4
+
+    splits = pd.read_csv(out / "k_split.csv").set_index("cohort")
+    assert "splits a 3-segment" in str(splits.loc["BHHpM", "split_description"])
+    assert "splits a 2-segment" in str(splits.loc["BMMpM", "split_description"])
+
+
+def _write_gsa_k_diag_cohort(
+    root: Path,
+    name: str,
+    *,
+    sil_by_k: dict[int, float],
+    segs_per_traj: int,
+    cluster_sizes_k5: list[int],
+    cluster_sizes_k6: list[int],
+    rg_by_label: list[float],
+) -> Path:
+    cohort = root / f"gsa_changepoints_{name}"
+    cdir = cohort / "clusters" / "gsa"
+    by_k6 = cdir / "by_k" / "k_06"
+    cdir.mkdir(parents=True, exist_ok=True)
+    by_k6.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "k": list(sil_by_k),
+            "silhouette": list(sil_by_k.values()),
+            "n_clusters_effective": list(sil_by_k),
+        }
+    ).to_csv(cdir / "silhouette_by_k.csv", index=False)
+    (cdir / "cluster_summary.txt").write_text(
+        "Selection mode: fixed k=5\n", encoding="utf-8"
+    )
+
+    rows = []
+    traj_i = 0
+    for label, size in enumerate(cluster_sizes_k5):
+        for _ in range(size):
+            traj_i_use = traj_i // max(segs_per_traj, 1)
+            rows.append(
+                {
+                    "traj_id": f"{100000 + traj_i_use}_mdcrd_v",
+                    "group": "gsa",
+                    "segment_id": traj_i % max(segs_per_traj, 1),
+                    "cluster_label": label,
+                    "n_frames": 1000 if segs_per_traj == 1 else 80,
+                    "assembly_rg_mean": rg_by_label[label],
+                    "assembly_rmsd_to_ref_mean": 1.0 + 0.2 * label,
+                    "octahedrality_score_mean": 0.95 - 0.02 * label,
+                    "endpoint_dist_mean_mean": 16.0 + 0.05 * label,
+                }
+            )
+            traj_i += 1
+    pd.DataFrame(rows).to_csv(cdir / "segments_clustered.csv", index=False)
+
+    rows6 = []
+    traj_i = 0
+    for label, size in enumerate(cluster_sizes_k6):
+        for _ in range(size):
+            traj_i_use = traj_i // max(segs_per_traj, 1)
+            rows6.append(
+                {
+                    "traj_id": f"{100000 + traj_i_use}_mdcrd_v",
+                    "cluster_label": label,
+                    "n_frames": 80,
+                }
+            )
+            traj_i += 1
+    pd.DataFrame(rows6).to_csv(by_k6 / "segments_clustered.csv", index=False)
+    return cohort
+
+
+def test_gsa_cluster_k_diagnostics(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis import (
+        compare_cluster_k_diagnostics,
+        discover_cluster_k_cohort_dirs,
+        discover_gsa_feature_csvs_by_cube,
+        stage_cube_feature_dir,
+    )
+
+    bhh = _write_gsa_k_diag_cohort(
+        tmp_path,
+        "BHHpM",
+        sil_by_k={2: 0.16, 5: 0.20, 6: 0.22, 7: 0.21, 10: 0.15},
+        segs_per_traj=4,
+        cluster_sizes_k5=[2, 3, 4, 4, 3],
+        cluster_sizes_k6=[2, 3, 4, 4, 1, 2],
+        rg_by_label=[10.2, 10.4, 10.6, 10.8, 11.0],
+    )
+    bmm = _write_gsa_k_diag_cohort(
+        tmp_path,
+        "BMMpM",
+        sil_by_k={2: 0.30, 5: 0.36, 6: 0.38, 7: 0.39, 10: 0.41},
+        segs_per_traj=1,
+        cluster_sizes_k5=[4, 2, 2, 2, 2],
+        cluster_sizes_k6=[4, 2, 2, 2, 1, 1],
+        rg_by_label=[10.3, 10.32, 10.34, 10.36, 10.38],
+    )
+
+    found = discover_cluster_k_cohort_dirs(tmp_path, "gsa_changepoints_B*", group="gsa")
+    assert {p.name for p in found} == {bhh.name, bmm.name}
+
+    out = tmp_path / "gsa_k_diag"
+    written = compare_cluster_k_diagnostics([bhh, bmm], out, group="gsa")
+    assert (out / "silhouette_by_k.csv").exists()
+    assert (out / "geometry_spread.csv").exists()
+    assert (out / "site_and_d1.csv").exists() is False
+    assert "plots/silhouette_vs_k.png" in written
+    assert "plots/geometry_span.png" in written
+    assert "plots/paper_d1_open.png" not in written
+
+    peaks = pd.read_csv(out / "silhouette_peaks.csv").set_index("cohort")
+    assert int(peaks.loc["BHHpM", "global_max_k"]) == 6
+    assert peaks.loc["BHHpM", "curve_shape"] == "global_peak_k6"
+    assert peaks.loc["BMMpM", "curve_shape"] == "increasing"
+
+    geo = pd.read_csv(out / "geometry_spread.csv").set_index("cohort")
+    assert geo.loc["BHHpM", "assembly_rg_range"] == pytest.approx(0.8)
+    assert geo.loc["BMMpM", "assembly_rg_range"] == pytest.approx(0.08)
+
+    dyn = pd.read_csv(out / "segment_dynamics.csv").set_index("cohort")
+    assert dyn.loc["BMMpM", "whole_traj_frac"] == pytest.approx(1.0)
+
+    feat_root = tmp_path / "gsa_features_step1"
+    (feat_root / "BMHpM").mkdir(parents=True)
+    (feat_root / "BHHpM_111_mdcrd_v_gsa_features.csv").write_text("traj_id\n", encoding="utf-8")
+    (feat_root / "BMHpM" / "BMHpM_222_mdcrd_v_gsa_features.csv").write_text(
+        "traj_id\n", encoding="utf-8"
+    )
+    by_cube = discover_gsa_feature_csvs_by_cube(feat_root)
+    assert set(by_cube) == {"BHHpM", "BMHpM"}
+    staged = stage_cube_feature_dir(by_cube["BMHpM"], tmp_path / "staged" / "BMHpM")
+    assert (staged / "BMHpM_222_mdcrd_v_gsa_features.csv").exists()
+
+
+def test_merge_tables_by_group_keeps_existing(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.gsa_cohort_run import (
+        merge_tables_by_group,
+        missing_groups,
+    )
+
+    old = pd.DataFrame({"group": ["gsa", "gsa"], "x": [1, 2]})
+    new = pd.DataFrame({"group": ["iodine", "iodine"], "x": [3, 4]})
+    merged = merge_tables_by_group(old, new, ["iodine"])
+    assert set(merged["group"]) == {"gsa", "iodine"}
+    assert int((merged["group"] == "gsa").sum()) == 2
+    assert int((merged["group"] == "iodine").sum()) == 2
+
+    replaced = merge_tables_by_group(
+        pd.DataFrame({"group": ["iodine"], "x": [0]}),
+        new,
+        ["iodine"],
+    )
+    assert list(replaced["x"]) == [3, 4]
+
+    cdir = tmp_path / "gsa_changepoints_BHHpH" / "clusters"
+    (cdir / "gsa").mkdir(parents=True)
+    (cdir / "gsa" / "segments_clustered.csv").write_text("cluster_label\n0\n", encoding="utf-8")
+    assert missing_groups(cdir.parent, ["gsa", "iodine", "na_water"]) == [
+        "iodine",
+        "na_water",
+    ]
+
+

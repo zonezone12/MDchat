@@ -90,7 +90,9 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `src/ChangepointAnalysis/detection.py` | `ChangepointConfig`, detection + CSV writers, `discover_feature_csvs(..., suffix=)` |
 | `src/ChangepointAnalysis/penalty_sweep.py` | Elbow / plateau sweep |
 | `src/ChangepointAnalysis/segment_clustering.py` | Segment clustering |
-| `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation`, segment-η² timeline panels |
+| `src/ChangepointAnalysis/cluster_k_diagnostics.py` | Silhouette-vs-k / switching / geometry comparison across B* cohorts (`group=endpoint` or `gsa`) |
+| `src/ChangepointAnalysis/gsa_cohort_run.py` | Split mixed `gsa_features_step1` CSVs by cube; run per-cube detect+cluster |
+| `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation`, `summarize_endpoint_cluster_proxies`, `compare_endpoint_clusters_across_cohorts`, segment-η² timeline panels |
 | `src/ChangepointAnalysis/endpoint_features.py` | Ring-site feature extraction → `*_endpoint_features.csv` |
 | `src/ChangepointAnalysis/transition_attribution.py` | Attribute cluster transitions → ranked site-pair drivers |
 | `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
@@ -100,7 +102,10 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `scripts/cluster_changepoint_segments.py` | Cluster CLI |
 | `scripts/summarize_changepoint_results.py` | Summarize CLI |
 | `scripts/compare_changepoint_timing.py` | Post-hoc endpoint vs GSA timing comparison |
-| `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features) |
+| `scripts/compare_endpoint_clusters_across_cohorts.py` | Cross-cohort endpoint cluster vs deformation-proxy tables/plots |
+| `scripts/compare_endpoint_cluster_k.py` | Cross-cohort silhouette-vs-k / switching (`--group endpoint` or `gsa`) |
+| `scripts/run_gsa_step1_cluster_k.py` | Per-cube GSA changepoint from `gsa_features_step1` + k-diagnostics |
+| `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features, one cube per `--features-dir`) |
 | `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
 | `src/mdchat/skills/changepoint_pipeline.py` | MDChat skills |
 | `tests/test_changepoint_pipeline.py` | Synthetic regression tests |
@@ -141,6 +146,18 @@ Useful flags:
 | `--min-size` | 10 | Minimum segment length (frames) |
 | `--jump` | 5 | Ruptures subsample step |
 | `--tolerance-frames` | 50 | Window for “shared” breakpoints |
+
+**Mixed `gsa_features_step1` folder (all B\* cubes together):** do **not** point `--features-dir` at that folder as a whole — clustering would mix cubes. Stage per cube and run k-diagnostics with:
+
+```powershell
+python scripts/run_gsa_step1_cluster_k.py `
+    --features-dir output/gsa_features_step1 `
+    --output-root output `
+    --out-dir output/gsa_cluster_k_diagnostics `
+    --workers 6
+```
+
+Writes `output/gsa_changepoints_{CUBE}/` (`--groups gsa` only, skip summarize/PCA) plus the same silhouette / switching tables as the endpoint comparison. BMHpM CSVs in a subdirectory are picked up. Re-run diagnostics only with `--skip-detect`. Existing `output/changepoints` is an older BMMpM-only 500-frame run; do not reuse it for step-1.
 
 ---
 
@@ -253,10 +270,139 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 ### Reading results vs A / B / C1 / C2
 
 1. Order clusters by mean endpoint-site distance (the deformation summary CSV already sorts this way).
-2. If `--rmsd-from` was set, compare each cluster's mean RMSD to the paper peaks (A≈1.0, B≈1.5, C1≈1.6–2.5, C2≈2.7 Å).
+2. If `--rmsd-from` was set, compare each cluster's mean RMSD to the paper peaks (A≈1.0, B≈1.5, C1≈1.6–2.5, C2≈2.7 Å). When GSA features are unavailable, use the **four deformation proxies** below (endpoint distance, paper d1, site-pair η², Cohen's *d* direction) as RMSD substitutes.
 3. With `--include-site-pairs`, inspect which individual site-pair distances jump at breakpoints — a single large jump suggests B; two openings plus an elongated equatorial pair suggest C2.
 4. Check `endpoint_pair_cluster_correlation.csv` / `timeline_cluster_*.png` for the site pairs with highest **segment-level η²** (fraction of between-cluster variance). Labels look like `M2S0-M5S0`.
 5. Use **transition attribution** (below) to rank which mapped site pairs drive each directed cluster change.
+
+### Cross-cohort cluster proxy comparison (B\* cubes)
+
+After running endpoint changepoint on multiple cube variants (e.g. `output/endpoint_changepoints_BHHpH`, `…_BMMpM`), compare Ward clusters **across cohorts** without re-detecting or re-clustering.
+
+**Why `deformation_rank`?** `cluster_label` integers are arbitrary per cohort (SciPy Ward cut). Cross-cohort alignment uses **`deformation_rank`**: 0 = smallest mean `endpoint_dist_mean` (most closed), increasing to the most open cluster in that cube.
+
+**Four deformation proxies** (used when `assembly_rmsd_to_ref` was not overlaid):
+
+| # | Proxy | Source | Meaning |
+|---|-------|--------|---------|
+| 1 | Endpoint distance | `endpoint_cluster_deformation_summary.csv` | Assembly-wide cage opening (Å) |
+| 2 | Paper d1 | `paper_d1_segment_states.csv` | Cation–π geometry (`paper_d1_min_mean`, `n_open_pairs`, …) |
+| 3 | Site-pair η² | Top rows of `endpoint_pair_cluster_correlation.csv` | Which named contacts explain cluster variance |
+| 4 | Cohen's *d* direction | `cohens_d_best` on top pairs where `best_cluster` matches | +*d* = more open for that pair; −*d* = more closed vs other clusters |
+
+Clusters with `n_segments < 5` are flagged `low_confidence=True` (e.g. singleton BMHpH clusters) and excluded from rank-averaged cross-cohort tables.
+
+```powershell
+python scripts/compare_endpoint_clusters_across_cohorts.py `
+  --output-root output `
+  --pattern "endpoint_changepoints_B*" `
+  --exclude-test `
+  --out-dir output/endpoint_cluster_cross_cohort `
+  --top-pairs 10
+```
+
+Auto-discovers production dirs matching the pattern; skips `*_test` / `*_smoke`. Pass explicit dirs with `--cohort-dirs` to override discovery.
+
+**Writes under `--out-dir`:**
+
+| Artifact | Role |
+|----------|------|
+| `cluster_proxy_summary.csv` | Long table: `cohort`, `cluster_label`, `deformation_rank`, all four proxies, segment counts |
+| `cluster_proxy_by_rank.csv` | Pivoted: rows = `deformation_rank`, columns = cohort × proxy (slide heatmaps) |
+| `top_site_pairs_by_cohort.csv` | Top η² pairs per cohort + cross-cohort frequency (`cohort_count`) |
+| `pair_best_cluster_matrix.csv` | Which cluster each top pair marks + `deformation_rank_of_best_cluster` |
+| `plots/deformation_rank_vs_endpoint_dist.png` | Heatmap: rank × cohort, colored by mean endpoint distance |
+| `plots/deformation_rank_vs_paper_d1.png` | Heatmaps for `paper_d1_min_mean` and `n_open_pairs` |
+| `plots/top_pairs_eta2_heatmap.png` | Cohort × top-5 pair labels, colored by η² |
+| `plots/proxy_consistency_scatter.png` | Per-cohort scatter: endpoint distance vs paper d1 (points labeled by rank) |
+
+**Interpretation workflow (cross-cohort):**
+
+1. For each `deformation_rank`, compare mean endpoint distance across BHH / BMH / BMM and pH / pM variants.
+2. Check whether paper d1 shifts consistently with rank (note: many segments are `elongated` in Å; read **relative** rank changes, not absolute 4.5–5.5 Å windows).
+3. Inspect `top_site_pairs_by_cohort.csv` for recurring contacts at the same rank (e.g. M2–M3 face pairs).
+4. Use `cohens_d_direction` on the cluster's dominant top pair to read open vs closed for that contact.
+
+Python:
+
+```python
+from pathlib import Path
+from src.ChangepointAnalysis import (
+    compare_endpoint_clusters_across_cohorts,
+    summarize_endpoint_cluster_proxies,
+)
+
+# Single cohort
+proxies = summarize_endpoint_cluster_proxies(
+    "output/endpoint_changepoints_BMMpM",
+    top_pairs=10,
+)
+
+# All B* cubes
+cohorts = sorted(Path("output").glob("endpoint_changepoints_B*"))
+cohorts = [p for p in cohorts if "_test" not in p.name and "_smoke" not in p.name]
+written = compare_endpoint_clusters_across_cohorts(
+    cohorts,
+    "output/endpoint_cluster_cross_cohort",
+    top_pairs=10,
+)
+```
+
+GSA step-1 k-diagnostics (after per-cube `gsa_changepoints_*` dirs exist):
+
+```python
+from src.ChangepointAnalysis import (
+    compare_cluster_k_diagnostics,
+    run_gsa_step1_cohorts,
+)
+
+run_gsa_step1_cohorts("output/gsa_features_step1", "output", workers=6)
+written = compare_cluster_k_diagnostics(
+    list(Path("output").glob("gsa_changepoints_B*")),
+    "output/gsa_cluster_k_diagnostics",
+    group="gsa",
+)
+```
+
+Talk-track for cluster definition and η² / Cohen's *d*: [endpoint_cluster_discrimination.md](endpoint_cluster_discrimination.md).
+
+### Why k=5, and why BMMpM’s silhouette rises
+
+All B\* endpoint runs are cut at **fixed k=5** (`--n-clusters`). Silhouette curves under `clusters/endpoint/silhouette_by_k.csv` are inspection-only. BHHpM peaks at k=6; BHHpH / BMHpM have a weak local bump at k=6 after k=2 already wins; BMMpM’s score keeps climbing because paper d1 never enters the 4.5–5.5 Å window and Pelt barely switches.
+
+```powershell
+python scripts/compare_endpoint_cluster_k.py `
+  --output-root output `
+  --pattern "endpoint_changepoints_B*" `
+  --exclude-test `
+  --out-dir output/endpoint_cluster_k_diagnostics
+```
+
+Writes `silhouette_peaks.csv`, `segment_dynamics.csv`, `site_and_d1.csv`, `k_split.csv`, and `plots/silhouette_vs_k.png` (plus switching / d1 / site-kind figures). Full talk-track: [endpoint_cluster_discrimination.md §10](endpoint_cluster_discrimination.md#10-why-every-b-run-has-five-clusters-and-why-bmmpm-differs).
+
+The same tables for **cage-geometry GSA** (no paper-d1) after `run_gsa_step1_cluster_k.py`:
+
+```powershell
+python scripts/compare_endpoint_cluster_k.py `
+  --group gsa `
+  --output-root output `
+  --pattern "gsa_changepoints_B*" `
+  --out-dir output/gsa_cluster_k_diagnostics
+```
+
+```python
+from src.ChangepointAnalysis import compare_cluster_k_diagnostics
+
+written = compare_cluster_k_diagnostics(
+    list(Path("output").glob("gsa_changepoints_B*")),
+    "output/gsa_cluster_k_diagnostics",
+    group="gsa",
+)
+```
+
+See [endpoint_cluster_discrimination.md §11](endpoint_cluster_discrimination.md#11-gsa-cage-geometry-k-diagnostics-gsa_features_step1).
+
+### Feature column schema (`*_endpoint_features.csv`)
 
 ### Feature column schema (`*_endpoint_features.csv`)
 
@@ -293,6 +439,8 @@ After clustering, summarize ranks endpoint features for `plots/timeline_cluster_
 4. Plot `endpoint_dist_mean` plus the top-N pairs, labeled e.g. `M2S0-M5S0 (Å)  η²=0.81`.
 
 Auditable ranking: `endpoint_pair_cluster_correlation.csv`. Medoid CSVs are taken from `clusters/<group>/cluster_representatives.csv` only (`by_k/` inspection outputs are ignored unless you pass `--cluster-representatives-csv` explicitly).
+
+Talk-track / formulas (cohort-wide cluster definition, η², Cohen’s *d*, why frame-level |r| was attenuated): [endpoint_cluster_discrimination.md](endpoint_cluster_discrimination.md) (§2).
 
 ### Transition driver attribution
 
@@ -447,6 +595,20 @@ python scripts/summarize_changepoint_results.py `
 
 Cluster medoid timelines prefer raw site-pair columns when present, ranked by **segment-level η²**, with labels like `M0S3-M1S6 (Å)  η²=0.81`. Ranking is written to `endpoint_pair_cluster_correlation.csv`.
 
+### 6. Compare endpoint clusters across B\* cohorts (post-hoc)
+
+After multiple endpoint runs exist (one output dir per cube), consolidate cluster proxies without re-running the pipeline:
+
+```powershell
+python scripts/compare_endpoint_clusters_across_cohorts.py `
+  --output-root output `
+  --pattern "endpoint_changepoints_B*" `
+  --out-dir output/endpoint_cluster_cross_cohort `
+  --top-pairs 10
+```
+
+See **Cross-cohort cluster proxy comparison** under the endpoint quick start for proxy definitions, output schema, and interpretation.
+
 ---
 
 ## Python API
@@ -511,6 +673,43 @@ artifacts = run_endpoint_changepoint(
     use_ring_centroids=True,
     include_site_pairs=True,
     rmsd_from="output/gsa_features",
+)
+```
+
+Cross-cohort cluster proxies (reads existing CSVs only):
+
+```python
+from src.ChangepointAnalysis import (
+    compare_endpoint_clusters_across_cohorts,
+    summarize_endpoint_cluster_proxies,
+)
+
+proxies = summarize_endpoint_cluster_proxies("output/endpoint_changepoints_BMMpM")
+written = compare_endpoint_clusters_across_cohorts(
+    [
+        "output/endpoint_changepoints_BHHpH",
+        "output/endpoint_changepoints_BHHpM",
+        "output/endpoint_changepoints_BMHpH",
+        "output/endpoint_changepoints_BMHpM",
+        "output/endpoint_changepoints_BMMpH",
+        "output/endpoint_changepoints_BMMpM",
+    ],
+    "output/endpoint_cluster_cross_cohort",
+)
+```
+
+Silhouette / switching / paper-d1 diagnostics (also reads existing CSVs only):
+
+```python
+from src.ChangepointAnalysis import (
+    compare_endpoint_cluster_k_diagnostics,
+    discover_endpoint_k_cohort_dirs,
+)
+
+cohorts = discover_endpoint_k_cohort_dirs("output", "endpoint_changepoints_B*")
+written = compare_endpoint_cluster_k_diagnostics(
+    cohorts,
+    "output/endpoint_cluster_k_diagnostics",
 )
 ```
 
@@ -617,6 +816,44 @@ Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file
 
 `cluster_label`, `n_segments`, `n_trajectories`, `total_frames`, `endpoint_dist_mean`, `endpoint_dist_std`, and optionally `assembly_rmsd_to_ref_mean` / `_std` when `--rmsd-from` is set. Rows are sorted by mean endpoint distance.
 
+### Cross-cohort outputs (`output/endpoint_cluster_cross_cohort/`)
+
+Produced by `scripts/compare_endpoint_clusters_across_cohorts.py` (or `compare_endpoint_clusters_across_cohorts`).
+
+**`cluster_proxy_summary.csv`** — one row per cohort × cluster. Key columns:
+
+`cohort`, `cluster_label`, `deformation_rank`, `n_segments`, `n_trajectories`, `total_frames`, `endpoint_dist_mean`, `endpoint_dist_std`, `paper_d1_min_mean`, `paper_d1_n_open_mean`, `n_open_pairs`, `n_closed_pairs`, `n_elongated_pairs`, `open_pair_segment_fraction`, `cohort_top_pair_labels`, `dominant_top_pair`, `dominant_top_pair_eta2`, `dominant_top_pair_cohens_d`, `cohens_d_direction`, `n_top_pairs_marking_cluster`, `low_confidence`
+
+**`cluster_proxy_by_rank.csv`** — wide pivot keyed by `deformation_rank`; columns like `{cohort}_endpoint_dist_mean`, `{cohort}_paper_d1_min_mean`, `{cohort}_dominant_top_pair`, … (excludes `low_confidence` clusters).
+
+**`top_site_pairs_by_cohort.csv`** — `cohort`, `rank`, `endpoint_label`, `eta_squared`, `cohens_d_best`, `best_cluster`, `cohens_d_direction`, `cohort_count` (how many cohorts share that pair in the top-N set).
+
+**`pair_best_cluster_matrix.csv`** — `cohort`, `endpoint_label`, `eta_squared`, `best_cluster`, `deformation_rank_of_best_cluster`.
+
+### k-diagnostics outputs (`output/endpoint_cluster_k_diagnostics/`)
+
+Produced by `scripts/compare_endpoint_cluster_k.py` (or `compare_endpoint_cluster_k_diagnostics`). Reads existing `clusters/endpoint/` inspection files plus paper-d1 / site maps; does not re-cluster.
+
+| Artifact | Role |
+|----------|------|
+| `silhouette_by_k.csv` | Long table: cohort × k silhouette |
+| `silhouette_peaks.csv` | Chosen k vs global max, `curve_shape` |
+| `k_split.csv` | Ward split k=5 → k=6 (which cluster split, new sizes) |
+| `segment_dynamics.csv` | Breakpoints, whole-traj fraction, endpoint-distance span |
+| `site_and_d1.csv` | Hull ring/atom counts, s3/s7 kinds, paper-d1 open fraction |
+| `k_diagnostics_summary.txt` | Human-readable dump of the tables |
+| `plots/silhouette_vs_k.png` | Overlay of silhouette curves; dashed line at chosen k |
+| `plots/segment_switching.png` | Segments/traj, whole-traj fraction, never-switch fraction |
+| `plots/paper_d1_open.png` | Closest d1 vs 4.5–5.5 Å window; fraction of open segments |
+| `plots/hull_site_kinds.png` | Stacked ring vs exocyclic atom hull sites |
+| `plots/endpoint_dist_span.png` | Range vs IQR of segment `endpoint_dist_mean` |
+
+### GSA k-diagnostics outputs (`output/gsa_cluster_k_diagnostics/`)
+
+Produced by `scripts/run_gsa_step1_cluster_k.py` (detect+cluster+compare) or `scripts/compare_endpoint_cluster_k.py --group gsa` (compare only). Reads `clusters/gsa/`; no paper-d1.
+
+Same silhouette / switching / k-split tables as the endpoint run, plus `geometry_spread.csv` (Rg / RMSD-to-ref / octahedrality / endpoint-dist spans) and `plots/geometry_span.png`. There is no `site_and_d1.csv`.
+
 ---
 
 ## Defaults that matter
@@ -652,11 +889,18 @@ Coverage includes:
 - `all_pairs_to_metrics_df` flattening
 - Ring-system grouping (biphenyl / naphthalene) and centroid math
 - Endpoint-group pipeline on synthetic `*_endpoint_features.csv`
+- Cross-cohort cluster proxy summary schema (`summarize_endpoint_cluster_proxies`)
+- Endpoint k / silhouette diagnostics (`compare_endpoint_cluster_k_diagnostics`)
+- GSA k / silhouette diagnostics (`compare_cluster_k_diagnostics`, `group="gsa"`)
+- Cube discovery from mixed `gsa_features_step1` (`discover_gsa_feature_csvs_by_cube`)
 
 ---
 
 ## Related docs
 
+- Endpoint cluster definition (all samples) + ranking (η², Cohen’s *d*, timeline panels): [endpoint_cluster_discrimination.md](endpoint_cluster_discrimination.md)
+- Cross-cohort cluster proxy tables/plots (after multiple B\* endpoint runs): `output/endpoint_cluster_cross_cohort/`
+- GSA cage-geometry k-diagnostics (after `run_gsa_step1_cluster_k.py`): `output/gsa_cluster_k_diagnostics/`
 - Cohort interpretation notes: `output/changepoints/ANALYSIS_SUMMARY.md`
 - Presentation-style writeup: `output/changepoints/CHANGPOINT_PIPELINE_PRESENTATION.md`
 - Feature extraction entry point: `scripts/compute_gsa_features.py`

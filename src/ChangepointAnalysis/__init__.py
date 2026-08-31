@@ -52,8 +52,21 @@ from .endpoint_features import (
     summarize_paper_d1_by_segments,
     write_endpoint_features_csv,
 )
+from .cluster_k_diagnostics import (
+    compare_cluster_k_diagnostics,
+    compare_endpoint_cluster_k_diagnostics,
+    discover_cluster_k_cohort_dirs,
+    discover_endpoint_k_cohort_dirs,
+)
+from .gsa_cohort_run import (
+    discover_gsa_feature_csvs_by_cube,
+    run_gsa_step1_cohorts,
+    stage_cube_feature_dir,
+)
 from .reporting import (
     DEFAULT_TIMELINE_PANELS,
+    cohort_name_from_changepoints_dir,
+    compare_endpoint_clusters_across_cohorts,
     compare_endpoint_clusters_to_deformation,
     plot_breakpoint_histogram,
     plot_cluster_representative_timelines,
@@ -62,6 +75,7 @@ from .reporting import (
     plot_jaccard_heatmap,
     plot_timeline,
     summarize_changepoint_results,
+    summarize_endpoint_cluster_proxies,
     write_cohort_tables,
 )
 from .segment_clustering import (
@@ -121,12 +135,19 @@ __all__ = [
     "cluster_segment_group",
     "compare_breakpoints",
     "compare_changepoint_timing",
+    "compare_cluster_k_diagnostics",
+    "compare_endpoint_cluster_k_diagnostics",
+    "compare_endpoint_clusters_across_cohorts",
     "compare_endpoint_clusters_to_deformation",
+    "cohort_name_from_changepoints_dir",
     "compute_paper_d1_distances",
     "default_penalty_grid",
     "detect_cohort_changepoints",
     "detect_trajectory_changepoints",
+    "discover_cluster_k_cohort_dirs",
+    "discover_endpoint_k_cohort_dirs",
     "discover_feature_csvs",
+    "discover_gsa_feature_csvs_by_cube",
     "find_penalty_elbow",
     "find_stable_plateaus",
     "generate_endpoint_features",
@@ -148,8 +169,11 @@ __all__ = [
     "resolve_paper_d1_atoms",
     "resolve_site_pair_metadata",
     "run_endpoint_changepoint",
+    "run_gsa_step1_cohorts",
+    "stage_cube_feature_dir",
     "score_transition_features",
     "summarize_changepoint_results",
+    "summarize_endpoint_cluster_proxies",
     "summarize_paper_d1_by_segments",
     "summary_feature_columns",
     "sweep_penalties",
