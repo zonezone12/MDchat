@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import itertools
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
@@ -55,6 +57,7 @@ class PenaltySweepConfig:
     regime_threshold: float = 0.85
     min_plateau_steps: int = 3
     no_plots: bool = False
+    n_jobs: int = 1
     detection: ChangepointConfig = field(default_factory=ChangepointConfig)
 
 
@@ -135,11 +138,51 @@ def regime_agreement(
     return agree / len(keys)
 
 
+def _init_sweep_worker() -> None:
+    """Cap BLAS threads in Pelt workers so process pools do not oversubscribe."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    try:
+        from threadpoolctl import threadpool_limits
+
+        threadpool_limits(1)
+    except Exception:
+        pass
+
+
+def _resolve_sweep_workers(n_jobs: int, n_traj: int) -> int:
+    """Resolve ``n_jobs`` to a concrete worker count capped by ``n_traj``."""
+    if n_traj <= 0:
+        return 1
+    if int(n_jobs) == -1:
+        requested = os.cpu_count() or 1
+    else:
+        requested = max(1, int(n_jobs))
+    return max(1, min(requested, n_traj))
+
+
+def _sweep_one_trajectory(
+    traj_id: str,
+    df: pd.DataFrame,
+    det_cfg: ChangepointConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[tuple[str, str], list[int]]]:
+    """Process-pool worker: detect one trajectory at a fixed penalty."""
+    tables = detect_trajectory_changepoints(df, traj_id, det_cfg)
+    per_traj_bkps: dict[tuple[str, str], list[int]] = {}
+    if not tables.breakpoints.empty:
+        for (tid, grp), sub in tables.breakpoints.groupby(["traj_id", "group"]):
+            per_traj_bkps[(str(tid), str(grp))] = sub["signal_index"].astype(int).tolist()
+    return tables.breakpoints, tables.segment_stats, tables.comparison, per_traj_bkps
+
+
 def _run_sweep_for_penalty(
     feature_dfs: list[tuple[str, pd.DataFrame]],
     *,
     penalty: float,
     config: ChangepointConfig,
+    executor: Optional[ProcessPoolExecutor] = None,
 ) -> tuple[
     ChangepointTables,
     dict[tuple[str, str], list[int]],
@@ -147,21 +190,23 @@ def _run_sweep_for_penalty(
 ]:
     """Run all trajectories at one penalty; return merged tables + regime directions."""
     det_cfg = replace(config, penalty=penalty, n_bkps=None)
-    all_bkp: list[pd.DataFrame] = []
-    all_seg: list[pd.DataFrame] = []
-    all_cmp: list[pd.DataFrame] = []
-    per_traj_bkps: dict[tuple[str, str], list[int]] = {}
+    if executor is None:
+        parts = [
+            _sweep_one_trajectory(traj_id, df, det_cfg) for traj_id, df in feature_dfs
+        ]
+    else:
+        futures = [
+            executor.submit(_sweep_one_trajectory, traj_id, df, det_cfg)
+            for traj_id, df in feature_dfs
+        ]
+        parts = [fut.result() for fut in futures]
 
-    for traj_id, df in feature_dfs:
-        tables = detect_trajectory_changepoints(df, traj_id, det_cfg)
-        all_bkp.append(tables.breakpoints)
-        all_seg.append(tables.segment_stats)
-        all_cmp.append(tables.comparison)
-        if not tables.breakpoints.empty:
-            for (tid, grp), sub in tables.breakpoints.groupby(["traj_id", "group"]):
-                per_traj_bkps[(str(tid), str(grp))] = sub["signal_index"].astype(
-                    int
-                ).tolist()
+    all_bkp = [p[0] for p in parts]
+    all_seg = [p[1] for p in parts]
+    all_cmp = [p[2] for p in parts]
+    per_traj_bkps: dict[tuple[str, str], list[int]] = {}
+    for part in parts:
+        per_traj_bkps.update(part[3])
 
     merged = ChangepointTables(
         breakpoints=pd.concat(all_bkp, ignore_index=True) if all_bkp else pd.DataFrame(),
@@ -502,8 +547,10 @@ def sweep_penalties(
         traj_id = traj_id_from_features_stem(path.stem)
         feature_dfs.append((traj_id, df))
 
-    n_signal = len(feature_dfs[0][1]) if feature_dfs else 2
+    lengths = [len(df) for _, df in feature_dfs]
+    n_signal = int(np.median(lengths)) if lengths else 2
     det = config.detection
+    n_jobs = _resolve_sweep_workers(config.n_jobs, len(feature_dfs))
 
     if config.penalty_min is not None and config.penalty_max is not None:
         penalties = np.geomspace(
@@ -527,7 +574,8 @@ def sweep_penalties(
     log_event(
         "info",
         f"Sweeping {len(penalties)} penalties on {len(feature_dfs)} trajectories; "
-        f"reference penalty={ref_penalty:.4g}",
+        f"reference penalty={ref_penalty:.4g}; n_jobs={n_jobs}; "
+        f"median n={n_signal}",
         component="sweep_changepoint_penalty",
     )
 
@@ -538,13 +586,20 @@ def sweep_penalties(
     groups = list(det.groups) if det.groups else list(DEFAULT_GROUPS)
     pair_labels = _group_pair_labels(groups)
 
-    for pen in penalties:
-        with step(f"penalty={pen:.4g}"):
-            tables, per_traj_bkps, regime_dirs = _run_sweep_for_penalty(
-                feature_dfs,
-                penalty=float(pen),
-                config=det,
-            )
+    executor: Optional[ProcessPoolExecutor] = (
+        ProcessPoolExecutor(max_workers=n_jobs, initializer=_init_sweep_worker)
+        if n_jobs > 1
+        else None
+    )
+    try:
+        for pen in penalties:
+            with step(f"penalty={pen:.4g}"):
+                tables, per_traj_bkps, regime_dirs = _run_sweep_for_penalty(
+                    feature_dfs,
+                    penalty=float(pen),
+                    config=det,
+                    executor=executor,
+                )
             regime_dirs_by_penalty[float(pen)] = regime_dirs
 
             timing_jaccards: list[float] = []
@@ -593,6 +648,10 @@ def sweep_penalties(
                             "n_bkps": int(r["n_bkps"]),
                         }
                     )
+
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     summary = pd.DataFrame(summary_rows)
     ref_pen_key = float(

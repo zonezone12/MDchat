@@ -798,6 +798,15 @@ def test_resolve_traj_workers() -> None:
     assert _resolve_traj_workers(None, 2) >= 1
 
 
+def test_resolve_sweep_workers() -> None:
+    from src.ChangepointAnalysis.penalty_sweep import _resolve_sweep_workers
+
+    assert _resolve_sweep_workers(1, 10) == 1
+    assert _resolve_sweep_workers(4, 3) == 3
+    assert _resolve_sweep_workers(-1, 1) == 1
+    assert _resolve_sweep_workers(-1, 50) >= 1
+
+
 def test_median_pair_jaccard_empty_comparison() -> None:
     from src.ChangepointAnalysis.penalty_sweep import (
         _group_pair_labels,

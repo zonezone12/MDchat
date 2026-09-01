@@ -99,6 +99,8 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `src/EndpointAnalyzer/endpoints_finder.py` | `find_endpoint_sites` / ring-system grouping |
 | `scripts/changepoint_feature_groups.py` | Detect CLI |
 | `scripts/sweep_changepoint_penalty.py` | Sweep CLI |
+| `scripts/sweep_gsa_changepoint_penalty.py` | Per-cube GSA sweep launcher (`gsa`/`iodine`, no `--run-final`) |
+| `scripts/plot_penalty_sweep_cohorts.py` | Cross-cohort elbow / density / Jaccard figures |
 | `scripts/cluster_changepoint_segments.py` | Cluster CLI |
 | `scripts/summarize_changepoint_results.py` | Summarize CLI |
 | `scripts/compare_changepoint_timing.py` | Post-hoc endpoint vs GSA timing comparison |
@@ -523,6 +525,8 @@ python scripts/sweep_changepoint_penalty.py `
 
 **Writes:** `penalty_sweep_summary.csv`, `penalty_elbow.csv`, `penalty_recommendation.txt`, optional plots under `penalty_sweep/plots/`.
 
+B\* cube comparison (endpoint + GSA elbows, densities, timing Jaccard): [penalty_sweep_B_cohorts.md](penalty_sweep_B_cohorts.md). Recreate those figures with `python scripts/plot_penalty_sweep_cohorts.py` (reads existing `penalty_sweep/` CSVs; does not re-run Pelt).
+
 ### 3. Cluster segments
 
 ```powershell
@@ -899,6 +903,7 @@ Coverage includes:
 ## Related docs
 
 - Endpoint cluster definition (all samples) + ranking (η², Cohen’s *d*, timeline panels): [endpoint_cluster_discrimination.md](endpoint_cluster_discrimination.md)
+- B\* penalty-sweep results (endpoint + GSA elbows, per-1000-frame density, timing Jaccard): [penalty_sweep_B_cohorts.md](penalty_sweep_B_cohorts.md)
 - Cross-cohort cluster proxy tables/plots (after multiple B\* endpoint runs): `output/endpoint_cluster_cross_cohort/`
 - GSA cage-geometry k-diagnostics (after `run_gsa_step1_cluster_k.py`): `output/gsa_cluster_k_diagnostics/`
 - Cohort interpretation notes: `output/changepoints/ANALYSIS_SUMMARY.md`

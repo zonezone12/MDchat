@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.ChangepointAnalysis import ChangepointConfig, PenaltySweepConfig
 from src.ChangepointAnalysis.detection import discover_feature_csvs
+from src.ChangepointAnalysis.feature_groups import DEFAULT_GROUPS
 from src.ChangepointAnalysis.penalty_sweep import run_final_detection, sweep_penalties
 from src.utils.run_log import RunContext
 
@@ -151,6 +152,18 @@ def parse_args() -> argparse.Namespace:
         help="Minimum consecutive structurally stable penalty steps (default: 3)",
     )
     p.add_argument(
+        "--groups",
+        nargs="+",
+        default=None,
+        help="Feature groups to sweep (default: gsa iodine na_water combined)",
+    )
+    p.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Parallel workers across trajectories per penalty (default: 1; -1 = all CPUs)",
+    )
+    p.add_argument(
         "--run-final",
         action="store_true",
         help="After sweep, run detection at recommended penalty (in-process)",
@@ -182,6 +195,7 @@ def main() -> None:
         jump=args.jump,
         tolerance_frames=args.tolerance_frames,
         normalize=True,
+        groups=tuple(args.groups) if args.groups else DEFAULT_GROUPS,
     )
     sweep_cfg = PenaltySweepConfig(
         n_penalties=args.n_penalties,
@@ -194,6 +208,7 @@ def main() -> None:
         regime_threshold=args.regime_threshold,
         min_plateau_steps=args.min_plateau_steps,
         no_plots=args.no_plots,
+        n_jobs=args.n_jobs,
         detection=detection,
     )
 
