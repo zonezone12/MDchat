@@ -96,6 +96,42 @@ def auto_penalty(n: int, normalize: bool) -> Optional[float]:
     return float(np.log(n)) if normalize else None
 
 
+def _match_breakpoints(
+    bkps_a: Sequence[int],
+    bkps_b: Sequence[int],
+    tolerance: int,
+) -> list[tuple[int, int, float]]:
+    """Greedy 1-to-1 matches within ±tolerance frames.
+
+    Returns ``(index_in_a, index_in_b, abs_distance)``. Each index is used at
+    most once. Edges are sorted by distance (then breakpoint values) so the
+    matched set does not depend on argument order when distances are unique.
+    """
+    if not bkps_a or not bkps_b or tolerance < 0:
+        return []
+    a = [int(x) for x in bkps_a]
+    b = [int(x) for x in bkps_b]
+    candidates: list[tuple[int, int, int]] = []
+    for i, x in enumerate(a):
+        for j, y in enumerate(b):
+            d = abs(x - y)
+            if d <= tolerance:
+                candidates.append((d, i, j))
+    candidates.sort(
+        key=lambda t: (t[0], min(a[t[1]], b[t[2]]), max(a[t[1]], b[t[2]]))
+    )
+    used_a: set[int] = set()
+    used_b: set[int] = set()
+    matched: list[tuple[int, int, float]] = []
+    for d, i, j in candidates:
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        matched.append((i, j, float(d)))
+    return matched
+
+
 def compare_breakpoints(
     bkps_a: list[int],
     bkps_b: list[int],
@@ -104,27 +140,24 @@ def compare_breakpoints(
 ) -> dict[str, float]:
     """Pairwise timing similarity between two sets of signal-index breakpoints.
 
-    Returns n_bkps_a, n_bkps_b, n_shared (within ±tolerance frames), Jaccard,
-    and mean_timing_offset in both frames and ps.
+    Matches are greedy 1-to-1 within ±tolerance frames. ``n_shared`` is the
+    number of matched pairs; Jaccard is ``n_shared / (n_a + n_b - n_shared)``;
+    ``mean_timing_offset_*`` is the mean distance of those matched pairs
+    (NaN if none). ``compare_breakpoints(A, B)`` and ``(B, A)`` agree on
+    n_shared, Jaccard, and offset.
     """
     n_a, n_b = len(bkps_a), len(bkps_b)
-
-    shared = sum(
-        1 for b in bkps_a if any(abs(b - c) <= tolerance for c in bkps_b)
-    )
-    union_size = len(set(bkps_a) | set(bkps_b))
+    matched = _match_breakpoints(bkps_a, bkps_b, tolerance)
+    n_shared = len(matched)
 
     if n_a == 0 and n_b == 0:
         jaccard = 1.0
-    elif union_size == 0:
-        jaccard = 0.0
     else:
-        jaccard = shared / union_size
+        denom = n_a + n_b - n_shared
+        jaccard = (n_shared / denom) if denom else 0.0
 
-    if n_a > 0 and n_b > 0:
-        arr_b = np.array(bkps_b, dtype=np.float64)
-        min_dists_frames = [float(np.abs(b - arr_b).min()) for b in bkps_a]
-        mean_off_frames = float(np.mean(min_dists_frames))
+    if matched:
+        mean_off_frames = float(np.mean([d for _, _, d in matched]))
         if len(time_arr) >= 2:
             frame_step_ps = float(time_arr[1] - time_arr[0])
         else:
@@ -137,7 +170,7 @@ def compare_breakpoints(
     return {
         "n_bkps_a": n_a,
         "n_bkps_b": n_b,
-        "n_shared": shared,
+        "n_shared": n_shared,
         "jaccard": jaccard,
         "mean_timing_offset_frames": mean_off_frames,
         "mean_timing_offset_ps": mean_off_ps,
@@ -200,21 +233,33 @@ def _mean_time_offset_ps(
     times_a: Optional[np.ndarray],
     times_b: Optional[np.ndarray],
     mean_off_frames: float,
+    tolerance_frames: int,
 ) -> float:
+    """Mean |t_a − t_b| over the same 1-to-1 matches used for Jaccard.
+
+    Falls back to ``mean_off_frames * dt`` when per-breakpoint times are
+    missing. Returns NaN when there are no matches.
+    """
+    if not np.isfinite(mean_off_frames) or not len(frames_a) or not len(frames_b):
+        return float("nan")
+    matched = _match_breakpoints(
+        [int(x) for x in frames_a],
+        [int(x) for x in frames_b],
+        tolerance_frames,
+    )
     if (
-        times_a is not None
+        matched
+        and times_a is not None
         and times_b is not None
-        and len(frames_a)
-        and len(frames_b)
+        and len(times_a) == len(frames_a)
+        and len(times_b) == len(frames_b)
     ):
         offsets = []
-        for t, fa in zip(times_a, frames_a):
-            if not np.isfinite(t):
-                continue
-            j = int(np.argmin(np.abs(frames_b - fa)))
-            tb = times_b[j]
-            if np.isfinite(tb):
-                offsets.append(abs(float(t) - float(tb)))
+        for i, j, _d in matched:
+            ta = float(times_a[i])
+            tb = float(times_b[j])
+            if np.isfinite(ta) and np.isfinite(tb):
+                offsets.append(abs(ta - tb))
         if offsets:
             return float(np.mean(offsets))
     dt = 1.0
@@ -308,6 +353,7 @@ def compare_changepoint_timing(
                 times_a,
                 times_b,
                 float(metrics["mean_timing_offset_frames"]),
+                tolerance_frames,
             )
             rows.append(
                 {

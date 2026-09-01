@@ -520,7 +520,7 @@ python scripts/sweep_changepoint_penalty.py `
 ```
 
 - Primary recommendation: **elbow** on cohort total breakpoints vs log-penalty.
-- Cross-group Jaccard is diagnostic only (each group is segmented independently).
+- Cross-group Jaccard is diagnostic only (each group is segmented independently). `compare_breakpoints` uses 1-to-1 matching; see [changepoint_jaccard_metric.md](changepoint_jaccard_metric.md) for the formula and for how older CSVs differ.
 - `--run-final` re-runs detection **in-process** at the recommended penalty (no subprocess).
 
 **Writes:** `penalty_sweep_summary.csv`, `penalty_elbow.csv`, `penalty_recommendation.txt`, optional plots under `penalty_sweep/plots/`.
@@ -548,7 +548,7 @@ python scripts/summarize_changepoint_results.py `
     --features-dir output/gsa_features
 ```
 
-**Writes:** `cohort_timing_summary.csv`, `cohort_segment_regime_summary.csv`, `breakpoints_per_trajectory.csv`, and plots under `plots/` (Jaccard heatmap, breakpoint histogram, cohort overview, optional timelines).
+**Writes:** `cohort_timing_summary.csv`, `cohort_segment_regime_summary.csv`, `breakpoints_per_trajectory.csv`, and plots under `plots/` (Jaccard heatmap, breakpoint histogram, cohort overview, optional timelines). How to read the Jaccard / offset columns: [changepoint_jaccard_metric.md](changepoint_jaccard_metric.md).
 
 ### 5. Compare endpoint vs GSA timing (post-hoc)
 
@@ -814,6 +814,8 @@ Written by summarize when cluster medoid timelines are enabled. Columns include 
 
 `traj_id`, `group_a`, `group_b`, `tolerance_frames`, `n_bkps_a`, `n_bkps_b`, `n_shared`, `jaccard`, `mean_timing_offset_frames`, `mean_timing_offset_ps`
 
+`n_shared` / `jaccard` / offsets come from `compare_breakpoints`: greedy 1-to-1 matches within `tolerance_frames`, Jaccard = `n_shared / (n_a + n_b − n_shared)`, offset = mean matched-pair distance. CSVs written before this fix mixed a fuzzy A→B count with an exact-set union; see [changepoint_jaccard_metric.md](changepoint_jaccard_metric.md).
+
 Single-group runs (e.g. `endpoint` only) write a **header-only** comparison file — there are no pairwise group comparisons. Use `scripts/compare_changepoint_timing.py` (or `compare_changepoint_timing`) to compare an endpoint directory against a GSA `output/changepoints` directory after both exist.
 
 ### `endpoint_cluster_deformation_summary.csv`
@@ -868,7 +870,7 @@ Same silhouette / switching / k-split tables as the endpoint run, plus `geometry
 | Penalty | `log(n)` when normalized | Override with `--penalty` or `--with-sweep` |
 | `min_size` | 10 frames | Suppresses very short segments |
 | `jump` | 5 | Speed vs resolution trade-off |
-| Timing tolerance | 50 frames | Used for Jaccard “shared” matches |
+| Timing tolerance | 50 frames | Window for 1-to-1 Jaccard matches; see [changepoint_jaccard_metric.md](changepoint_jaccard_metric.md) |
 | Clustering | Ward, k=5 | Fixed k by default; `--auto-select-k` available |
 | Endpoint detection cols | aggregates (~49) | Raw site pairs off unless `--include-site-pairs-in-detection` |
 | Endpoint clustering dims | ~39 | Assembly + per-pair means/stds + `log10_n_frames` |
@@ -903,6 +905,7 @@ Coverage includes:
 ## Related docs
 
 - Endpoint cluster definition (all samples) + ranking (η², Cohen’s *d*, timeline panels): [endpoint_cluster_discrimination.md](endpoint_cluster_discrimination.md)
+- Timing Jaccard metric (`compare_breakpoints`, 1-to-1 match; impact of the old formula on B\* CSVs): [changepoint_jaccard_metric.md](changepoint_jaccard_metric.md)
 - B\* penalty-sweep results (endpoint + GSA elbows, per-1000-frame density, timing Jaccard): [penalty_sweep_B_cohorts.md](penalty_sweep_B_cohorts.md)
 - Cross-cohort cluster proxy tables/plots (after multiple B\* endpoint runs): `output/endpoint_cluster_cross_cohort/`
 - GSA cage-geometry k-diagnostics (after `run_gsa_step1_cluster_k.py`): `output/gsa_cluster_k_diagnostics/`

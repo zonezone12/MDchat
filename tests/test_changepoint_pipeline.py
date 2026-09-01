@@ -819,6 +819,41 @@ def test_median_pair_jaccard_empty_comparison() -> None:
     assert ("gsa", "combined") in _group_pair_labels(("endpoint", "gsa", "combined"))
 
 
+def test_compare_breakpoints_one_to_one_symmetric() -> None:
+    from src.ChangepointAnalysis.detection import compare_breakpoints
+
+    t = np.array([0.0, 1.0])
+    # Three A events pile onto one B event within tolerance — many-to-one must
+    # not inflate n_shared.
+    a = [10, 20, 30]
+    b = [10]
+    ab = compare_breakpoints(a, b, tolerance=50, time_arr=t)
+    ba = compare_breakpoints(b, a, tolerance=50, time_arr=t)
+    assert ab["n_shared"] == ba["n_shared"] == 1
+    assert ab["jaccard"] == pytest.approx(1 / 3)
+    assert ba["jaccard"] == pytest.approx(1 / 3)
+    assert ab["mean_timing_offset_frames"] == pytest.approx(0.0)
+    assert ba["mean_timing_offset_frames"] == pytest.approx(0.0)
+
+    # Fuzzy but not exact: two 1-to-1 matches, Jaccard = 1.
+    close_a = [100, 400]
+    close_b = [110, 405]
+    m = compare_breakpoints(close_a, close_b, tolerance=50, time_arr=t)
+    assert m["n_shared"] == 2
+    assert m["jaccard"] == pytest.approx(1.0)
+    assert m["mean_timing_offset_frames"] == pytest.approx(7.5)
+
+    empty = compare_breakpoints([], [], tolerance=50, time_arr=t)
+    assert empty["n_shared"] == 0
+    assert empty["jaccard"] == 1.0
+    assert np.isnan(empty["mean_timing_offset_frames"])
+
+    one_empty = compare_breakpoints([10], [], tolerance=50, time_arr=t)
+    assert one_empty["n_shared"] == 0
+    assert one_empty["jaccard"] == 0.0
+    assert np.isnan(one_empty["mean_timing_offset_frames"])
+
+
 def test_canonicalize_traj_id_and_cross_dir_timing() -> None:
     from src.ChangepointAnalysis import canonicalize_traj_id, compare_changepoint_timing
 
@@ -850,7 +885,9 @@ def test_canonicalize_traj_id_and_cross_dir_timing() -> None:
     assert row["n_bkps_a"] == 2
     assert row["n_bkps_b"] == 2
     assert row["n_shared"] == 2
-    assert row["jaccard"] >= 0.5
+    assert row["jaccard"] == pytest.approx(1.0)
+    assert row["mean_timing_offset_frames"] == pytest.approx(7.5)
+    assert row["mean_timing_offset_ps"] == pytest.approx(7.5)
 
 
 def test_summarize_endpoint_cluster_proxies_schema(tmp_path: Path) -> None:

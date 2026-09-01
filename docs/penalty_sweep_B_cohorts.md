@@ -122,7 +122,7 @@ Same density, now as curves vs penalty / log(n). Timing comparisons between the 
 
 ## 6. Timing is only moderately stable at the elbow
 
-Timing Jaccard is the mean breakpoint-set overlap vs the previous grid step (tolerance = 50 frames). The plateau finder uses 0.75 as a “counts barely move” threshold.
+Timing Jaccard is the mean breakpoint-set overlap vs the previous grid step (tolerance = 50 frames). The plateau finder uses 0.75 as a “counts barely move” threshold. Current code uses 1-to-1 matching in `compare_breakpoints` ([changepoint_jaccard_metric.md](changepoint_jaccard_metric.md)); the CSVs behind these figures were written with the older formula. Elbows use counts, not this Jaccard, so operating penalties are unaffected. Consecutive Pelt steps keep many exact indices, which is the case where the old formula was already valid.
 
 ![Endpoint timing Jaccard](../output/penalty_sweep_cohort_comparison/plots/endpoint_timing_jaccard_vs_rel_penalty.png)
 
