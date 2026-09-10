@@ -101,6 +101,7 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `scripts/sweep_changepoint_penalty.py` | Sweep CLI |
 | `scripts/sweep_gsa_changepoint_penalty.py` | Per-cube GSA sweep launcher (`gsa`/`iodine`, no `--run-final`) |
 | `scripts/plot_penalty_sweep_cohorts.py` | Cross-cohort elbow / density / Jaccard figures |
+| `scripts/plot_jaccard_metric_comparison.py` | Old vs 1-to-1 Jaccard bars from GSA `all_breakpoints.csv` |
 | `scripts/cluster_changepoint_segments.py` | Cluster CLI |
 | `scripts/summarize_changepoint_results.py` | Summarize CLI |
 | `scripts/compare_changepoint_timing.py` | Post-hoc endpoint vs GSA timing comparison |

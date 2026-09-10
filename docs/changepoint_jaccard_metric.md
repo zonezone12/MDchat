@@ -1,168 +1,200 @@
-# Changepoint timing Jaccard: metric bug and impact on published tables
+# Changepoint timing Jaccard
 
 **MD_analysis — notes for talks / writeups**  
 Code: `src/ChangepointAnalysis/detection.py` (`compare_breakpoints`)  
 Used by: `compare_changepoint_timing`, `detect_trajectory_changepoints`, `penalty_sweep._breakpoint_jaccard_vs_ref`  
-Pipeline context: [changepoint_pipeline.md](changepoint_pipeline.md) (timing comparison / `cohort_timing_summary.csv`)
+Figures: `scripts/plot_jaccard_metric_comparison.py` → `docs/figures/`  
+Reads: `output/gsa_changepoints_{CUBE}/all_breakpoints.csv` and `output/endpoint_changepoints_{CUBE}/all_breakpoints.csv`  
+Pipeline context: [changepoint_pipeline.md](changepoint_pipeline.md)
 
-These notes record *what* `compare_breakpoints` used to compute, *why* that was not a pairwise Jaccard, and *how much* the **already-written** GSA / endpoint timing CSVs move under the corrected 1-to-1 definition. Detection and clustering do **not** depend on this function; only timing-comparison CSVs, Jaccard heatmaps, and the sweep’s `timing_jaccard_vs_prev` column do.
+Detection and clustering do **not** use this function. It only feeds timing CSVs, Jaccard heatmaps, and the sweep panel `timing_jaccard_vs_prev`.
 
-The function now uses greedy 1-to-1 matching (see §1). Existing `changepoint_timing_comparison.csv` / `cohort_timing_summary.csv` files under `output/` were written with the old formula and are **not** regenerated here. Recompute them from `all_breakpoints.csv` (no re-run of Pelt) after pulling the fix.
-
----
-
-## 1. What the function used to do (and what it does now)
-
-**Current code** (greedy 1-to-1): `n_shared` = matched pairs within ±tolerance; Jaccard = `n_shared / (n_a + n_b − n_shared)`; offset = mean matched-pair distance. `compare_breakpoints(A, B)` and `(B, A)` agree on those three values.
-
-**Old formula** (still in the published CSVs below):
-
-```python
-shared = sum(1 for b in bkps_a if any(abs(b - c) <= tolerance for c in bkps_b))
-union_size = len(set(bkps_a) | set(bkps_b))
-jaccard = shared / union_size
+```powershell
+python scripts/plot_jaccard_metric_comparison.py
 ```
 
-Two independent problems:
+---
 
-| Piece | What it does | Why that is wrong |
-|-------|----------------|-------------------|
-| **Numerator `n_shared`** | Count of A-points that have *some* B-point within ±50 frames (many-to-one allowed) | Not a set intersection; several A events can claim the same B event |
-| **Denominator** | Exact set union `|A ∪ B|` | Does not compose with a fuzzy numerator. Off-by-one-frame matches inflate the union |
-| **Offset** | Mean nearest-neighbor distance A→B (Chamfer), including unmatched points | `compare_breakpoints(A, B)` ≠ `compare_breakpoints(B, A)` |
 
-Published group order is alphabetical (`combined` before `gsa` before `iodine` before `na_water`), so the A→B direction is systematic, not random.
 
-### Corrected definition (now in `compare_breakpoints`)
+## 1. Metric
 
-Greedy 1-to-1 matching of breakpoints within ±50 frames (sort candidate pairs by distance, never reuse a point). Then:
+Greedy 1-to-1 matching within ±50 **original trajectory frames** (sort candidate pairs by distance; each breakpoint used at most once):
 
-- `n_shared` = number of matched pairs
-- Jaccard = `n_shared / (n_a + n_b − n_shared)`
-- Offset = mean distance of the matched pairs (NaN if none)
 
-When every match is an **exact** frame identity, old Jaccard already equals this. Bias in the CSVs below appears only when matches are within tolerance but not the same index.
+| Field      | Definition                                 |
+| ---------- | ------------------------------------------ |
+| `n_shared` | Number of matched pairs                    |
+| Jaccard    | `n_shared / (n_a + n_b − n_shared)`        |
+| Offset     | Mean distance of those pairs (NaN if none) |
+
+
+`compare_breakpoints(A, B)` and `(B, A)` agree on those three values.
+
+The previous formula mixed a fuzzy A→B many-to-one count with an exact-set union, and scored Chamfer offset A→B only. That pulled Jaccard down and made offsets incomparable across pairs with different event rates.
+
+Endpoint detection is stride-5 (1000 signal rows); GSA is every frame (5000). Both `all_breakpoints.csv` files store the original `frame` column, so endpoint vs GSA is compared on that axis, not on `signal_index`.
 
 ---
 
-## 2. Headline
 
-**Pair rankings hold. Absolute Jaccard is too low. Timing offsets are the worse metric.**
 
-Recomputed from `output/gsa_changepoints_{CUBE}/all_breakpoints.csv` for BHHpH, BHHpM, BMHpH, BMHpM, BMMpH, BMMpM: **1812 trajectory-pairs**, tolerance 50 frames.
+## 2. GSA group pairs
 
-| Check | Result |
-|-------|--------|
-| Spearman (published J vs 1-to-1 J) | **0.97** |
-| Group-pair rank order | Unchanged on 5/6 cubes; BMMpH swaps 4th/5th among na_water pairs |
-| Combined–gsa median J (pooled) | **0.48 → 0.63** (+0.15) |
-| Rows with `n_shared(A,B) ≠ n_shared(B,A)` | **57%** |
-| Rows with `|J(A,B) − J(B,A)| > 0.10` | **0.4%** (max 0.14) |
-| Mean fuzzy-but-not-exact matches per pair | **8.5** |
+`compare_changepoint_timing` was run on the existing `gsa_changepoints_{CUBE}/all_breakpoints.csv` files (same Pelt breakpoints as before) and overwrote only the timing products: `changepoint_timing_comparison.csv`, `cohort_timing_summary.csv`, `plots/cohort_jaccard_heatmap.png`. Six cubes, **1812** trajectory-pairs (302 traj × 6 pairs), tolerance 50 frames.
 
-The mixed fuzzy/exact Jaccard is the **dominant** bias: the exact union is too large, so published J is pulled **down**, not up. Asymmetry of `n_shared` is common but usually 1–2 events; it rarely moves Jaccard by more than 0.05 (12% of rows).
+The GSA **Pelt sweep was cancelled**. `penalty_sweep/penalty_sweep_summary.csv` and `penalty_sweep_overview.png` for GSA were **not** touched (still 2026-08-31).
 
----
+Numbers below are 1-to-1. Grey bars in the figures are the old formula on the same breakpoint lists.
 
-## 3. Pooled GSA group pairs (six cubes, 302 traj each)
+### Pooled (302 traj per pair)
 
-Median Jaccard and median offset. Published = current `compare_breakpoints`. Corrected = 1-to-1 match as above.
 
-| Pair | Med J published | Med J 1-to-1 | Δ | n_shared pub / 1-to-1 | Rows with n_shared A≠B | Med offset A→B / B→A / sym (frames) |
-|------|----------------:|-------------:|--:|----------------------:|-----------------------:|------------------------------------:|
-| combined–gsa | 0.48 | 0.63 | +0.15 | 20 / 20 | 52% | 20 / 42 / 31 |
-| combined–iodine | 0.30 | 0.36 | +0.07 | 14 / 13 | 64% | 50 / 67 / 61 |
-| gsa–iodine | 0.27 | 0.33 | +0.06 | 15 / 14 | 69% | 61 / 62 / 65 |
-| combined–na_water | 0.22 | 0.25 | +0.04 | 7 / 7 | 40% | 133 / 54 / 97 |
-| gsa–na_water | 0.21 | 0.23 | +0.02 | 8 / 7 | 50% | 149 / 48 / 101 |
-| iodine–na_water | 0.20 | 0.20 | ~0 | 8 / 6 | 65% | 154 / 55 / 107 |
+| Pair              | Median J (old → 1-to-1) | Mean J | Median n_shared | Median matched offset (frames) |
+| ----------------- | ----------------------- | ------ | --------------- | ------------------------------ |
+| combined–gsa      | 0.48 → **0.63**         | 0.62   | 20              | 7.8                            |
+| combined–iodine   | 0.30 → 0.36             | 0.36   | 13              | 17                             |
+| gsa–iodine        | 0.27 → 0.33             | 0.33   | 14              | 22                             |
+| combined–na_water | 0.22 → 0.25             | 0.26   | 7               | 21                             |
+| gsa–na_water      | 0.21 → 0.23             | 0.24   | 7               | 21                             |
+| iodine–na_water   | 0.20 → 0.20             | 0.20   | 6               | 21                             |
 
-Combined still tracks gsa more than iodine or na_water. Do **not** quote published Jaccard as an overlap fraction. Do **not** compare timing offsets across pairs with different event rates: when A is sparser the published offset is optimistic; when A is denser (anything vs na_water) it is 2–3× too large.
 
----
+Combined still tracks gsa more than iodine or na_water. Matched-pair offsets sit in a narrow band (~8–22 frames). Old Chamfer offsets spanned 20–154 frames depending on which set was larger.
 
-## 4. combined–gsa by cube
+![Median Jaccard by GSA group pair](figures/jaccard_by_pair_old_vs_1to1.png)
 
-This is the pair the heatmap and writeups treat as “GSA geometry vs the joint signal.” Every cube moves the same way.
+### combined–gsa by cube
 
-| Cube | Med J published | Med J 1-to-1 | Δ |
-|------|----------------:|-------------:|--:|
-| BHHpH | 0.53 | 0.70 | +0.18 |
-| BHHpM | 0.50 | 0.69 | +0.18 |
-| BMHpH | 0.47 | 0.61 | +0.14 |
-| BMHpM | 0.46 | 0.61 | +0.15 |
-| BMMpH | 0.46 | 0.59 | +0.11 |
-| BMMpM | 0.45 | 0.57 | +0.11 |
 
-Published `cohort_timing_summary.csv` values match the “published” column (e.g. BHHpH combined–gsa median 0.528).
+| Cube  | n   | Median J (old → 1-to-1) |
+| ----- | --- | ----------------------- |
+| BHHpH | 50  | 0.53 → **0.70**         |
+| BHHpM | 50  | 0.50 → **0.69**         |
+| BMHpH | 51  | 0.47 → 0.61             |
+| BMHpM | 50  | 0.46 → 0.61             |
+| BMMpH | 50  | 0.46 → 0.59             |
+| BMMpM | 51  | 0.45 → 0.57             |
+
+
+![Median combined–gsa Jaccard by cube](figures/jaccard_combined_gsa_by_cube.png)
+
+BHHpH `109345_mdcrd_v`, combined vs gsa (22 vs 28 breakpoints): 21 one-to-one matches, Jaccard **0.72**, mean matched offset 6.7 frames.
 
 ---
 
-## 5. Worked trajectory: BHHpH `109345_mdcrd_v`, combined vs gsa
 
-22 combined breakpoints, 28 gsa.
 
-- All 22 combined points have a gsa neighbor within 50 frames.
-- Swapping arguments still gives `n_shared = 22` — this row does **not** show the n_shared asymmetry.
-- Exact intersection 13, exact union 37 → published J = 22/37 = **0.59**.
-- 1-to-1 matched 21 (13 exact + 8 within ±50) → J = 21/(22+28−21) = **0.72**.
-- Offset: combined→gsa **8.2** frames vs gsa→combined **47.7** frames (symmetric Chamfer 28; matched-pair mean 6.7).
+## 3. Endpoint vs GSA (`endpoint_changepoints_B*`)
 
-The extra six gsa points have no partner, so A→B Chamfer looks tight and B→A looks late. Cohort “mean timing offset” for this pair is whichever direction alphabetical order picked.
+`endpoint_changepoints_{CUBE}` has only the `endpoint` group, so pairwise Jaccard is vs `gsa_changepoints_{CUBE}` on original `frame` (±50). **1100** trajectory-pairs (275 overlapping traj × 4 pairs). Cube overlap: BHHpH/BHHpM/BMHpM 50, BMHpH 51, BMMpH 44, BMMpM 30.
 
----
+Endpoint has ~10 breakpoints per trajectory; GSA `gsa` / `combined` have ~20–28. Overlap is therefore low even with the 1-to-1 formula. Combined still ranks first vs endpoint.
 
-## 6. Where argument order actually bites
 
-Worst swaps are unbalanced pairs with the **larger** set as `group_a` (alphabetical: iodine or gsa vs na_water). Several points in the dense set can sit within 50 frames of the same sparse-set event.
+| Pair              | n   | Median J (old → 1-to-1) | Mean J | Median n_shared | Median matched offset (frames) |
+| ----------------- | --- | ----------------------- | ------ | --------------- | ------------------------------ |
+| combined–endpoint | 275 | 0.21 → **0.23**         | 0.24   | 5               | 12.5                           |
+| endpoint–gsa      | 275 | 0.15 → **0.18**         | 0.19   | 5               | 14                             |
+| endpoint–na_water | 275 | 0.12 → 0.14             | 0.16   | 2               | 24                             |
+| endpoint–iodine   | 275 | 0.09 → 0.10             | 0.11   | 3               | 25                             |
 
-| Cube / traj | Pair (A, B) | n_A / n_B | n_shared A→B / B→A / 1-to-1 | J pub / rev / 1-to-1 |
-|-------------|-------------|----------:|----------------------------:|---------------------:|
-| BMHpH 932487 | iodine, na_water | 25 / 11 | 11 / 6 / 6 | 0.31 / 0.17 / 0.20 |
-| BHHpM 178323 | gsa, na_water | 30 / 14 | 13 / 7 / 7 | 0.30 / 0.16 / 0.19 |
-| BMMpH 932487 | combined, iodine | 13 / 22 | 9 / 13 / 9 | 0.26 / 0.38 / 0.35 |
-| BMHpM 907683 | gsa, na_water | 33 / 12 | 15 / 10 / 10 | 0.34 / 0.23 / 0.29 |
 
-Max Jaccard asymmetry among 1812 GSA rows: **0.14**. Max `n_shared` difference: **6**.
+![Median Jaccard by pair, endpoint vs GSA](figures/jaccard_endpoint_pairs_old_vs_1to1.png)
 
----
+### By cube
 
-## 7. Sparse runs (endpoint vs GSA, legacy `output/changepoints`)
 
-`output/endpoint_vs_gsa_timing_BMMpM` and `output/changepoints` have ~2–3 breakpoints per group. Many-to-one never fires (`n_shared` is fully symmetric). The fuzzy/exact mix still understates Jaccard:
+| Cube  | n   | endpoint–gsa (old → 1-to-1) | combined–endpoint (old → 1-to-1) |
+| ----- | --- | --------------------------- | -------------------------------- |
+| BHHpH | 50  | 0.23 → **0.29**             | 0.29 → **0.35**                  |
+| BHHpM | 50  | 0.15 → 0.18                 | 0.19 → 0.21                      |
+| BMHpH | 51  | 0.16 → 0.19                 | 0.23 → 0.24                      |
+| BMHpM | 50  | 0.18 → 0.21                 | 0.24 → **0.29**                  |
+| BMMpH | 44  | 0.11 → 0.12                 | 0.14 → 0.16                      |
+| BMMpM | 30  | 0.10 → 0.11                 | 0.16 → 0.13                      |
 
-| Pair (BMMpM endpoint vs GSA) | Med J published | Med J 1-to-1 |
-|------------------------------|----------------:|-------------:|
-| endpoint–gsa (n = 30) | 0.50 | 0.67 |
-| combined–endpoint (n = 30) | 0.50 | 0.73 |
-| combined–gsa (n = 39) | 0.50 | 0.67 |
 
-The “median Jaccard 0.5” in `endpoint_vs_gsa_timing_BMMpM/cohort_timing_summary.csv` is the same artefact as on the dense GSA tables, just with fewer events.
+BMMpM combined–endpoint is the one cube where 1-to-1 is *lower* than the old formula (many-to-one had inflated `n_shared` on a sparse pair).
 
----
+![Median endpoint–gsa Jaccard by cube](figures/jaccard_endpoint_gsa_by_cube.png)
 
-## 8. Penalty sweep
+![Median combined–endpoint Jaccard by cube](figures/jaccard_combined_endpoint_by_cube.png)
 
-Elbows are computed from **breakpoint counts vs log-penalty**, not from Jaccard — [penalty_sweep_B_cohorts.md](penalty_sweep_B_cohorts.md) operating penalties are untouched.
+Chamfer offsets on these pairs are not usable. Combined→endpoint median Chamfer is **347** frames vs **15** frames the other way; matched-pair mean is **12.5**. Endpoint→gsa is the reverse (18 vs 375; matched **14**).
 
-`timing_jaccard_vs_prev` uses `compare_breakpoints` on consecutive grid steps. Per-penalty breakpoint *lists* were not written (`penalty_sweep_by_trajectory.csv` has counts only), so existing sweep CSVs cannot be recomputed from artifacts; they still contain the old formula. Re-running the sweep would pick up the fix.
+![Timing offset, endpoint vs GSA](figures/offset_endpoint_pairs_old_vs_matched.png)
 
-Consecutive Pelt steps keep many **exact** indices, which is the case where published Jaccard is already valid. The 0.75 plateau threshold may be slightly conservative if shifted (non-exact) matches are common; it cannot move the elbow. The high-penalty tail still looks “stable” because almost nothing moves — that interpretation in the sweep notes does not depend on the Jaccard formula.
+The earlier `output/endpoint_vs_gsa_timing_BMMpM` table (combined–endpoint 0.73, endpoint–gsa 0.67) used `output/changepoints`, a sparse ~500-frame GSA run with ~2–3 breakpoints per group. That is **not** the B* GSA operating set.
 
 ---
 
-## 9. What to trust in tables already on disk
 
-**Trust**
 
-- Pair ranking: combined tracks gsa more than iodine or na_water.
-- The statement that cross-group agreement is only moderate (corrected combined–gsa is ~0.6, not ~1).
-- Penalty elbows and breakpoint counts.
+## 4. Penalty-sweep overview
 
-**Do not quote from old CSVs**
+`penalty_sweep_overview.png` has a **timing Jaccard vs previous grid step** panel (`compare_breakpoints` on consecutive Pelt outputs). Breakpoint *lists* were not stored — `penalty_sweep_by_trajectory.csv` has counts only — so that panel needs a Pelt re-sweep, not a CSV rewrite.
 
-- Published Jaccard as |A ∩ B| / |A ∪ B|.
-- `mean_timing_offset_*` compared across pairs with different event rates.
-- `compare_breakpoints(A, B)` vs the swapped call as the same number (old formula only).
 
-After this fix, re-running `scripts/compare_changepoint_timing.py` (or `summarize_changepoint_results.py`) on existing `all_breakpoints.csv` directories rewrites the timing CSVs and heatmaps. Detection does not need to be re-run.
+| Family                                           | Overview PNG         | Status                                                                                                                                                                                                                               |
+| ------------------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Endpoint (6 cubes, 1000 frames, `endpoint` only) | Rewritten 2026-09-01 | Re-swept on the saved grids. Elbows unchanged.                                                                                                                                                                                       |
+| GSA (6 cubes, 5000 frames, `gsa` + `iodine`)     | Unchanged            | Not re-swept. rbf Pelt on 5000-frame signals is the cost (grid is capped at 2.5× log(n) because the high end slows ~40×). Consecutive steps keep many exact indices, so the old `timing_jaccard_vs_prev` is already close to 1-to-1. |
+| `output/changepoints/penalty_sweep`              | Unchanged            | Historic four-group run; not the B operating set.                                                                                                                                                                                    |
+
+
+§2 is the GSA timing CSV rewrite. Cancelling the GSA sweep did not roll it back.
+
+### Endpoint sweep, after the fix
+
+Mean step-to-step Jaccard rose **+0.03 to +0.05**. More steps sit above the 0.75 plateau threshold. Count-vs-log-penalty **elbows did not move**.
+
+
+| Cube  | Elbow J (old → new) | Steps with J ≥ 0.75 (old → new) |
+| ----- | ------------------- | ------------------------------- |
+| BHHpH | 0.77 → 0.81         | 9 → 14                          |
+| BHHpM | 0.73 → 0.81         | 9 → 14                          |
+| BMHpH | 0.73 → 0.80         | 8 → 11                          |
+| BMHpM | 0.78 → 0.78         | 9 → 14                          |
+| BMMpH | 0.75 → 0.78         | 9 → 10                          |
+| BMMpM | 0.64 → 0.69         | 10 → 11                         |
+
+
+A GSA re-sweep would be the same kind of lift, not a change in operating penalty ([penalty_sweep_B_cohorts.md](penalty_sweep_B_cohorts.md)).
+
+Cohort overlay: `python scripts/plot_penalty_sweep_cohorts.py` — endpoint curves use the new Jaccard; GSA curves are the previous CSVs.
+
+---
+
+
+
+## 5. Old formula vs 1-to-1 (same breakpoint tables)
+
+
+| Check | GSA pairs | Endpoint vs GSA |
+|-------|-----------|-----------------|
+| Headline median J | combined–gsa 0.48 → **0.63** | endpoint–gsa 0.15 → **0.18** |
+| Spearman old vs 1-to-1 | 0.97 | 0.99 |
+| Rows with `n_shared(A,B) ≠ n_shared(B,A)` | 57% | 32% |
+| abs J(A,B)−J(B,A) greater than 0.10 | 0.4% | 0.3% |
+| Pair rank order | Unchanged on 5/6 cubes (BMMpH swaps 4th/5th among na_water pairs) | Combined first on every cube |
+
+
+Pair **ranking** was already right. Absolute Jaccard was too low because the exact union counted fuzzy matches as distinct. Offsets were the badly biased number when counts differed.
+
+![Timing offset by GSA group pair](figures/offset_by_pair_old_vs_matched.png)
+
+Do not quote Jaccard or Chamfer offsets from CSVs written before the fix. Regenerating from `all_breakpoints.csv` does not require Pelt:
+
+```powershell
+python scripts/plot_jaccard_metric_comparison.py
+
+python scripts/compare_changepoint_timing.py `
+    --changepoints-dirs output/gsa_changepoints_BHHpH `
+    --output-dir output/gsa_changepoints_BHHpH
+
+python scripts/compare_changepoint_timing.py `
+    --changepoints-dirs output/endpoint_changepoints_BHHpH output/gsa_changepoints_BHHpH `
+    --output-dir output/endpoint_vs_gsa_timing_BHHpH
+```
+

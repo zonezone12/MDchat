@@ -53,7 +53,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--input-dir",
         default="output/gsa_features",
-        help="Directory with *_gsa_features.csv files",
+        help="Directory with feature CSVs",
+    )
+    p.add_argument(
+        "--suffix",
+        default="_gsa_features.csv",
+        help="Feature-CSV suffix (default: _gsa_features.csv; use _endpoint_features.csv for endpoint)",
     )
     p.add_argument(
         "--output-dir",
@@ -183,9 +188,9 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_files = discover_feature_csvs(input_dir)
+    csv_files = discover_feature_csvs(input_dir, suffix=args.suffix)
     if not csv_files:
-        print(f"No *_gsa_features.csv in {input_dir}", file=sys.stderr)
+        print(f"No *{args.suffix} in {input_dir}", file=sys.stderr)
         sys.exit(1)
 
     detection = ChangepointConfig(

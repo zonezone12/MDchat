@@ -1,6 +1,7 @@
 test/
 output/
 traj/
+docs/figures/
 # Trajectory binaries (often > GitHub 100 MB limit; use Git LFS or external storage)
 *.xtc
 *.dcd
