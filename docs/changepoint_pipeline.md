@@ -93,10 +93,11 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `src/ChangepointAnalysis/cluster_k_diagnostics.py` | Silhouette-vs-k / switching / geometry comparison across B* cohorts (`group=endpoint` or `gsa`) |
 | `src/ChangepointAnalysis/gsa_cohort_run.py` | Split mixed `gsa_features_step1` CSVs by cube; run per-cube detect+cluster |
 | `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation`, `summarize_endpoint_cluster_proxies`, `compare_endpoint_clusters_across_cohorts`, segment-η² timeline panels |
-| `src/ChangepointAnalysis/endpoint_features.py` | Ring-site feature extraction → `*_endpoint_features.csv` |
+| `src/ChangepointAnalysis/murata_d1.py` | Remap stored `endpoint_dist_*` columns onto six equatorial Murata d1 contacts |
 | `src/ChangepointAnalysis/transition_attribution.py` | Attribute cluster transitions → ranked site-pair drivers |
 | `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
-| `src/EndpointAnalyzer/endpoints_finder.py` | `find_endpoint_sites` / ring-system grouping |
+| `src/EndpointAnalyzer/gsa_site_map.py` | Canonical Murata roles (R1/R2/R3, Ph, Py⁺); same index on every B* cube |
+| `src/EndpointAnalyzer/endpoints_finder.py` | Hull fallback `find_endpoint_sites` / ring-system grouping |
 | `scripts/changepoint_feature_groups.py` | Detect CLI |
 | `scripts/sweep_changepoint_penalty.py` | Sweep CLI |
 | `scripts/sweep_gsa_changepoint_penalty.py` | Per-cube GSA sweep launcher (`gsa`/`iodine`, no `--run-final`) |
@@ -110,6 +111,7 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `scripts/run_gsa_step1_cluster_k.py` | Per-cube GSA changepoint from `gsa_features_step1` + k-diagnostics |
 | `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features, one cube per `--features-dir`) |
 | `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
+| `scripts/remap_murata_d1.py` | Map stored site-pair columns onto six equatorial Murata d1 contacts |
 | `src/mdchat/skills/changepoint_pipeline.py` | MDChat skills |
 | `tests/test_changepoint_pipeline.py` | Synthetic regression tests |
 
@@ -172,26 +174,52 @@ Use this path when you want to ask whether **endpoint geometry alone** recovers 
 
 A cation–π contact is measured from the **ring centroid**, not from individual ring atoms. The extractor therefore:
 
-1. Finds endpoint tips via `EndpointsFinder`.
-2. Groups tips into **sites**: fused ring systems (union-find over RDKit rings) become one multi-atom site; non-ring tips stay singleton atom sites.
-3. Computes **site-centroid ↔ site-centroid** distances each frame (`EndpointAnalyzerObserver(use_ring_centroids=True)`).
+1. Maps each GSA monomer to **canonical Murata roles** (`src/EndpointAnalyzer/gsa_site_map.py`): pole **R1**, equatorial **R2**/**R3**, terminal **Ph**, and the two **Py⁺** rings. Hull-order `s3`/`s7` indices are **not** used for GSA cubes — they shifted when a methyl converted a ring site into an atom site (BMHpM vs BMMpH looked like the same 4+4 map but were chemically different).
+2. Computes **site-centroid ↔ site-centroid** distances each frame (`EndpointAnalyzerObserver(use_ring_centroids=True)`).
+
+Fixed site indices on every B\* cube (core pattern `Ph-linker — R1 — Py-linker — R3 — Py-linker — R2`):
+
+| Index | Role | Kind | Plot label | Chemistry |
+|------:|------|------|------------|-----------|
+| 0 | `ph` | ring | Ph | Terminal phenyl |
+| 1 | `ph_para` | atom | Ph-p | Para carbon of Ph |
+| 2 | `py_eq` | ring | Py-eq | Equatorial Py⁺ |
+| 3 | `r2` | atom | R2 | Equatorial R2 (methyl C if CH3, para C if H) |
+| 4 | `r3` | atom | R3 | Equatorial R3 |
+| 5 | `py_pole` | ring | Py-pole | Pole-side Py⁺ |
+| 6 | `r1` | atom | R1 | Pole R1 (cube vertex) |
+| 7 | `r1_ring` | ring | R1-ring | Pole aryl |
+
+Cohort names decode as `B[eq][eq]p[pole]` (H = hydrogen, M = methyl). Methyl occupancy of those roles:
+
+| Cube | Methyl at | Murata |
+|------|-----------|--------|
+| BHHpH | none | not in Murata |
+| BHHpM | R1 | 3₆ |
+| BMHpH | R3 | not in Murata |
+| BMHpM | R1 + R3 | **2₆** (R2=H, R3=CH3) |
+| BMMpH | R2 + R3 | not in Murata |
+| BMMpM | R1 + R2 + R3 | 1₆ |
 
 This maps chemically to:
 
 | Paper parameter | Endpoint-site proxy |
 |-----------------|---------------------|
-| **Raw endpoint atoms** `s3:A` / `s7:A` | Singleton atom endpoint sites (exocyclic / tip carbons) |
-| **Paper d1** (open cation–π ≈ **4.5–5.5 Å**) | One-step-in **ring neighbor** of each `s3:A` / `s7:A`, distance `paper_d1_m{i}s3_m{j}s7` / `paper_d1_m{i}s7_m{j}s3` |
-| Other openings / elongation | Additional `endpoint_dist_*` site–site columns (ring centroids and other atom sites) |
+| **R1 / R2 / R3** | Canonical atom sites (methyl carbon if CH3, para carbon if H) |
+| **Paper d1** (compact **4.5–5.5 Å**, elongated **≥ 7.0 Å**) | Ipso carbons C2–C3 of **R2** and **R3**, columns `paper_d1_m{i}r2_m{j}r3` / `paper_d1_m{i}r3_m{j}r2` |
+| **Ph / Py⁺** | Ring-centroid sites for cation–π geometry |
+| Other openings / elongation | Additional `endpoint_dist_*` site–site columns |
 
-**Important:** the paper’s d1 is **not** the raw `s3↔s7` endpoint-atom distance. Each endpoint atom is stepped one bond inward onto its bonded ring atom; those ring atoms define d1. Generic `step_back_from_terminals` does not perform this step because `s3`/`s7` are degree-4 carbons.
+**Important:** Murata's d1 is the C2–C3 pair across an equatorial edge (R2 of one monomer interlocking with R3 of the neighbor). It is **not** hull indices `s3`/`s7` and not a pole–equator distance. When R=H the ipso carbon *is* the endpoint atom; when R=CH3 d1 steps in from the methyl carbon onto that ipso carbon.
 
-We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å). For motif reading, flag a corrected d1 contact as **open cation–π** when its distance sits in **4.5–5.5 Å** (`closed` &lt; 4.5, `elongated` &gt; 5.5).
+**QC plot (`endpoint_sites.png`).** Blue = ring-system site; orange = atom site. Atom highlights are drawn **on top of** ring highlights, so when R=H the para carbon (orange **R1** / **R2** / **R3** / **Ph-p**) remains visible on its blue ring rather than being covered by **R1-ring** / **Ph**. Labels follow the same order (orange text last). Existing `*_endpoint_features.csv` files are still from the old hull-index run until you re-extract.
+
+We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å). For motif reading, flag a corrected d1 contact as **compact** when its distance sits in **4.5–5.5 Å** (`closed` &lt; 4.5, `elongated` &gt; 5.5). Note: the pipeline still names the 4.5–5.5 Å bin `paper_d1_n_open` (inverted vs Murata; see G0).
 
 ```mermaid
 flowchart TD
   topo["topology + trajectory"] --> sel["resolve_selections → monomers"]
-  sel --> sites["find_endpoint_sites → ring + atom sites"]
+  sel --> sites["canonical GSA map → R1/R2/R3 + Ph/Py+"]
   sites --> obs["EndpointAnalyzerObserver use_ring_centroids=True"]
   obs --> csv["*_endpoint_features.csv + endpoint_sites.csv"]
   csv --> pipe["ChangepointPipeline groups=endpoint"]
@@ -251,9 +279,9 @@ IDs for bare `mdcrd_v` files become `{parent_folder}_mdcrd_v` (e.g. `109345_mdcr
 | Artifact | Role |
 |----------|------|
 | `endpoint_features/*_endpoint_features.csv` | Per-frame site-distance features (+ `paper_d1_*` when enabled) |
-| `endpoint_features/endpoint_sites.csv` | Site map (monomer, kind, atom ids; s3/s7 rows include `d1_ring_atom_id`) |
-| `endpoint_features/paper_d1_atoms.csv` | Traceability: endpoint atom → one-step-in ring neighbor |
-| `endpoint_features/endpoint_sites.png` | Visual QC from topology (blue=ring system, orange=atom site); one file per prmtop |
+| `endpoint_features/endpoint_sites.csv` | Site map: `monomer`, `site_index`, `role` (`r1`/`r2`/`r3`/`ph`/…), `label`, `kind`, `atom_ids` |
+| `endpoint_features/paper_d1_atoms.csv` | R2/R3 ipso carbons (C2–C3); `endpoint_atom_id` vs `d1_ring_atom_id` when R=CH3 |
+| `endpoint_features/endpoint_sites.png` | Topology QC: blue=ring, orange=atom **on top** (R=H para carbons stay orange) |
 | `all_breakpoints.csv`, `all_segment_stats.csv`, … | Standard changepoint tables (`group=endpoint`; segment stats include per-monomer-pair aggregates) |
 | `clusters/` | Segment clusters (chosen-k under `clusters/endpoint/`; `by_k/` is inspection-only) |
 | `endpoint_cluster_deformation_summary.csv` | Clusters ordered by mean endpoint distance (+ optional RMSD) |
@@ -407,22 +435,22 @@ See [endpoint_cluster_discrimination.md §11](endpoint_cluster_discrimination.md
 
 ### Feature column schema (`*_endpoint_features.csv`)
 
-### Feature column schema (`*_endpoint_features.csv`)
-
 | Columns | Meaning |
 |---------|---------|
 | `traj_id`, `frame`, `time_ps` | Metadata |
 | `endpoint_dist_{i}_{j}_{min,mean,max}` | Aggregates over all site-pairs between monomers *i* and *j* |
 | `endpoint_dist_{mean,min,max,std}` | Assembly-wide aggregates |
 | `endpoint_dist_{i}s{a}_{j}s{b}` | Optional raw site–site distance (`--include-site-pairs`) |
-| `paper_d1_m{i}s3_m{j}s7` / `paper_d1_m{i}s7_m{j}s3` | Corrected directional d1 (ring-neighbor of s3/s7); enabled by default |
+| `paper_d1_m{i}r2_m{j}r3` / `paper_d1_m{i}r3_m{j}r2` | Murata d1: R2/R3 ipso carbons (C2–C3); enabled by default |
 | `paper_d1_min`, `paper_d1_n_open`, … | Assembly summaries over all directional d1 contacts |
 
-### Paper d1 (corrected cation–π distance)
+`endpoint_sites.csv` includes `role` so site index 3 is **R2** and index 6 is **R1** on every B* cohort. Hull fallback (non-GSA monomers) leaves `role` blank and labels sites `s{k}:R` / `s{k}:A`.
 
-For each monomer, sites `s3:A` and `s7:A` are tip/exocyclic carbons. The paper defines **d1** on the ring atom bonded one step inward from each of those tips.
+### Paper d1 (R2/R3 equatorial ipso carbons)
 
-When methyl (or other exocyclic) tips are absent—common for BHHpM—the s3/s7 site index may collapse to a **multi-atom ring site**. Paper-d1 resolution then falls back to exocyclic C tips on that ring, or to the hull/candidate tooth ring carbon on that site (`endpoint_kind` = `exocyclic_tip` or `ring_site` in `paper_d1_atoms.csv`). For `ring_site`, the tooth ring carbon **is** the d1 atom (no further inward step — that would be ambiguous on a 6-membered ring).
+Murata's **d1** is C2–C3: the ipso carbons bonding to **R2** and **R3**, across an equatorial edge where those groups interlock. The extractor takes those atoms from the canonical GSA map (`endpoint_kind` = `methyl` or `hydrogen` in `paper_d1_atoms.csv`). Hull indices `s3`/`s7` are not used for GSA cubes.
+
+Legacy `paper_d1_m{i}s3_m{j}s7` columns may still appear for non-GSA monomers (hull fallback). Old hull-index feature CSVs under `output/endpoint_changepoints_*/` are **not** these columns until you re-run extraction.
 
 | State | Distance window |
 |-------|-----------------|
@@ -431,6 +459,52 @@ When methyl (or other exocyclic) tips are absent—common for BHHpM—the s3/s7 
 | `elongated` | &gt; 5.5 Å |
 
 Outputs: `paper_d1_atoms.csv` (atom map), `paper_d1_*` columns in the features CSV, `paper_d1_segment_states.csv`, and d1 cylinders in the transition NGL HTML (green=open, gray=closed, magenta=elongated).
+
+### Remap stored pairs → Murata equatorial d1
+
+Existing `*_endpoint_features.csv` files still use hull `s3`/`s7` paper-d1 columns (all 30 monomer-pair directions). Do **not** re-read trajectories. `scripts/remap_murata_d1.py` matches hull sites to canonical **R2/R3**, keeps the **six equatorial** interlocking contacts (Hungarian assignment on median R2(i)→R3(j) distance), and classifies with Murata's windows — not the inverted `paper_d1_n_open` bin:
+
+| State | Distance |
+|-------|----------|
+| compact | 4.5–5.5 Å |
+| elongated | ≥ 7.0 Å |
+| short / intermediate | &lt; 4.5 Å or 5.5–7.0 Å |
+
+```powershell
+python scripts/remap_murata_d1.py `
+    --output-root output `
+    --out-dir output/murata_d1
+```
+
+**Equatorial edges (same 6-cycle on every cube):** 0→4, 1→5, 2→3, 3→1, 4→2, 5→0. Example column: `endpoint_dist_0s2_4s7` on BHHpH is monomer 0 R2 with monomer 4 R3.
+
+**Cohort result** (`output/murata_d1/murata_d1_summary.csv`, ~50 k frames × 6 edges):
+
+| Cube | Median d1 (Å) | Compact 4.5–5.5 | Elongated ≥ 7 | Stored pair |
+|------|---------------|-----------------|---------------|-------------|
+| BHHpH | 4.97 | 77% | 10% | R2/R3 aryl (H) |
+| BHHpM | 4.99 | 75% | 14% | R2/R3 aryl (H) |
+| BMHpH | 5.04 | 37% | 8% | R2 aryl – R3 methyl |
+| BMHpM | 5.06 | 37% | 8% | R2 aryl – R3 methyl |
+| BMMpH | 4.30 | 27% | 0.3% | R2 methyl – R3 methyl |
+| BMMpM | 4.33 | 27% | 2% | R2 methyl – R3 methyl |
+
+![Remapped equatorial d1](../output/murata_d1/plots/murata_d1_overview.png)
+
+BHHpH / BHHpM (equator = H) pass Murata's compact window, with a weaker elongated shoulder near 8–9 Å. That is the sanity check the old hull `s3`/`s7` columns failed (~9–17 Å). BMH / BMM sit short because those CSVs store **methyl carbons**, not ipso C2/C3 (~0.7 Å offset). True C2–C3 for methyl cubes still needs an ipso–ipso extract.
+
+**Writes under `--out-dir`:**
+
+| Artifact | Role |
+|----------|------|
+| `{CUBE}/role_site_map.csv` | Hull `site_index` per canonical role (`r2`/`r3`/…) |
+| `{CUBE}/equatorial_edges.csv` | The six R2(i)→R3(j) columns + median Å |
+| `{CUBE}/murata_d1_frames.csv` | Per-frame `d1_e{k}_m{i}r2_m{j}r3` + `murata_d1_n_compact` / `_n_elongated` |
+| `{CUBE}/murata_d1_summary.csv` | One-row occupancy for that cube |
+| `murata_d1_summary.csv` / `equatorial_edges.csv` / `role_site_map.csv` | Stacked across cubes |
+| `plots/murata_d1_overview.png` | Histogram + compact/elongated bars |
+
+**Proxy caveat:** stored `endpoint_dist_*` values are site centroids. On BHHpH the hull kept the whole R2/R3 aryl as a ring (centroid ≈ C2–C3). When R=CH3 the site is the methyl carbon. Do not quote BMH/BMM compact fractions as Murata C2–C3 until ipso–ipso is re-extracted.
 
 ### Cluster timeline panels (segment-level η²)
 
@@ -809,7 +883,7 @@ For `group=endpoint`, summary bases are the four assembly aggregates plus every 
 
 ### `endpoint_pair_cluster_correlation.csv`
 
-Written by summarize when cluster medoid timelines are enabled. Columns include `feature`, `endpoint_label` (e.g. `M2S0-M5S0`), `eta_squared`, `epsilon_squared_kw`, `cohens_d_best`, `best_cluster`, `frame_max_abs_corr`, `rank`. Primary sort key is segment-level η².
+Written by summarize when cluster medoid timelines are enabled. Columns include `feature`, `endpoint_label` (e.g. `M2S0-M5S0`), `eta_squared`, `epsilon_squared_kw`, `cohens_d_best`, `best_cluster`, `frame_max_abs_corr`, `rank`. When `--ranking-n-permutations` > 0 (default 999), also `eta_squared_p_value`, `eta_squared_q_value` (Benjamini–Hochberg across candidates), `n_permutations`, `significant_fdr`. Primary sort key is still segment-level η². The permutation calibrates the ranking; it does not validate the clusters.
 
 ### `changepoint_timing_comparison.csv`
 
@@ -847,13 +921,27 @@ Produced by `scripts/compare_endpoint_cluster_k.py` (or `compare_endpoint_cluste
 | `silhouette_peaks.csv` | Chosen k vs global max, `curve_shape` |
 | `k_split.csv` | Ward split k=5 → k=6 (which cluster split, new sizes) |
 | `segment_dynamics.csv` | Breakpoints, whole-traj fraction, endpoint-distance span |
-| `site_and_d1.csv` | Hull ring/atom counts, s3/s7 kinds, paper-d1 open fraction |
+| `site_and_d1.csv` | Site kinds plus canonical `r1`/`r2`/`r3` methyl flags; paper-d1 open fraction. Legacy `s3s7_*` columns remain for old hull-index CSVs |
 | `k_diagnostics_summary.txt` | Human-readable dump of the tables |
 | `plots/silhouette_vs_k.png` | Overlay of silhouette curves; dashed line at chosen k |
 | `plots/segment_switching.png` | Segments/traj, whole-traj fraction, never-switch fraction |
 | `plots/paper_d1_open.png` | Closest d1 vs 4.5–5.5 Å window; fraction of open segments |
-| `plots/hull_site_kinds.png` | Stacked ring vs exocyclic atom hull sites |
+| `plots/hull_site_kinds.png` | Stacked ring vs atom sites (canonical map still reports 4 ring + 4 atom per monomer) |
 | `plots/endpoint_dist_span.png` | Range vs IQR of segment `endpoint_dist_mean` |
+
+### Chemical k-scan outputs (`output/endpoint_cluster_chemical_k/`)
+
+Produced by `scripts/compare_endpoint_cluster_k.py --chemical-scan` or `scan_chemical_separation_by_k` (MDChat: `scan_endpoint_cluster_chemical_k`). Reads existing `by_k/k_XX` labels and endpoint feature CSVs; does not re-cluster.
+
+| Artifact | Role |
+|----------|------|
+| `chemical_separation_by_k.csv` | Long table: cohort × k, silhouette, top contacts, Cohen's *d* signs, `chemical_separation`, `n_significant_fdr`, `chemical_separation_fdr` |
+| `chemical_k_peaks.csv` | Per cohort: `first_chemical_k`, `best_chemical_k`, silhouette-max k, chosen k |
+| `chemical_k_summary.txt` | Human-readable dump |
+| `plots/chemical_separation_heatmap.png` | Cohort × k, chemical_separation |
+| `plots/marked_clusters_vs_k.png` | How many clusters the top pairs mark; open circles pass |
+
+`chemical_separation` is the G3 flag (top-N pairs, min cluster size 5). `chemical_separation_fdr` is the stricter G4 version on BH-significant pairs only.
 
 ### GSA k-diagnostics outputs (`output/gsa_cluster_k_diagnostics/`)
 
@@ -883,8 +971,8 @@ Same silhouette / switching / k-split tables as the endpoint run, plus `geometry
 ## Tests
 
 ```powershell
-# Full suite (GSA + endpoint)
-python -m pytest tests/test_changepoint_pipeline.py -v
+# Full suite (GSA + endpoint + canonical site map)
+python -m pytest tests/test_changepoint_pipeline.py tests/test_gsa_site_map.py -v
 
 # Endpoint-focused only
 python -m pytest tests/test_changepoint_pipeline.py -k endpoint -v
@@ -900,6 +988,8 @@ Coverage includes:
 - Endpoint k / silhouette diagnostics (`compare_endpoint_cluster_k_diagnostics`)
 - GSA k / silhouette diagnostics (`compare_cluster_k_diagnostics`, `group="gsa"`)
 - Cube discovery from mixed `gsa_features_step1` (`discover_gsa_feature_csvs_by_cube`)
+- Canonical GSA site map vs known methyl pattern (`tests/test_gsa_site_map.py`)
+- Murata d1 remap of stored site-pair columns (`tests/test_murata_d1.py`)
 
 ---
 
@@ -913,5 +1003,7 @@ Coverage includes:
 - Cohort interpretation notes: `output/changepoints/ANALYSIS_SUMMARY.md`
 - Presentation-style writeup: `output/changepoints/CHANGPOINT_PIPELINE_PRESENTATION.md`
 - Feature extraction entry point: `scripts/compute_gsa_features.py`
-- Endpoint finder / observer: `src/EndpointAnalyzer/`
+- Remapped equatorial Murata d1 (six R2–R3 edges, no traj replay): `output/murata_d1/`
+- Canonical GSA roles (R1/R2/R3, Ph, Py⁺): `src/EndpointAnalyzer/gsa_site_map.py`
+- Endpoint finder / observer (hull fallback): `src/EndpointAnalyzer/`
 - Low-level ruptures wrapper: `src/utils/ruptures_utils.py`

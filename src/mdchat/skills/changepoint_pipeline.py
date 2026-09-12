@@ -485,11 +485,27 @@ class SummarizeChangepointResultsSkill(Skill):
             "cluster_timeline_top_pairs",
             ParamType.INTEGER,
             (
-                "Top-N endpoint_dist_{i}_{j}_mean features (by |point-biserial| "
-                "vs cluster) for timeline_cluster panels. 0 disables."
+                "Top-N endpoint features (by segment-level η² vs cluster) "
+                "for timeline_cluster panels. 0 disables."
             ),
             required=False,
             default=5,
+        ),
+        Parameter(
+            "ranking_n_permutations",
+            ParamType.INTEGER,
+            "Label-shuffle permutations for η² p-values (0 disables).",
+            required=False,
+            default=999,
+            min_value=0,
+        ),
+        Parameter(
+            "ranking_fdr_alpha",
+            ParamType.FLOAT,
+            "BH-FDR alpha for significant_fdr on ranked pairs.",
+            required=False,
+            default=0.05,
+            min_value=0.0,
         ),
     ]
     requires: List[str] = []
@@ -519,6 +535,8 @@ class SummarizeChangepointResultsSkill(Skill):
                 cluster_timeline_top_pairs=int(
                     params.get("cluster_timeline_top_pairs", 5)
                 ),
+                ranking_n_permutations=int(params.get("ranking_n_permutations", 999)),
+                ranking_fdr_alpha=float(params.get("ranking_fdr_alpha", 0.05)),
             )
         except Exception as exc:
             return SkillResult(
@@ -744,7 +762,14 @@ class EndpointChangepointSkill(Skill):
         Parameter(
             "include_paper_d1",
             ParamType.BOOLEAN,
-            "Emit corrected paper-d1 distances from s3/s7 one-step-in ring neighbors.",
+            "Emit Murata d1 (R2/R3 equatorial ipso carbons C2–C3).",
+            required=False,
+            default=True,
+        ),
+        Parameter(
+            "include_murata_criteria",
+            ParamType.BOOLEAN,
+            "Emit cation–π openings, d2, RMSD, and A/B/C1/C2/other labels.",
             required=False,
             default=True,
         ),
@@ -950,6 +975,9 @@ class EndpointChangepointSkill(Skill):
                 use_ring_centroids=bool(params.get("use_ring_centroids", True)),
                 include_site_pairs=bool(params.get("include_site_pairs", False)),
                 include_paper_d1=bool(params.get("include_paper_d1", True)),
+                include_murata_criteria=bool(
+                    params.get("include_murata_criteria", True)
+                ),
                 paper_d1_open_lo=float(params.get("paper_d1_open_lo", 4.5)),
                 paper_d1_open_hi=float(params.get("paper_d1_open_hi", 5.5)),
                 n_jobs=(
@@ -1084,6 +1112,120 @@ class CompareChangepointTimingSkill(Skill):
         )
 
 
+class ScanEndpointClusterChemicalKSkill(Skill):
+    name = "scan_endpoint_cluster_chemical_k"
+    description = (
+        "G3/G4: for each existing by_k cut (k=2–10) rank endpoint site pairs by "
+        "segment-level η² vs cluster, with a cluster-label permutation null and "
+        "BH-FDR, and flag whether clusters are chemically distinct (distinct "
+        "top contacts or mixed Cohen's d signs). Does not re-cluster. Does not "
+        "require a loaded universe."
+    )
+    category = "changepoint"
+    parameters = [
+        Parameter(
+            "output_root",
+            ParamType.FILE_PATH,
+            "Root containing endpoint_changepoints_* folders.",
+            required=False,
+            default="output",
+        ),
+        Parameter(
+            "pattern",
+            ParamType.STRING,
+            "Glob for cohort directory names.",
+            required=False,
+            default="endpoint_changepoints_B*",
+        ),
+        Parameter(
+            "out_dir",
+            ParamType.FILE_PATH,
+            "Directory for chemical-scan CSVs and plots.",
+            required=False,
+            default="output/endpoint_cluster_chemical_k",
+        ),
+        Parameter(
+            "k_min",
+            ParamType.INTEGER,
+            "Minimum k to scan.",
+            required=False,
+            default=2,
+            min_value=2,
+        ),
+        Parameter(
+            "k_max",
+            ParamType.INTEGER,
+            "Maximum k to scan.",
+            required=False,
+            default=10,
+            min_value=2,
+        ),
+        Parameter(
+            "n_permutations",
+            ParamType.INTEGER,
+            "Label-shuffle permutations for η² p-values.",
+            required=False,
+            default=999,
+            min_value=0,
+        ),
+        Parameter(
+            "min_cluster_size",
+            ParamType.INTEGER,
+            "Ignore clusters smaller than this (outlier trap).",
+            required=False,
+            default=5,
+            min_value=1,
+        ),
+    ]
+    requires: List[str] = []
+    produces = ["endpoint_chemical_k_scan"]
+
+    def execute(self, context: "AnalysisContext", **params: Any) -> SkillResult:
+        from pathlib import Path
+
+        from src.ChangepointAnalysis import (
+            discover_endpoint_k_cohort_dirs,
+            scan_chemical_separation_by_k,
+        )
+
+        root = Path(params.get("output_root") or "output")
+        pattern = str(params.get("pattern") or "endpoint_changepoints_B*")
+        out_dir = Path(params.get("out_dir") or "output/endpoint_cluster_chemical_k")
+        dirs = discover_endpoint_k_cohort_dirs(root, pattern, exclude_test=True)
+        if not dirs:
+            return SkillResult(
+                success=False,
+                summary=f"No cohort dirs matching {pattern} under {root}",
+                error="no cohorts",
+            )
+        try:
+            written = scan_chemical_separation_by_k(
+                dirs,
+                out_dir,
+                k_min=int(params.get("k_min", 2)),
+                k_max=int(params.get("k_max", 10)),
+                n_permutations=int(params.get("n_permutations", 999)),
+                min_cluster_size=int(params.get("min_cluster_size", 5)),
+            )
+        except Exception as exc:
+            return SkillResult(
+                success=False,
+                summary=f"Chemical k scan failed: {exc}",
+                error=str(exc),
+            )
+        artifacts = {k: str(v) for k, v in written.items()}
+        context.set("endpoint_chemical_k_scan", artifacts)
+        return SkillResult(
+            success=True,
+            data={"endpoint_chemical_k_scan": artifacts, "n_cohorts": len(dirs)},
+            artifacts=artifacts,
+            summary=(
+                f"Chemical k-scan for {len(dirs)} cohort(s) → {out_dir} "
+                f"({len(written)} artifacts)"
+            ),
+        )
+
+
 _registry = get_default_registry()
 _registry.register(ChangepointFeatureGroupsSkill())
 _registry.register(SweepChangepointPenaltySkill())
@@ -1092,3 +1234,4 @@ _registry.register(SummarizeChangepointResultsSkill())
 _registry.register(RunChangepointPipelineSkill())
 _registry.register(EndpointChangepointSkill())
 _registry.register(CompareChangepointTimingSkill())
+_registry.register(ScanEndpointClusterChemicalKSkill())

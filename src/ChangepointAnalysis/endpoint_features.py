@@ -34,12 +34,19 @@ class EndpointFeatureConfig:
     time_per_frame_ps: float = 1.0
     pair_summaries: tuple[str, ...] = ("min", "mean", "max")
     include_site_pairs: bool = False
-    # Paper d1 = one-step-in ring neighbors of endpoint atom sites s3 and s7.
+    # Paper d1 = Murata C2–C3 (R2/R3 equatorial ipso carbons), not hull s3/s7.
     include_paper_d1: bool = True
+    paper_d1_roles: tuple[str, str] = ("r2", "r3")
+    # Deprecated hull-index fallback when a monomer is not a GSA.
     paper_d1_s3_site: int = 3
     paper_d1_s7_site: int = 7
     paper_d1_open_lo: float = 4.5
     paper_d1_open_hi: float = 5.5
+    # Murata G0: cation–π (pole Py+ COM–Ph COM), d2, RMSD, A/B/C1/C2 labels.
+    include_murata_criteria: bool = True
+    murata_cation_pi_open_lo: float = 6.5
+    murata_rmsd_selection: str = "resname MOL"
+    murata_rmsd_ref_frame: int = 0
     # TrajectoryIterator parallelization for the endpoint-site distance pass.
     # None = platform default (1 on Windows, -1 elsewhere); 1 = sequential;
     # -1 = all CPUs; >1 = that many workers.
@@ -58,19 +65,46 @@ def _default_n_jobs() -> int:
 PAPER_D1_COL_PREFIX = "paper_d1_"
 
 
+def _d1_site_keys(
+    d1_atoms_df: pd.DataFrame,
+    *,
+    s3_site: int = 3,
+    s7_site: int = 7,
+    roles: Optional[tuple[str, str]] = None,
+) -> tuple[str, tuple[Any, Any]]:
+    """Column and the two site keys used to pair d1 atoms."""
+    if (
+        roles is not None
+        and "role" in d1_atoms_df.columns
+        and set(d1_atoms_df["role"].astype(str)) >= set(roles)
+    ):
+        return "role", (str(roles[0]), str(roles[1]))
+    if "role" in d1_atoms_df.columns and {"r2", "r3"} <= set(
+        d1_atoms_df["role"].astype(str)
+    ):
+        return "role", ("r2", "r3")
+    return "endpoint_site", (int(s3_site), int(s7_site))
+
+
 def _paper_d1_pair_layout(
     d1_atoms_df: pd.DataFrame,
     universe: Any,
     *,
     s3_site: int = 3,
     s7_site: int = 7,
+    roles: Optional[tuple[str, str]] = None,
 ) -> tuple[list[int], list[tuple[str, int, int]]]:
     """Return (MDA atom indices by slot, list of (col, slot_a, slot_b))."""
-    ring_index: dict[int, dict[int, int]] = {}
+    key, (site_a, site_b) = _d1_site_keys(
+        d1_atoms_df, s3_site=s3_site, s7_site=s7_site, roles=roles
+    )
+    ring_index: dict[int, dict[Any, int]] = {}
     id_to_index = {int(a.id): int(a.index) for a in universe.atoms}
     for _, row in d1_atoms_df.iterrows():
         mon = int(row["monomer"])
-        site = int(row["endpoint_site"])
+        site = row[key] if key == "role" else int(row[key])
+        if key == "role":
+            site = str(site)
         ring_id = int(row["d1_ring_atom_id"])
         if ring_id not in id_to_index:
             raise ValueError(f"d1 ring atom id {ring_id} not in universe")
@@ -78,14 +112,14 @@ def _paper_d1_pair_layout(
 
     monomers = sorted(ring_index)
     for mon in monomers:
-        for site in (int(s3_site), int(s7_site)):
+        for site in (site_a, site_b):
             if site not in ring_index[mon]:
                 raise ValueError(f"Missing d1 ring atom for monomer {mon} site {site}")
 
-    slots: list[tuple[int, int]] = []
+    slots: list[tuple[int, Any]] = []
     atom_idxs: list[int] = []
     for mon in monomers:
-        for site in (int(s3_site), int(s7_site)):
+        for site in (site_a, site_b):
             slots.append((mon, site))
             atom_idxs.append(ring_index[mon][site])
     slot_pos = {slot: k for k, slot in enumerate(slots)}
@@ -95,7 +129,7 @@ def _paper_d1_pair_layout(
         for j in monomers:
             if i == j:
                 continue
-            for si, sj in ((s3_site, s7_site), (s7_site, s3_site)):
+            for si, sj in ((site_a, site_b), (site_b, site_a)):
                 col = paper_d1_column_name(i, si, j, sj)
                 pair_specs.append((col, slot_pos[(i, si)], slot_pos[(j, sj)]))
     return atom_idxs, pair_specs
@@ -347,6 +381,7 @@ def generate_endpoint_features(
 
     d1_atoms_df: Optional[pd.DataFrame] = None
     d1_observer: Optional[PaperD1FrameObserver] = None
+    murata_observer: Any = None
     if cfg.include_paper_d1:
         d1_atoms_df = resolve_paper_d1_atoms(
             universe,
@@ -355,6 +390,7 @@ def generate_endpoint_features(
             traj_id=traj_id,
             s3_site=cfg.paper_d1_s3_site,
             s7_site=cfg.paper_d1_s7_site,
+            roles=cfg.paper_d1_roles,
             finder=finder,
         )
         atom_idxs, pair_specs = _paper_d1_pair_layout(
@@ -362,6 +398,7 @@ def generate_endpoint_features(
             universe,
             s3_site=cfg.paper_d1_s3_site,
             s7_site=cfg.paper_d1_s7_site,
+            roles=cfg.paper_d1_roles,
         )
         d1_observer = PaperD1FrameObserver(
             atom_idxs,
@@ -370,6 +407,37 @@ def generate_endpoint_features(
             open_lo=cfg.paper_d1_open_lo,
             open_hi=cfg.paper_d1_open_hi,
         )
+
+    if cfg.include_murata_criteria:
+        from src.ChangepointAnalysis.murata_criteria import (
+            MurataCriteriaFrameObserver,
+            resolve_murata_criteria_atoms,
+            snapshot_assembly_rmsd_ref,
+            snapshot_motif_rmsd_refs,
+        )
+
+        try:
+            murata_roles = resolve_murata_criteria_atoms(universe, monomer_sels)
+            rmsd_idx, rmsd_ref = snapshot_assembly_rmsd_ref(
+                universe,
+                selection=cfg.murata_rmsd_selection,
+                ref_frame=int(cfg.murata_rmsd_ref_frame),
+            )
+            motif_refs = snapshot_motif_rmsd_refs(
+                universe,
+                murata_roles,
+                ref_frame=int(cfg.murata_rmsd_ref_frame),
+            )
+            murata_observer = MurataCriteriaFrameObserver(
+                murata_roles,
+                n_frame_rows=n_rows,
+                rmsd_atom_indices=rmsd_idx,
+                rmsd_ref_coords=rmsd_ref,
+                rmsd_by_motif=motif_refs,
+                cation_pi_open_lo=cfg.murata_cation_pi_open_lo,
+            )
+        except Exception:
+            murata_observer = None
 
     observer = EndpointAnalyzerObserver(
         residue_sel_list=list(monomer_sels),
@@ -381,6 +449,8 @@ def generate_endpoint_features(
     iterator.subscribe(observer)
     if d1_observer is not None:
         iterator.subscribe(d1_observer)
+    if murata_observer is not None:
+        iterator.subscribe(murata_observer)
     iterator.iterate(
         start=cfg.start,
         stop=cfg.stop,
@@ -446,6 +516,34 @@ def generate_endpoint_features(
             axis=1,
         )
 
+    if murata_observer is not None:
+        from src.ChangepointAnalysis.murata_criteria import (
+            attach_murata_metastructure_labels,
+            cation_pi_pair_columns,
+            lock_cation_pi_units,
+            lock_equatorial_d1,
+        )
+
+        murata_feat = murata_observer.to_dataframe()
+        if len(murata_feat) != len(features):
+            raise RuntimeError(
+                f"murata criteria rows ({len(murata_feat)}) != "
+                f"feature rows ({len(features)})"
+            )
+        features = pd.concat(
+            [features.reset_index(drop=True), murata_feat.reset_index(drop=True)],
+            axis=1,
+        )
+        n_mon = len(monomer_sels)
+        features, _ = lock_cation_pi_units(
+            features,
+            cation_pi_pair_columns(n_mon),
+            n_monomers=n_mon,
+            open_lo=cfg.murata_cation_pi_open_lo,
+        )
+        features, _ = lock_equatorial_d1(features, n_monomers=n_mon)
+        features = attach_murata_metastructure_labels(features)
+
     return (
         features,
         sites_df,
@@ -466,15 +564,34 @@ def _build_sites_dataframe(
 ) -> pd.DataFrame:
     """Build a site-map table from stored MDA atom-id groups."""
     rows: list[dict[str, Any]] = []
+    from src.EndpointAnalyzer.gsa_site_map import (
+        plot_label_for_role,
+        try_classify_gsa_monomer,
+    )
+
     for mon_idx, sites in enumerate(stored_sites):
+        roles: list[str] = [""] * len(sites)
+        sel_str = monomer_sels[mon_idx] if mon_idx < len(monomer_sels) else ""
+        if sel_str:
+            try:
+                sel = universe.select_atoms(sel_str)
+                mol = sel.convert_to("RDKIT") if len(sel) else None
+                gsa = try_classify_gsa_monomer(mol) if mol is not None else None
+                if gsa is not None and len(gsa.sites) == len(sites):
+                    roles = gsa.roles()
+            except Exception:
+                roles = [""] * len(sites)
         for site_idx, atom_ids in enumerate(sites):
             kind = "ring" if (use_ring_centroids and len(atom_ids) > 1) else "atom"
+            role = roles[site_idx] if site_idx < len(roles) else ""
             rows.append(
                 {
                     "traj_id": traj_id,
                     "monomer": mon_idx,
-                    "monomer_selection": monomer_sels[mon_idx] if mon_idx < len(monomer_sels) else "",
+                    "monomer_selection": sel_str,
                     "site_index": site_idx,
+                    "role": role,
+                    "label": plot_label_for_role(role, kind) if role else "",
                     "kind": kind,
                     "n_atoms": len(atom_ids),
                     "atom_ids": " ".join(str(a) for a in atom_ids),
@@ -618,23 +735,27 @@ def resolve_paper_d1_atoms(
     traj_id: str = "traj",
     s3_site: int = 3,
     s7_site: int = 7,
+    roles: Optional[tuple[str, str]] = ("r2", "r3"),
     finder: Any | None = None,
 ) -> pd.DataFrame:
-    """Map each monomer's s3/s7 atom sites to their one-step-in ring neighbors.
+    """Map each monomer's equatorial R2/R3 ipso carbons (Murata C2–C3).
 
-    Returns one row per (monomer, endpoint_site) with the source endpoint atom
-    and the resolved d1 ring-neighbor atom.
-
-    When s3/s7 collapsed to a multi-atom ring site (common without methyl
-    substituents, e.g. BHHpM), exocyclic tips or candidate hull endpoints on
-    that ring are used instead of failing.
+    Prefers the canonical GSA site map. Falls back to hull indices ``s3``/``s7``
+    only when a monomer is not a hexaaryl GSA.
     """
+    from src.EndpointAnalyzer.gsa_site_map import (
+        CANONICAL_ROLES,
+        D1_ROLES,
+        try_classify_gsa_monomer,
+    )
+
     if len(monomer_selections) != len(stored_sites):
         raise ValueError(
             f"monomer_selections ({len(monomer_selections)}) != "
             f"stored_sites ({len(stored_sites)})"
         )
 
+    d1_roles = tuple(roles) if roles else D1_ROLES
     rows: list[dict[str, Any]] = []
     for mon_idx, (mon_sel, sites) in enumerate(zip(monomer_selections, stored_sites)):
         sel = universe.select_atoms(mon_sel)
@@ -643,6 +764,32 @@ def resolve_paper_d1_atoms(
         mol = sel.convert_to("RDKIT")
         if mol is None:
             raise ValueError(f"RDKit conversion failed for monomer {mon_idx}: {mon_sel}")
+
+        gsa = try_classify_gsa_monomer(mol)
+        if gsa is not None:
+            for role in d1_roles:
+                site = gsa.by_role(str(role))
+                if site.ipso_rdkit is None or site.subst_rdkit is None:
+                    raise ValueError(
+                        f"Monomer {mon_idx} role {role} is missing ipso/substituent"
+                    )
+                endpoint_id = int(sel[int(site.subst_rdkit)].id)
+                ring_id = int(sel[int(site.ipso_rdkit)].id)
+                rows.append(
+                    {
+                        "traj_id": traj_id,
+                        "monomer": mon_idx,
+                        "monomer_selection": mon_sel,
+                        "endpoint_site": CANONICAL_ROLES.index(str(role)),
+                        "role": str(role),
+                        "endpoint_kind": "methyl" if site.methyl else "hydrogen",
+                        "endpoint_atom_id": endpoint_id,
+                        "d1_ring_atom_id": ring_id,
+                        "d1_label": f"m{mon_idx}{role}_ring",
+                        "n_site_atoms": 1,
+                    }
+                )
+            continue
 
         for endpoint_site in (int(s3_site), int(s7_site)):
             if endpoint_site >= len(sites):
@@ -660,6 +807,7 @@ def resolve_paper_d1_atoms(
                     "monomer": mon_idx,
                     "monomer_selection": mon_sel,
                     "endpoint_site": endpoint_site,
+                    "role": "",
                     "endpoint_kind": kind,
                     "endpoint_atom_id": endpoint_id,
                     "d1_ring_atom_id": ring_id,
@@ -670,9 +818,18 @@ def resolve_paper_d1_atoms(
     return pd.DataFrame(rows)
 
 
-def paper_d1_column_name(mon_i: int, site_i: int, mon_j: int, site_j: int) -> str:
-    """``paper_d1_m{i}s{a}_m{j}s{b}`` for directional ring-neighbor distance."""
-    return f"{PAPER_D1_COL_PREFIX}m{mon_i}s{site_i}_m{mon_j}s{site_j}"
+def _paper_d1_token(site: Any) -> str:
+    if isinstance(site, str) and not str(site).isdigit():
+        return str(site)
+    return f"s{int(site)}"
+
+
+def paper_d1_column_name(mon_i: int, site_i: Any, mon_j: int, site_j: Any) -> str:
+    """``paper_d1_m{i}r2_m{j}r3`` (canonical) or ``paper_d1_m{i}s{a}_m{j}s{b}``."""
+    return (
+        f"{PAPER_D1_COL_PREFIX}m{int(mon_i)}{_paper_d1_token(site_i)}"
+        f"_m{int(mon_j)}{_paper_d1_token(site_j)}"
+    )
 
 
 def list_paper_d1_columns(columns: Sequence[str]) -> list[str]:
@@ -711,25 +868,20 @@ def compute_paper_d1_distances(
     frame_indices: Sequence[int],
     s3_site: int = 3,
     s7_site: int = 7,
+    roles: Optional[tuple[str, str]] = None,
     open_lo: float = 4.5,
     open_hi: float = 5.5,
 ) -> pd.DataFrame:
     """Compute per-frame directional paper-d1 distances for the given frames.
 
-    For every ordered monomer pair ``i ≠ j`` emits:
-    - ``paper_d1_m{i}s3_m{j}s7``
-    - ``paper_d1_m{i}s7_m{j}s3``
-
-    plus assembly summaries ``paper_d1_min`` and ``paper_d1_n_open``.
-
-    Positions for all d1 ring atoms are gathered in one trajectory sweep, then
-    pair distances are computed with NumPy (no per-frame Python pair loop).
+    Canonical GSA columns are ``paper_d1_m{i}r2_m{j}r3`` / ``…r3…r2``.
+    Hull fallback still emits ``paper_d1_m{i}s3_m{j}s7``.
     """
     if d1_atoms_df.empty:
         raise ValueError("d1_atoms_df is empty")
 
     atom_idxs, pair_specs = _paper_d1_pair_layout(
-        d1_atoms_df, universe, s3_site=s3_site, s7_site=s7_site
+        d1_atoms_df, universe, s3_site=s3_site, s7_site=s7_site, roles=roles
     )
 
     n_frames = len(frame_indices)
@@ -859,6 +1011,8 @@ def _draw_endpoint_site_panel(
 
     from src.EndpointAnalyzer import EndpointsFinder
 
+    from src.EndpointAnalyzer.gsa_site_map import plot_label_for_role, try_classify_gsa_monomer
+
     sel = universe.select_atoms(mon_sel)
     mol = sel.convert_to("RDKIT")
     if mol is None:
@@ -869,6 +1023,8 @@ def _draw_endpoint_site_panel(
     ef = EndpointsFinder()
     m2d, xy = ef.to_2d_coords(mol)
     mda_to_rdkit = {int(sel.atoms[i].id): i for i in range(len(sel))}
+    gsa = try_classify_gsa_monomer(mol)
+    role_names = gsa.roles() if gsa is not None and len(gsa.sites) == len(sites) else []
 
     # Ring sites = multi-atom; atom sites = singletons
     ring_mda: list[int] = []
@@ -883,10 +1039,12 @@ def _draw_endpoint_site_panel(
             ring_mda.extend(ids)
         else:
             atom_mda.extend(ids)
+        role = role_names[site_idx] if site_idx < len(role_names) else ""
+        label = plot_label_for_role(role, kind) if role else f"s{site_idx}:{kind}"
         # Label at the site representative (min id → centroid proxy atom)
         rep = min(ids) if ids else None
         if rep is not None and rep in mda_to_rdkit:
-            site_labels.append((mda_to_rdkit[rep], f"s{site_idx}:{kind}", color))
+            site_labels.append((mda_to_rdkit[rep], label, color))
 
     ring_rdkit = [mda_to_rdkit[i] for i in ring_mda if i in mda_to_rdkit]
     atom_rdkit = [mda_to_rdkit[i] for i in atom_mda if i in mda_to_rdkit]
@@ -894,9 +1052,9 @@ def _draw_endpoint_site_panel(
     highlight_colors: dict[int, tuple[float, float, float]] = {}
     for idx in ring_rdkit:
         highlight_colors[idx] = (0.2, 0.45, 0.85)  # blue — ring system
+    # Atom sites overwrite ring color so R=H para carbons (R1 on R1-ring) stay orange.
     for idx in atom_rdkit:
-        if idx not in highlight_colors:
-            highlight_colors[idx] = (1.0, 0.5, 0.0)  # orange — atom site
+        highlight_colors[idx] = (1.0, 0.5, 0.0)  # orange — atom site
     all_highlight = list(highlight_colors.keys())
 
     img = None
@@ -949,6 +1107,9 @@ def _draw_endpoint_site_panel(
 
     if len(xy) == 0:
         return
+
+    # Ring labels first, atom labels last so orange R1 sits on top of R1-ring.
+    site_labels.sort(key=lambda t: 1 if t[2] == "darkorange" else 0)
     x_coords = xy[:, 0]
     y_coords = xy[:, 1]
     x_min, x_max = float(x_coords.min()), float(x_coords.max())
@@ -975,6 +1136,7 @@ def _draw_endpoint_site_panel(
             fontsize=9,
             color=color,
             fontweight="bold",
+            zorder=3 if color == "darkorange" else 2,
         )
 
 
@@ -991,7 +1153,9 @@ def plot_endpoint_sites(
 
     Blue highlights = fused ring-system sites (centroid distances).
     Orange highlights = singleton atom sites (e.g. gear-tooth / ipso carbons).
-    Labels ``s{k}:R`` / ``s{k}:A`` mark site index and kind.
+    Labels ``R1`` / ``R2`` / ``R3`` / ``Ph`` / ``Py-eq`` / ``Py-pole`` mark
+    Murata chemical roles (canonical GSA map). Hull fallback still uses
+    ``s{k}:R`` / ``s{k}:A``.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
@@ -1010,8 +1174,8 @@ def plot_endpoint_sites(
 
     if title is None:
         title = (
-            "Endpoint sites — blue=ring system (centroid), "
-            "orange=atom site (tooth / tip)"
+            "Endpoint sites — canonical GSA roles "
+            "(R1=pole, R2/R3=equator, Ph / Py+ rings)"
         )
 
     n_cols = min(3, n)

@@ -242,6 +242,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--no-murata-criteria",
+        action="store_true",
+        help=(
+            "Disable Murata cation–π / d2 / RMSD / A-B-C1-C2 labels. "
+            "Enabled by default."
+        ),
+    )
+    p.add_argument(
         "--paper-d1-open-lo",
         type=float,
         default=4.5,
@@ -416,6 +424,7 @@ def main() -> None:
             ring_max_per_ring=args.ring_max_per_ring,
             include_site_pairs=args.include_site_pairs,
             include_paper_d1=not args.no_paper_d1,
+            include_murata_criteria=not args.no_murata_criteria,
             paper_d1_open_lo=args.paper_d1_open_lo,
             paper_d1_open_hi=args.paper_d1_open_hi,
             n_jobs=args.n_jobs,

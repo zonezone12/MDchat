@@ -148,6 +148,88 @@ def _eta_squared(x: np.ndarray, y: np.ndarray, cluster_ids: Sequence[int]) -> fl
     return float(ssb / sst)
 
 
+def _eta_squared_columns(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Column-wise η² of *X* (*n* × *p*) vs labels *y*. NaN-aware."""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y)
+    if X.ndim != 2 or X.shape[0] != y.shape[0]:
+        raise ValueError("X must be (n_segments, n_features) aligned with y")
+    finite = np.isfinite(X)
+    X0 = np.where(finite, X, 0.0)
+    n_col = finite.sum(axis=0).astype(float)
+    p = X.shape[1]
+    gm = np.divide(X0.sum(axis=0), n_col, out=np.full(p, np.nan), where=n_col >= 2)
+    sst = np.sum(np.where(finite, (X - gm) ** 2, 0.0), axis=0)
+    ssb = np.zeros(p, dtype=float)
+    for c in np.unique(y):
+        mask = y == c
+        n_c = finite[mask].sum(axis=0).astype(float)
+        sum_c = X0[mask].sum(axis=0)
+        mean_c = np.divide(sum_c, n_c, out=np.zeros(p), where=n_c > 0)
+        ssb += n_c * (mean_c - gm) ** 2
+    out = np.full(p, np.nan)
+    valid = (n_col >= 2) & (sst > 0)
+    out[valid] = ssb[valid] / sst[valid]
+    return out
+
+
+def benjamini_hochberg_qvalues(p_values: np.ndarray) -> np.ndarray:
+    """BH FDR q-values; NaNs are left as NaN and excluded from the count *m*."""
+    p = np.asarray(p_values, dtype=float)
+    q = np.full(p.shape, np.nan)
+    ok = np.isfinite(p)
+    if not np.any(ok):
+        return q
+    pv = p[ok]
+    m = int(pv.size)
+    order = np.argsort(pv, kind="mergesort")
+    ranked = pv[order]
+    raw = ranked * m / np.arange(1, m + 1, dtype=float)
+    mono = np.minimum.accumulate(raw[::-1])[::-1]
+    mono = np.clip(mono, 0.0, 1.0)
+    q_ok = np.empty(m, dtype=float)
+    q_ok[order] = mono
+    q[ok] = q_ok
+    return q
+
+
+def permutation_eta_squared_pvalues(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    n_permutations: int = 999,
+    random_state: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Permutation p-values for column-wise η², with BH q-values.
+
+    Labels are shuffled with cluster *sizes* preserved. This calibrates the
+    ranking against a null that the labels are unrelated to the site-pair
+    distances; it does **not** undo the circularity that clusters were built
+    from per-monomer-pair aggregates of those same distances.
+
+    Returns ``(p_values, q_values, eta_observed)``.
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y)
+    n_perm = int(n_permutations)
+    eta_obs = _eta_squared_columns(X, y)
+    if n_perm <= 0:
+        nan = np.full(X.shape[1], np.nan)
+        return nan, nan, eta_obs
+    rng = np.random.default_rng(int(random_state))
+    counts = np.zeros(X.shape[1], dtype=int)
+    y_work = y.copy()
+    for _ in range(n_perm):
+        rng.shuffle(y_work)
+        eta_p = _eta_squared_columns(X, y_work)
+        comparable = np.isfinite(eta_p) & np.isfinite(eta_obs)
+        counts += comparable & (eta_p >= eta_obs - 1e-15)
+    p = (1.0 + counts.astype(float)) / (n_perm + 1.0)
+    p = np.where(np.isfinite(eta_obs), p, np.nan)
+    q = benjamini_hochberg_qvalues(p)
+    return p, q, eta_obs
+
+
 def _epsilon_squared_kw(
     x: np.ndarray,
     y: np.ndarray,
@@ -255,36 +337,51 @@ def load_clustered_segments(
     return pd.DataFrame()
 
 
-def rank_cluster_discriminating_endpoint_features(
+def collect_endpoint_segment_means(
     changepoints_dir: Path | str,
     features_dir: Path | str,
     *,
     group: str = "endpoint",
     clustered_df: Optional[pd.DataFrame] = None,
     features_suffix: Optional[str] = None,
-) -> pd.DataFrame:
-    """Rank endpoint features by segment-level cluster discrimination.
+    include_frame_corr: bool = True,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    pd.DataFrame,
+    list[tuple],
+    str,
+    Optional[dict[str, object]],
+]:
+    """Build the segment-mean matrix used by site-pair ranking.
 
-    Prefers raw site-pair columns ``endpoint_dist_{i}s{a}_{j}s{b}`` when present;
-    otherwise falls back to ``endpoint_dist_{i}_{j}_mean``.
-
-    Primary score is segment-level eta-squared on raw (Å) per-segment means.
-    Also reports Kruskal–Wallis epsilon-squared, Cohen's d for the best
-    one-vs-rest cluster, and frame-level max |point-biserial| (per-traj
-    z-scored) for comparison with older frame-level rankings.
+    Returns ``(X, y, keys, feature_specs, feature_kind, frame_stats)``.
+    ``keys`` has one row per stacked segment (``traj_id``, ``segment_id``,
+    ``start_frame``, ``end_frame``, ``cluster_label``). ``frame_stats`` is
+    ``None`` when ``include_frame_corr`` is false.
     """
     changepoints_dir = Path(changepoints_dir)
     features_dir = Path(features_dir)
     segments = load_clustered_segments(
         changepoints_dir, group=group, clustered_df=clustered_df
     )
+    empty: tuple = (
+        np.zeros((0, 0)),
+        np.zeros(0, dtype=int),
+        pd.DataFrame(),
+        [],
+        "none",
+        None,
+    )
     required = {"traj_id", "cluster_label", "start_frame", "end_frame"}
     if segments.empty or not required.issubset(segments.columns):
-        return pd.DataFrame()
+        return empty
 
-    cluster_counts = segments["cluster_label"].value_counts()
-    if len(cluster_counts) < 2 or int(cluster_counts.min()) < 2:
-        return pd.DataFrame()
+    if "segment_id" not in segments.columns:
+        segments = segments.copy()
+        segments["segment_id"] = segments.groupby(
+            segments["traj_id"].astype(str)
+        ).cumcount()
 
     feature_cols: list[str] = []
     feature_kind = "none"
@@ -300,14 +397,14 @@ def rank_cluster_discriminating_endpoint_features(
         if feature_cols:
             break
     if not feature_cols:
-        return pd.DataFrame()
+        return empty
 
     n_feat = len(feature_cols)
     usecols = set(feature_cols) | {"frame", "time_ps"}
     seg_means: list[np.ndarray] = []
     seg_labels: list[int] = []
+    key_rows: list[dict] = []
 
-    # Per-feature streaming frame-level sums for max |point-biserial|.
     frame_n = np.zeros(n_feat, dtype=float)
     frame_sum = np.zeros(n_feat, dtype=float)
     frame_sum2 = np.zeros(n_feat, dtype=float)
@@ -341,7 +438,18 @@ def rank_cluster_discriminating_endpoint_features(
             # across trajectories; per-traj z-scoring collapses that.
             seg_means.append(np.nanmean(raw[mask], axis=0))
             seg_labels.append(cl)
+            key_rows.append(
+                {
+                    "traj_id": str(traj_id),
+                    "segment_id": int(seg["segment_id"]),
+                    "start_frame": start_f,
+                    "end_frame": end_f,
+                    "cluster_label": cl,
+                }
+            )
 
+        if not include_frame_corr:
+            continue
         labeled = labels >= 0
         if not np.any(labeled):
             continue
@@ -370,16 +478,74 @@ def rank_cluster_discriminating_endpoint_features(
             frame_sum_c[c] += cvals.sum(axis=0)
 
     if not seg_means:
-        return pd.DataFrame()
+        return empty
 
     X = np.vstack(seg_means)
     y = np.asarray(seg_labels, dtype=int)
-    cluster_ids = sorted(set(y.tolist()))
+    keys = pd.DataFrame(key_rows)
+    frame_stats: Optional[dict[str, object]] = None
+    if include_frame_corr:
+        frame_stats = {
+            "frame_n": frame_n,
+            "frame_sum": frame_sum,
+            "frame_sum2": frame_sum2,
+            "frame_n_c": frame_n_c,
+            "frame_sum_c": frame_sum_c,
+        }
+    return X, y, keys, feature_specs, feature_kind, frame_stats
+
+
+def score_cluster_discriminating_features(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_specs: Sequence[tuple],
+    feature_kind: str,
+    *,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    frame_stats: Optional[dict[str, object]] = None,
+) -> pd.DataFrame:
+    """Rank columns of a segment-mean matrix by η² vs cluster labels.
+
+    When ``n_permutations > 0``, adds ``eta_squared_p_value`` /
+    ``eta_squared_q_value`` / ``significant_fdr`` from a label-shuffle null
+    and Benjamini–Hochberg FDR across the candidate columns.
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=int)
+    if X.size == 0 or y.size < 2 or len(set(y.tolist())) < 2:
+        return pd.DataFrame()
+
+    cluster_ids = sorted(set(int(c) for c in y.tolist()))
+    n_perm = max(int(n_permutations), 0)
+    alpha = float(fdr_alpha)
+
+    if n_perm > 0:
+        p_vals, q_vals, eta_obs = permutation_eta_squared_pvalues(
+            X, y, n_permutations=n_perm, random_state=random_state
+        )
+    else:
+        eta_obs = _eta_squared_columns(X, y)
+        p_vals = np.full(X.shape[1], np.nan)
+        q_vals = np.full(X.shape[1], np.nan)
+
+    frame_n = frame_sum = frame_sum2 = None
+    frame_n_c: dict[int, np.ndarray] = {}
+    frame_sum_c: dict[int, np.ndarray] = {}
+    if frame_stats is not None:
+        frame_n = np.asarray(frame_stats["frame_n"], dtype=float)
+        frame_sum = np.asarray(frame_stats["frame_sum"], dtype=float)
+        frame_sum2 = np.asarray(frame_stats["frame_sum2"], dtype=float)
+        frame_n_c = frame_stats["frame_n_c"]  # type: ignore[assignment]
+        frame_sum_c = frame_stats["frame_sum_c"]  # type: ignore[assignment]
 
     rows: list[dict] = []
     for j, spec in enumerate(feature_specs):
         xj = X[:, j]
-        eta = _eta_squared(xj, y, cluster_ids)
+        eta = float(eta_obs[j]) if j < eta_obs.size else _eta_squared(xj, y, cluster_ids)
+        if not np.isfinite(eta):
+            continue
         eps = _epsilon_squared_kw(xj, y, cluster_ids)
 
         best_c = cluster_ids[0]
@@ -394,23 +560,24 @@ def rank_cluster_discriminating_endpoint_features(
                 best_d = d
                 best_c = c
 
-        frame_abs: list[float] = []
-        for c in cluster_ids:
-            if c not in frame_n_c:
-                continue
-            r = _point_biserial_from_sums(
-                float(frame_n[j]),
-                float(frame_sum[j]),
-                float(frame_sum2[j]),
-                float(frame_n_c[c][j]),
-                float(frame_sum_c[c][j]),
-            )
-            if np.isfinite(r):
-                frame_abs.append(abs(r))
-        frame_max = float(max(frame_abs)) if frame_abs else float("nan")
+        frame_max = float("nan")
+        if frame_n is not None and frame_sum is not None and frame_sum2 is not None:
+            frame_abs: list[float] = []
+            for c in cluster_ids:
+                if c not in frame_n_c:
+                    continue
+                r = _point_biserial_from_sums(
+                    float(frame_n[j]),
+                    float(frame_sum[j]),
+                    float(frame_sum2[j]),
+                    float(frame_n_c[c][j]),
+                    float(frame_sum_c[c][j]),
+                )
+                if np.isfinite(r):
+                    frame_abs.append(abs(r))
+            if frame_abs:
+                frame_max = float(max(frame_abs))
 
-        if not np.isfinite(eta):
-            continue
         row = _feature_metadata_row(spec, feature_kind)
         row.update(
             {
@@ -421,6 +588,13 @@ def rank_cluster_discriminating_endpoint_features(
                 "frame_max_abs_corr": frame_max,
             }
         )
+        if n_perm > 0:
+            p_j = float(p_vals[j]) if j < p_vals.size else float("nan")
+            q_j = float(q_vals[j]) if j < q_vals.size else float("nan")
+            row["eta_squared_p_value"] = p_j
+            row["eta_squared_q_value"] = q_j
+            row["n_permutations"] = n_perm
+            row["significant_fdr"] = bool(np.isfinite(q_j) and q_j <= alpha)
         rows.append(row)
 
     if not rows:
@@ -434,6 +608,53 @@ def rank_cluster_discriminating_endpoint_features(
     return ranking
 
 
+def rank_cluster_discriminating_endpoint_features(
+    changepoints_dir: Path | str,
+    features_dir: Path | str,
+    *,
+    group: str = "endpoint",
+    clustered_df: Optional[pd.DataFrame] = None,
+    features_suffix: Optional[str] = None,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    include_frame_corr: bool = True,
+) -> pd.DataFrame:
+    """Rank endpoint features by segment-level cluster discrimination.
+
+    Prefers raw site-pair columns ``endpoint_dist_{i}s{a}_{j}s{b}`` when present;
+    otherwise falls back to ``endpoint_dist_{i}_{j}_mean``.
+
+    Primary score is segment-level eta-squared on raw (Å) per-segment means.
+    Also reports Kruskal–Wallis epsilon-squared, Cohen's d for the best
+    one-vs-rest cluster, and frame-level max |point-biserial| (per-traj
+    z-scored) for comparison with older frame-level rankings.
+
+    A label-shuffle permutation null and Benjamini–Hochberg FDR across the
+    candidate columns (G4) calibrate the ranking. η² still cannot *validate*
+    the clusters: they were built from per-monomer-pair aggregates of these
+    same distances.
+    """
+    X, y, _keys, feature_specs, feature_kind, frame_stats = collect_endpoint_segment_means(
+        changepoints_dir,
+        features_dir,
+        group=group,
+        clustered_df=clustered_df,
+        features_suffix=features_suffix,
+        include_frame_corr=include_frame_corr,
+    )
+    return score_cluster_discriminating_features(
+        X,
+        y,
+        feature_specs,
+        feature_kind,
+        n_permutations=n_permutations,
+        fdr_alpha=fdr_alpha,
+        random_state=random_state,
+        frame_stats=frame_stats,
+    )
+
+
 def rank_cluster_correlated_pair_means(
     changepoints_dir: Path | str,
     features_dir: Path | str,
@@ -441,6 +662,10 @@ def rank_cluster_correlated_pair_means(
     group: str = "endpoint",
     clustered_df: Optional[pd.DataFrame] = None,
     features_suffix: Optional[str] = None,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    include_frame_corr: bool = True,
 ) -> pd.DataFrame:
     """Compatibility alias for :func:`rank_cluster_discriminating_endpoint_features`."""
     return rank_cluster_discriminating_endpoint_features(
@@ -449,6 +674,10 @@ def rank_cluster_correlated_pair_means(
         group=group,
         clustered_df=clustered_df,
         features_suffix=features_suffix,
+        n_permutations=n_permutations,
+        fdr_alpha=fdr_alpha,
+        random_state=random_state,
+        include_frame_corr=include_frame_corr,
     )
 
 
@@ -1108,6 +1337,9 @@ def summarize_changepoint_results(
     cluster_timeline_top_pairs: int = 5,
     cluster_timeline_group: str = "endpoint",
     clustered_df: Optional[pd.DataFrame] = None,
+    ranking_n_permutations: int = 999,
+    ranking_fdr_alpha: float = 0.05,
+    ranking_random_state: int = 0,
 ) -> dict[str, Path]:
     """Full summarize stage: cohort tables + plots + optional timelines."""
     changepoints_dir = Path(changepoints_dir)
@@ -1200,6 +1432,9 @@ def summarize_changepoint_results(
                     group=cluster_timeline_group,
                     clustered_df=clustered_df,
                     features_suffix=features_suffix,
+                    n_permutations=ranking_n_permutations,
+                    fdr_alpha=ranking_fdr_alpha,
+                    random_state=ranking_random_state,
                 )
                 if len(ranking):
                     corr_csv = (

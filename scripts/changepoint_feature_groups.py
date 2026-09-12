@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.ChangepointAnalysis import ChangepointConfig, detect_cohort_changepoints
 from src.ChangepointAnalysis.detection import discover_feature_csvs
+from src.ChangepointAnalysis.feature_groups import ALL_GROUPS
 from src.utils.run_log import RunContext, log_event
 
 
@@ -37,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         default="output/gsa_features",
-        help="Directory containing *_gsa_features.csv files (default: output/gsa_features)",
+        help="Directory containing feature CSVs (default: output/gsa_features)",
+    )
+    parser.add_argument(
+        "--suffix",
+        default="_gsa_features.csv",
+        help="Feature-CSV suffix (default: _gsa_features.csv; use _endpoint_features.csv for endpoint)",
     )
     parser.add_argument(
         "--output-dir",
@@ -88,8 +94,8 @@ def parse_args() -> argparse.Namespace:
         "--groups",
         nargs="+",
         default=["gsa", "iodine", "na_water", "combined"],
-        choices=["gsa", "iodine", "na_water", "combined"],
-        help="Feature groups to analyse (default: all four)",
+        choices=list(ALL_GROUPS),
+        help="Feature groups to analyse (default: gsa iodine na_water combined)",
     )
     parser.add_argument(
         "--no-normalize",
@@ -105,9 +111,9 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_files = discover_feature_csvs(input_dir)
+    csv_files = discover_feature_csvs(input_dir, suffix=args.suffix)
     if not csv_files:
-        print(f"No *_gsa_features.csv files found in {input_dir}", file=sys.stderr)
+        print(f"No *{args.suffix} files found in {input_dir}", file=sys.stderr)
         sys.exit(1)
 
     config = ChangepointConfig(
@@ -126,7 +132,7 @@ def main() -> None:
         log_event(
             "info",
             f"Found {len(csv_files)} feature CSV(s); groups={args.groups}; "
-            f"method={args.method}; cost={args.cost_model}",
+            f"penalty={args.penalty}; method={args.method}; cost={args.cost_model}",
             component="changepoint_feature_groups",
         )
         detect_cohort_changepoints(csv_files, config, output_dir=output_dir)

@@ -615,11 +615,14 @@ def test_paper_d1_column_naming_and_parser() -> None:
     name = paper_d1_column_name(0, 3, 1, 7)
     assert name == "paper_d1_m0s3_m1s7"
     assert parse_paper_d1_feature(name) == (0, 3, 1, 7)
+    role_name = paper_d1_column_name(0, "r2", 1, "r3")
+    assert role_name == "paper_d1_m0r2_m1r3"
+    assert parse_paper_d1_feature(role_name) == (0, "r2", 1, "r3")
     assert parse_paper_d1_feature("endpoint_dist_0s3_1s7") is None
     cols = list_paper_d1_columns(
-        [name, "paper_d1_min", "paper_d1_n_open", "endpoint_dist_0s3_1s7"]
+        [name, role_name, "paper_d1_min", "paper_d1_n_open", "endpoint_dist_0s3_1s7"]
     )
-    assert cols == [name]
+    assert cols == [name, role_name]
 
 
 def test_resolve_paper_d1_ring_site_fallback() -> None:
@@ -688,40 +691,32 @@ def test_resolve_paper_d1_ring_site_fallback() -> None:
 
 
 def test_resolve_paper_d1_atoms_bmm_topology() -> None:
-    """Live topology check: s3/s7 map to unique bonded ring neighbors."""
+    """Live topology: paper d1 is R2/R3 ipso carbons, not hull s3/s7."""
     pytest.importorskip("rdkit")
     import MDAnalysis as mda
 
     from src.EndpointAnalyzer.EndpointAnalyzer import EndpointAnalyzer
-    from src.EndpointAnalyzer import EndpointsFinder
     from src.ChangepointAnalysis.endpoint_features import resolve_paper_d1_atoms
     from src.utils.gsa_selections import resolve_selections
 
     topo = Path("traj/BMMpM_ca.prmtop")
-    traj = Path("traj/BMMpM_891249_mdcrd_v.trj")
-    if not topo.exists() or not traj.exists():
-        pytest.skip("BMMpM topology/trajectory not present")
+    if not topo.exists():
+        pytest.skip("BMMpM topology not present")
 
-    u = mda.Universe(str(topo), str(traj))
-    u.trajectory[0]
+    u = mda.Universe(str(topo))
     sels = resolve_selections(u, gsa_resname="MOL", n_monomers=6, auto_tooth=False)
-    finder = EndpointsFinder()
     stored = []
     for mon_sel in sels.monomer_selections:
-        _, sites = EndpointAnalyzer.find_residue_endpoint_sites(u, mon_sel, finder)
+        _, sites = EndpointAnalyzer.find_residue_endpoint_sites(u, mon_sel)
         stored.append(sites)
 
-    d1 = resolve_paper_d1_atoms(
-        u, sels.monomer_selections, stored, traj_id="topo", s3_site=3, s7_site=7, finder=finder
-    )
-    assert len(d1) == 12  # 6 monomers × {s3,s7}
-    # Known mapping for monomer 0 from earlier inspection.
-    m0 = d1[(d1["monomer"] == 0) & (d1["endpoint_site"] == 3)].iloc[0]
-    assert int(m0["endpoint_atom_id"]) == 70
-    assert int(m0["d1_ring_atom_id"]) == 65
-    m0b = d1[(d1["monomer"] == 0) & (d1["endpoint_site"] == 7)].iloc[0]
-    assert int(m0b["endpoint_atom_id"]) == 112
-    assert int(m0b["d1_ring_atom_id"]) == 103
+    d1 = resolve_paper_d1_atoms(u, sels.monomer_selections, stored, traj_id="topo")
+    assert len(d1) == 12  # 6 monomers × {r2, r3}
+    m0 = d1[(d1["monomer"] == 0)].set_index("role")
+    assert int(m0.loc["r2", "d1_ring_atom_id"]) == 36
+    assert int(m0.loc["r2", "endpoint_atom_id"]) == 108
+    assert int(m0.loc["r3", "d1_ring_atom_id"]) == 103
+    assert int(m0.loc["r3", "endpoint_atom_id"]) == 112
 
 
 def test_compute_paper_d1_distances_synthetic() -> None:

@@ -86,14 +86,23 @@ class EndpointAnalyzer:
         if mol is None:
             raise ValueError("RDKit conversion failed")
 
-        sites_rdkit = endpoints_finder.find_endpoint_sites(mol)
+        from .gsa_site_map import try_classify_gsa_monomer
+
+        gsa_map = try_classify_gsa_monomer(mol)
+        if gsa_map is not None:
+            sites_rdkit = gsa_map.rdkit_site_groups()
+        else:
+            sites_rdkit = endpoints_finder.find_endpoint_sites(mol)
         sites_mda: List[List[int]] = []
         for site in sites_rdkit:
             mda_ids = [int(sel[rdkit_idx].id) for rdkit_idx in site]
             if mda_ids:
                 sites_mda.append(mda_ids)
 
-        center = sel.center_of_mass()
+        try:
+            center = sel.center_of_mass()
+        except Exception:
+            center = np.array([np.nan, np.nan, np.nan])
         return center, sites_mda
 
     def compute_endpoint_distances(

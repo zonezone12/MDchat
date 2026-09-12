@@ -85,9 +85,21 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help=(
-            "Top-N endpoint_dist_{i}_{j}_mean features for timeline_cluster "
-            "panels (by |point-biserial| vs cluster). 0 disables (default: 5)."
+            "Top-N endpoint features for timeline_cluster panels "
+            "(by segment-level η² vs cluster). 0 disables (default: 5)."
         ),
+    )
+    parser.add_argument(
+        "--ranking-n-permutations",
+        type=int,
+        default=999,
+        help="Label-shuffle permutations for η² p-values (0 disables; default: 999).",
+    )
+    parser.add_argument(
+        "--ranking-fdr-alpha",
+        type=float,
+        default=0.05,
+        help="BH-FDR alpha for significant_fdr on ranked pairs (default: 0.05).",
     )
     return parser.parse_args()
 
@@ -123,6 +135,8 @@ def main() -> None:
             skip_cluster_rep_timelines=args.skip_cluster_rep_timelines,
             features_suffix=args.features_suffix,
             cluster_timeline_top_pairs=args.timeline_top_pairs,
+            ranking_n_permutations=args.ranking_n_permutations,
+            ranking_fdr_alpha=args.ranking_fdr_alpha,
         )
 
     print("\nPlots:")

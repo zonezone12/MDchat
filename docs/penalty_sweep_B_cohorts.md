@@ -6,6 +6,8 @@ Pipeline context: [changepoint_pipeline.md](changepoint_pipeline.md) (penalty-sw
 
 These notes record *what* the Pelt penalty grids showed on the six B\* cubes, *why* relative elbows agree while absolute penalties do not, and *which* operating penalty each family should use. Figures are written by `scripts/plot_penalty_sweep_cohorts.py` from existing `penalty_sweep/` CSVs (no re-detect).
 
+**Updated:** BMHpH and BMMpM were originally swept on a grid built from the first feature CSV's length rather than the cohort median (both n=1000 cohorts, off by a short outlier file). Both were re-swept on the correct median-n=1000 grid and re-detected as full 51-trajectory runs. BMHpH's corrected elbow (4.361, 0.631×log n) lands on the same relative step as BHHpH/BHHpM — a coincidence of the data, not a forced match. **BMMpM's corrected elbow does not**: it is 5.489, 0.795×log(n), genuinely higher than every other cube, confirmed by a from-scratch full-cohort detection, not just the sweep search. All six cubes now use each cube's own elbow with no cross-cohort alignment — see `plan.md` §3.1/§5 (G1a/G1b) for the decision record and full provenance.
+
 ---
 
 ## 1. What was swept
@@ -38,16 +40,18 @@ python scripts/plot_penalty_sweep_cohorts.py --out-dir output/penalty_sweep_coho
 
 ---
 
-## 2. Relative elbows agree; absolute penalties do not
+## 2. Relative elbows cluster in three groups; absolute penalties do not transfer
 
-Every cube uses the same *relative* grid (penalty / log(n)). Endpoint elbows cluster at **0.63 × log(n)** (BMHpM one step earlier at 0.50×). GSA elbows cluster at **0.59 × log(n)** (BHHpM one step earlier at 0.49×). Absolute numbers differ because *n* and the feature groups differ.
+Every cube uses the same *relative* grid (penalty / log(n)), now correctly built from the median n=1000 for every endpoint cube. Endpoint elbows split into **three** relative groups, not one shared value: **0.631×** (BHHpH, BHHpM, BMHpH), **0.502×** (BMHpM, BMMpH), and **0.795×** (BMMpM, alone). GSA elbows cluster at **0.59 × log(n)** (BHHpM one step earlier at 0.49×). Absolute numbers differ because *n* and the feature groups differ.
 
-| | Typical elbow vs log(n) | Shared absolute elbow | n used for log(n) |
-|--|-------------------------|------------------------|-------------------|
-| Endpoint | 0.63× | **4.36** (n = 1000 cubes) | 1000 for four cubes; first-CSV length for BMHpH / BMMpM |
-| GSA | 0.59× | **5.03** (five of six cubes) | median n = 5000 |
+| | Elbow vs log(n) | Absolute elbow | Cubes | n used for log(n) |
+|--|-------------------------|------------------------|-------|-------------------|
+| Endpoint | 0.631× | **4.361** | BHHpH, BHHpM, BMHpH | median n = 1000, all six cubes |
+| Endpoint | 0.502× | **3.466** | BMHpM, BMMpH | median n = 1000 |
+| Endpoint | **0.795×** | **5.489** | **BMMpM only** | median n = 1000 |
+| GSA | 0.59× | **5.03** (five of six cubes) | all but BHHpM | median n = 5000 |
 
-Do **not** copy 4.36 onto GSA or 5.03 onto endpoint. Compare families on the relative axis, then convert with that family’s log(n).
+Do **not** copy 4.36 onto GSA or 5.03 onto endpoint, and do **not** copy 4.361 onto BMMpM — its own elbow is 5.489, and forcing it onto the other cubes' step was tried and rejected (see the sensitivity run at `output/endpoint_changepoints_g1a_BMMpM`, kept on disk but not the reported result). Compare families on the relative axis, then convert with that family's own log(n) *and* that cube's own elbow.
 
 ---
 
@@ -59,16 +63,16 @@ Mean endpoint breakpoints per trajectory vs penalty / log(n). Open circles mark 
 
 | Cube | log(n) | Elbow | × log(n) | Elbow bkps / traj | log(n) bkps / traj | Published detection |
 |------|--------|-------|----------|-------------------|--------------------|---------------------|
-| BHHpH | 6.91 | 4.36 | 0.63 | 10.7 | 7.3 | Matches elbow (535) |
-| BHHpM | 6.91 | 4.36 | 0.63 | 10.3 | 6.8 | **Not elbow** (315 vs 515; nearer log(n) = 341) |
-| BMHpH | 5.58\* | 3.53 | 0.63 | 6.0 | 3.6 | Elbow (305) |
-| BMHpM | 6.91 | 3.47 | 0.50 | 6.4 | 3.8 | Elbow (319) |
-| BMMpH | 6.91 | 4.36 | 0.63 | 2.7 | 1.6 | Elbow (137) |
-| BMMpM | 6.61\* | 4.18 | 0.63 | 2.5 | 1.5 | **Not elbow** (83 vs 128) |
+| BHHpH | 6.91 | 4.361 | 0.631 | 10.06 | 7.3 | Matches elbow (503/50) |
+| BHHpM | 6.91 | 4.361 | 0.631 | 9.76 | 6.8 | **Not elbow** (315 vs 488; nearer log(n) = 341) |
+| BMHpH | 6.91 | 4.361 | 0.631 | 4.57 | 3.6 | **Not elbow** (305 on the old wrong grid, since corrected; 233 at the true elbow) |
+| BMHpM | 6.91 | 3.466 | 0.502 | 6.60 | 3.8 | Elbow (330) |
+| BMMpH | 6.91 | 3.466 | 0.502 | 3.12 | 1.6 | Elbow (156) |
+| BMMpM | 6.91 | **5.489** | **0.795** | **2.078** | 1.5 | **Not elbow**, and its own elbow is not the 4.361 the other three cubes share (106 at true elbow, on 51 trajectories) |
 
-\*Grid reference taken from the first feature CSV, not the cohort median n = 1000. BHHpM published count (315) is closer to log(n) = 341 than to the elbow. BMMpM published 83 breakpoints on 30 trajectories; the elbow had 128 on 51.
+All six cubes now use the correct median n = 1000 grid — the earlier first-CSV-length grid bug for BMHpH and BMMpM is fixed (`plan.md` §3.1, G1a). BMHpH's corrected elbow happens to land on the same relative step as BHHpH/BHHpM (0.631×); that is a property of the data, not a forced match. **BMMpM's corrected elbow does not converge toward the others** — re-sweeping on the right grid moved it *further* from 0.631× (from a wrong-grid 0.761× to a corrected 0.795×), confirmed by a full 51-trajectory re-detection, not just the sweep search.
 
-A shared endpoint penalty of **4.36** is defensible for the n = 1000 cubes. Event rate ranks **BHH > BMH > BMM** at every matched relative penalty.
+Event rate ranks **BHH > BMH > BMM** at every cube's own elbow. Do not apply a single shared endpoint penalty across all six cubes — three genuinely different relative elbows exist (§2), and BMMpM is the one cube where using another cohort's penalty materially changes the reported event rate.
 
 ---
 
@@ -105,14 +109,14 @@ Endpoint signals are 1000 frames; GSA signals are 5000. Raw breakpoints per traj
 
 | Cube | Endpoint at elbow | GSA geometry at elbow | GSA geometry at log(n) | GSA iodine at log(n) |
 |------|-------------------|-----------------------|------------------------|----------------------|
-| BHHpH | 10.7 | 9.80 | 6.20 | 5.36 |
-| BHHpM | 10.3 | 12.16 | 6.77 | 5.76 |
-| BMHpH | 5.98 | 8.95 | 5.66 | 5.25 |
-| BMHpM | 6.38 | 8.62 | 5.56 | 5.61 |
-| BMMpH | 2.74 | 6.80 | 4.36 | 5.56 |
-| BMMpM | 2.51 | 5.83 | 3.64 | 5.55 |
+| BHHpH | 10.06 | 9.80 | 6.20 | 5.36 |
+| BHHpM | 9.76 | 12.16 | 6.77 | 5.76 |
+| BMHpH | 4.57 | 8.95 | 5.66 | 5.25 |
+| BMHpM | 6.60 | 8.62 | 5.56 | 5.61 |
+| BMMpH | 3.12 | 6.80 | 4.36 | 5.56 |
+| BMMpM | 2.08 | 5.83 | 3.64 | 5.55 |
 
-At the GSA elbow, cage geometry is ~1.6× denser than the published log(n) tables and closer to endpoint BHH rates. Iodine at log(n) stays cube-flat (~5.3–5.8 / 1000 frames). Endpoint still ranks BHH ≫ BMM (~4×).
+Endpoint column is each cube's own elbow, final (`plan.md` §3, G1b). At the GSA elbow, cage geometry is ~1.6× denser than the published log(n) tables and closer to endpoint BHH rates. Iodine at log(n) stays cube-flat (~5.3–5.8 / 1000 frames). Endpoint still ranks BHH ≫ BMM (~4.7×, own-elbow throughout — see §3 and `plan.md` §3.3 for the exact ratio against Murata's reported values).
 
 ![Endpoint vs GSA geometry on a shared relative-penalty axis](../output/penalty_sweep_cohort_comparison/plots/endpoint_vs_gsa_bkps_per_1000_vs_rel_penalty.png)
 
@@ -138,10 +142,12 @@ Elbow steps sit around 0.64–0.77 — near or below 0.75 — so the knee is sti
 |------|--------------------|-------|--------------|--------------------|------------------------|
 | BHHpH | 3.47–8.69 | 5 | 309–653 | Yes | No (0.67) |
 | BHHpM | 10.94–34.54 | 6 | 66–216 | No | Yes |
-| BMHpH | 5.58–27.92 | 8 | 44–184 | No | Yes |
+| BMHpH | 5.58–27.92\* | 8 | 44–184 | No | Yes |
 | BMHpM | 13.77–34.54 | 5 | 37–90 | No | No (0.00) |
 | BMMpH | 2.19–4.36 | 4 | 137–301 | Yes (at max) | No (0.67) |
-| BMMpM | 8.32–33.07 | 7 | 23–64 | No | No |
+| BMMpM | 8.32–33.07\* | 7 | 23–64 | No | No |
+
+\*BMHpH and BMMpM rows are from the plateau finder on the **old, wrong grid** and have not been re-run on the corrected median-n grid — only the elbow and a full detection were redone for those two cubes (§1, §3). Treat these two rows as stale until `find_stable_plateaus` is re-run on `penalty_sweep_median_n/`; the conclusion in the paragraph below (do not use the band) is unaffected either way.
 
 GSA “best bands” span almost the whole 0.2–2.5 × log(n) grid (11–14 of 15 steps). That is the same diagnostic failure: the plateau scorer prefers a long, slowly decaying count curve over a tight knee. Do not take the GSA band midpoint as the penalty.
 
@@ -149,11 +155,11 @@ GSA “best bands” span almost the whole 0.2–2.5 × log(n) grid (11–14 of 
 
 ## 7. What this means for the two pipelines
 
-1. **Shared endpoint penalty 4.36** for n = 1000 cubes. BMHpM’s elbow is 3.47 (0.50×); BHHpM / BMMpM published tables are **not** at their elbows.
+1. **Three endpoint elbows, not one shared value.** 4.361 (0.631×) for BHHpH/BHHpM/BMHpH; 3.466 (0.502×) for BMHpM/BMMpH; **5.489 (0.795×) for BMMpM alone.** BHHpM's published table is **not** at its elbow. Each cube now uses its own elbow (`plan.md` §5, G1b) — no cross-cohort alignment.
 2. **Shared GSA penalty 5.03** for five of six cubes (BHHpM 4.20). Published GSA tables stay at log(n). Re-detect at 5.03 only if you want ~60% more `gsa` breakpoints.
-3. Relative elbows agree (≈0.5–0.63 × log(n)). Absolute penalties are not interchangeable.
+3. Relative elbows mostly agree (0.50–0.63 × log(n)), except BMMpM at 0.795× — a genuine cohort difference, not a grid artifact. Absolute penalties are not interchangeable.
 4. Cube chemistry, not penalty, sets event rate: **BHH > BMH > BMM** for endpoint and for GSA geometry. Iodine is cube-flat.
-5. Endpoint BMHpH / BMMpM grids used the first CSV length instead of median n = 1000. The sweep now uses **median n** for the default grid; those two endpoint sweeps were not re-run.
+5. Endpoint BMHpH / BMMpM grids originally used the first CSV length instead of median n = 1000. **Fixed and re-run**: both were re-swept on the correct median-n grid and re-detected as full 51-trajectory runs (`output/endpoint_changepoints_g1a_BMHpH`, `output/endpoint_changepoints_g1b_BMMpM`). BMHpH's corrected elbow coincides with the 0.631× group; BMMpM's does not.
 
 `na_water` / `combined` were not swept. Re-run `python scripts/sweep_gsa_changepoint_penalty.py --groups na_water` if those elbows are needed.
 
@@ -165,14 +171,14 @@ GSA “best bands” span almost the whole 0.2–2.5 × log(n) grid (11–14 of 
 |------|----------------------|---------------|--------------------|
 | BHHpH | 50 × 1000 fr | 1.38–34.54 | `output/endpoint_changepoints_BHHpH/penalty_sweep` |
 | BHHpM | 50 × 1000 fr | 1.38–34.54 | `output/endpoint_changepoints_BHHpM/penalty_sweep` |
-| BMHpH | 50 × 1000 + 1 × 266 | 1.12–27.92 | `output/endpoint_changepoints_BMHpH/penalty_sweep` |
+| BMHpH | 51 × 1000 fr | 1.38–34.54 (corrected; was 1.12–27.92 on the wrong grid) | `output/endpoint_changepoints_BMHpH/penalty_sweep_median_n`, full re-detection at `output/endpoint_changepoints_g1a_BMHpH` |
 | BMHpM | 50 × 1000 fr | 1.38–34.54 | `output/endpoint_changepoints_BMHpM/penalty_sweep` |
 | BMMpH | 50 × 1000 fr | 1.38–34.54 | `output/endpoint_changepoints_BMMpH/penalty_sweep` |
-| BMMpM | 48 × 1000 + 3 short | 1.32–33.07 | `output/endpoint_changepoints_BMMpM/penalty_sweep` |
+| BMMpM | 51 × 1000 fr | 1.38–34.54 (corrected; was 1.32–33.07 on the wrong grid) | `output/endpoint_changepoints_BMMpM/penalty_sweep_median_n`, full re-detection at `output/endpoint_changepoints_g1b_BMMpM` |
 
 GSA for every cube: 50 or 51 trajectories × 5000 frames, grid 1.70–21.29, directory `output/gsa_changepoints_{CUBE}/penalty_sweep`.
 
-Comparison artifacts: `output/penalty_sweep_cohort_comparison/` (`cohort_sweep_summary.csv`, `density_per_1000_frames.csv`, `plots/*.png`).
+Comparison artifacts: `output/penalty_sweep_cohort_comparison/` (`cohort_sweep_summary.csv`, `density_per_1000_frames.csv`, `plots/*.png`) — these figures were **not** regenerated after the BMHpH/BMMpM grid fix; the numeric tables in this document are, but the PNGs under that directory may still show the old wrong-grid sweep curves for those two cubes. Re-run `scripts/plot_penalty_sweep_cohorts.py` to refresh them.
 
 ---
 

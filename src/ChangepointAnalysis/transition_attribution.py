@@ -29,7 +29,7 @@ _SITE_PAIR_RE = re.compile(
     r"^endpoint_dist_(\d+)s(\d+)_(\d+)s(\d+)$"
 )
 _PAPER_D1_RE = re.compile(
-    r"^paper_d1_m(\d+)s(\d+)_m(\d+)s(\d+)$"
+    r"^paper_d1_m(\d+)(s\d+|r[123])_m(\d+)(s\d+|r[123])$"
 )
 
 
@@ -59,12 +59,18 @@ def parse_site_pair_feature(name: str) -> Optional[tuple[int, int, int, int]]:
     return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
 
 
-def parse_paper_d1_feature(name: str) -> Optional[tuple[int, int, int, int]]:
-    """Parse ``paper_d1_m{i}s{a}_m{j}s{b}`` → (mon_i, site_a, mon_j, site_b)."""
+def parse_paper_d1_feature(name: str) -> Optional[tuple[int, Any, int, Any]]:
+    """Parse ``paper_d1_m{i}r2_m{j}r3`` or legacy ``…s3…s7``."""
     m = _PAPER_D1_RE.fullmatch(str(name))
     if not m:
         return None
-    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
+
+    def _tok(raw: str) -> Any:
+        if raw.startswith("s"):
+            return int(raw[1:])
+        return raw
+
+    return (int(m.group(1)), _tok(m.group(2)), int(m.group(3)), _tok(m.group(4)))
 
 
 def list_site_pair_columns(columns: Sequence[str]) -> list[str]:
@@ -131,10 +137,19 @@ def resolve_site_pair_metadata(
         return empty
     mon_i, site_i, mon_j, site_j = parsed
 
-    def _lookup_site(monomer: int, site_index: int) -> dict[str, Any]:
-        hit = sites_df[
-            (sites_df["monomer"] == monomer) & (sites_df["site_index"] == site_index)
-        ]
+    def _lookup_site(monomer: int, site_key: Any) -> dict[str, Any]:
+        if (
+            isinstance(site_key, str)
+            and not str(site_key).isdigit()
+            and "role" in sites_df.columns
+        ):
+            hit = sites_df[
+                (sites_df["monomer"] == monomer) & (sites_df["role"].astype(str) == str(site_key))
+            ]
+        else:
+            hit = sites_df[
+                (sites_df["monomer"] == monomer) & (sites_df["site_index"] == int(site_key))
+            ]
         if hit.empty:
             return {"kind": "", "atom_ids": "", "n_atoms": 0, "d1_ring_atom_id": ""}
         row = hit.iloc[0]
@@ -145,15 +160,25 @@ def resolve_site_pair_metadata(
             "d1_ring_atom_id": str(row.get("d1_ring_atom_id", "") or ""),
         }
 
-    def _lookup_d1_ring(monomer: int, site_index: int) -> str:
+    def _lookup_d1_ring(monomer: int, site_key: Any) -> str:
         if d1_atoms_df is not None and not d1_atoms_df.empty:
-            hit = d1_atoms_df[
-                (d1_atoms_df["monomer"] == monomer)
-                & (d1_atoms_df["endpoint_site"] == site_index)
-            ]
+            if (
+                isinstance(site_key, str)
+                and not str(site_key).isdigit()
+                and "role" in d1_atoms_df.columns
+            ):
+                hit = d1_atoms_df[
+                    (d1_atoms_df["monomer"] == monomer)
+                    & (d1_atoms_df["role"].astype(str) == str(site_key))
+                ]
+            else:
+                hit = d1_atoms_df[
+                    (d1_atoms_df["monomer"] == monomer)
+                    & (d1_atoms_df["endpoint_site"] == int(site_key))
+                ]
             if not hit.empty:
                 return str(int(hit.iloc[0]["d1_ring_atom_id"]))
-        site = _lookup_site(monomer, site_index)
+        site = _lookup_site(monomer, site_key)
         return site.get("d1_ring_atom_id", "") or ""
 
     si = _lookup_site(mon_i, site_i)
@@ -813,18 +838,25 @@ _RANK_COLORS = [
 
 # Default atom-site colors requested for BMMpM-style tooth / tip sites.
 DEFAULT_SITE_HIGHLIGHT_COLORS: dict[str, str] = {
-    "s3:A": "#4363d8",  # blue
-    "s6:A": "#f58231",  # orange
-    "s7:A": "#e6194b",  # red
+    "R2": "#4363d8",
+    "R3": "#f58231",
+    "R1": "#e6194b",
+    "s3:A": "#4363d8",
+    "s6:A": "#f58231",
+    "s7:A": "#e6194b",
 }
 
 
-def _site_label(site_index: Any, kind: Any) -> str:
-    """Canonical label like ``s3:A`` / ``s0:R``."""
+def _site_label(site_index: Any, kind: Any, role: Any = "") -> str:
+    """Canonical label: Murata role (``R1``) or hull ``s3:A``."""
+    if role:
+        from src.EndpointAnalyzer.gsa_site_map import plot_label_for_role
+
+        return plot_label_for_role(str(role), str(kind or ""))
     try:
         idx = int(site_index)
     except (TypeError, ValueError):
-        return ""
+        return str(role or "")
     kind_s = str(kind or "").strip().lower()
     letter = "A" if kind_s.startswith("atom") else "R" if kind_s.startswith("ring") else "?"
     return f"s{idx}:{letter}"
@@ -836,9 +868,10 @@ def _resolve_site_color(
     site_colors: Optional[dict[str, str]] = None,
     *,
     default: str = "#f5c542",
+    role: Any = "",
 ) -> str:
     colors = site_colors if site_colors is not None else DEFAULT_SITE_HIGHLIGHT_COLORS
-    label = _site_label(site_index, kind)
+    label = _site_label(site_index, kind, role=role)
     if label in colors:
         return colors[label]
     # Also allow bare keys like "s3" or "3:A"
@@ -1173,7 +1206,9 @@ def write_transition_sites_ngl_html(
     if sites_df is not None and not sites_df.empty:
         grouped: dict[str, dict[str, Any]] = {}
         for _, srow in sites_df.iterrows():
-            label = _site_label(srow.get("site_index"), srow.get("kind"))
+            label = _site_label(
+                srow.get("site_index"), srow.get("kind"), role=srow.get("role", "")
+            )
             if label not in colors:
                 continue
             ngl_idxs, _ = _atom_ids_to_positions(

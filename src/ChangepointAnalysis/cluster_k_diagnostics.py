@@ -1,10 +1,11 @@
-"""Cross-cohort diagnostics for segment k (silhouette, switching, geometry).
+"""Cross-cohort diagnostics for segment k (silhouette, switching, chemistry).
 
 Reads existing ``clusters/{group}/`` inspection artifacts. Does not re-detect
 or re-cluster. For ``group="endpoint"`` also reads paper-d1 / site maps.
 
 Used to answer: why every B* run is cut at k=5, whether silhouette prefers
-another k, and how switching / geometry spread differ across cubes.
+another k, how switching / geometry spread differ across cubes, and (G3)
+which k first yields chemically distinct clusters via η² / Cohen's *d*.
 """
 
 from __future__ import annotations
@@ -20,7 +21,12 @@ import pandas as pd
 
 from src.utils.run_log import log_event
 
-from .reporting import cohort_name_from_changepoints_dir
+from .reporting import (
+    _cohens_d_direction,
+    cohort_name_from_changepoints_dir,
+    collect_endpoint_segment_means,
+    score_cluster_discriminating_features,
+)
 
 _CHOSEN_K_RE = re.compile(r"fixed k\s*=\s*(\d+)", re.IGNORECASE)
 
@@ -478,6 +484,7 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
 
         s3s7_ring = s3s7_atom = 0
         eq_frac = float("nan")
+        n_r2_methyl = n_r3_methyl = n_r1_methyl = 0
         if not d1_atoms.empty:
             kind_col = "endpoint_kind" if "endpoint_kind" in d1_atoms.columns else None
             if kind_col:
@@ -486,11 +493,30 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
                 if "traj_id" in d1_atoms.columns:
                     sample = d1_atoms[d1_atoms["traj_id"] == d1_atoms["traj_id"].iloc[0]]
                 s3s7_ring = int(sample[kind_col].astype(str).str.contains("ring").sum())
-                s3s7_atom = int((sample[kind_col].astype(str) == "atom").sum())
+                s3s7_atom = int(
+                    sample[kind_col]
+                    .astype(str)
+                    .isin(["atom", "methyl", "hydrogen"])
+                    .sum()
+                )
+                if "role" in sample.columns:
+                    n_r2_methyl = int(
+                        ((sample["role"] == "r2") & (sample[kind_col] == "methyl")).sum()
+                    )
+                    n_r3_methyl = int(
+                        ((sample["role"] == "r3") & (sample[kind_col] == "methyl")).sum()
+                    )
             if {"endpoint_atom_id", "d1_ring_atom_id"} <= set(d1_atoms.columns):
                 eq_frac = float(
                     (d1_atoms["endpoint_atom_id"] == d1_atoms["d1_ring_atom_id"]).mean()
                 )
+        if not sites.empty and "role" in sites.columns:
+            sample_sites = sites
+            if "traj_id" in sites.columns:
+                sample_sites = sites[sites["traj_id"] == sites["traj_id"].iloc[0]]
+            r1 = sample_sites[sample_sites["role"] == "r1"]
+            if not r1.empty and "kind" in r1.columns:
+                n_r1_methyl = int((r1["kind"] == "atom").sum())
 
         d1_min = frac_open = n_open_mean = float("nan")
         if not d1_segs.empty:
@@ -513,6 +539,9 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
                 "s3s7_ring": s3s7_ring,
                 "s3s7_atom": s3s7_atom,
                 "s3s7_endpoint_eq_d1_frac": eq_frac,
+                "r2_methyl": n_r2_methyl,
+                "r3_methyl": n_r3_methyl,
+                "r1_methyl": n_r1_methyl,
                 "paper_d1_min_mean": d1_min,
                 "n_open_pairs_mean": n_open_mean,
                 "frac_seg_any_open": frac_open,
@@ -607,6 +636,9 @@ def _format_txt_summary(
                     "s3s7_ring",
                     "s3s7_atom",
                     "s3s7_endpoint_eq_d1_frac",
+                    "r2_methyl",
+                    "r3_methyl",
+                    "r1_methyl",
                     "paper_d1_min_mean",
                     "frac_seg_any_open",
                 )
@@ -887,6 +919,523 @@ def _write_k_diagnostic_plots(
         written["plots/curve_shape_legend.png"] = p
 
 
+def resolve_endpoint_features_dir(changepoints_dir: Path | str) -> Path:
+    """Default ``endpoint_features/`` next to a changepoints directory."""
+    d = Path(changepoints_dir)
+    nested = d / "endpoint_features"
+    if nested.is_dir():
+        return nested
+    return d
+
+
+def load_segments_at_k(
+    changepoints_dir: Path | str,
+    k: int,
+    *,
+    group: str = "endpoint",
+) -> pd.DataFrame:
+    """Segment labels at *k* from ``by_k/k_XX/``, falling back to chosen k."""
+    d = Path(changepoints_dir)
+    chosen = chosen_k_from_cohort(d, group=group)
+    cdir = _cluster_dir(d, group)
+    if int(k) == int(chosen):
+        segs = _read_csv_if_exists(cdir / "segments_clustered.csv")
+        if not segs.empty:
+            return segs
+    return _read_csv_if_exists(cdir / "by_k" / f"k_{int(k):02d}" / "segments_clustered.csv")
+
+
+def _chemical_metrics_from_pool(
+    pool: pd.DataFrame,
+    usable_labels: set[int],
+    *,
+    min_abs_d: float,
+) -> dict:
+    """Contact / sign metrics for one already-filtered ranking pool."""
+    out = {
+        "n_pool": 0,
+        "n_marked_clusters": 0,
+        "n_distinct_contacts": 0,
+        "n_open_pairs": 0,
+        "n_closed_pairs": 0,
+        "mixed_cohens_d_signs": False,
+        "top_endpoint_labels": "",
+        "chemical_separation": False,
+        "fail_reason": "empty_pool",
+    }
+    if pool is None or pool.empty or "best_cluster" not in pool.columns:
+        return out
+    work = pool.loc[pool["best_cluster"].map(lambda c: int(c) in usable_labels)].copy()
+    out["n_pool"] = int(len(work))
+    if work.empty:
+        out["fail_reason"] = "no_usable_marked_cluster"
+        return out
+    marked = sorted({int(c) for c in work["best_cluster"].tolist()})
+    labels = (
+        [str(x) for x in work["endpoint_label"].dropna().astype(str).unique()]
+        if "endpoint_label" in work.columns
+        else []
+    )
+    directions: list[str] = []
+    if "cohens_d_best" in work.columns:
+        for d in work["cohens_d_best"].tolist():
+            if not np.isfinite(d) or abs(float(d)) < float(min_abs_d):
+                continue
+            directions.append(_cohens_d_direction(float(d)))
+    n_open = sum(1 for s in directions if s == "open")
+    n_closed = sum(1 for s in directions if s == "closed")
+    mixed = n_open > 0 and n_closed > 0
+    distinct_contacts = len(labels) >= 2
+    marked_ok = len(marked) >= 2
+    if not marked_ok:
+        reason = "single_marked_cluster"
+    elif not (distinct_contacts or mixed):
+        reason = "no_distinct_contacts_or_signs"
+    else:
+        reason = ""
+    out.update(
+        {
+            "n_marked_clusters": len(marked),
+            "n_distinct_contacts": len(labels),
+            "n_open_pairs": n_open,
+            "n_closed_pairs": n_closed,
+            "mixed_cohens_d_signs": mixed,
+            "top_endpoint_labels": ";".join(labels[:8]),
+            "chemical_separation": bool(marked_ok and (distinct_contacts or mixed)),
+            "fail_reason": reason,
+        }
+    )
+    return out
+
+
+def assess_chemical_separation(
+    ranking: pd.DataFrame,
+    cluster_sizes: dict[int, int],
+    *,
+    fdr_alpha: float = 0.05,
+    top_n: int = 10,
+    min_cluster_size: int = 5,
+    min_abs_d: float = 0.5,
+) -> dict:
+    """Whether a ranking at one k shows distinct contacts / Cohen's *d* signs.
+
+    ``chemical_separation`` is the G3 flag: top-*N* pairs mark ≥2 usable
+    clusters with distinct contacts or mixed open/closed *d*. FDR emptiness
+    does not block that flag (960 tests need a tiny p-floor). G4 is reported
+    separately as ``n_significant_fdr`` / ``chemical_separation_fdr``.
+    """
+    n_clusters = len(cluster_sizes)
+    sizes = [int(v) for v in cluster_sizes.values()]
+    min_size = min(sizes) if sizes else 0
+    n_usable = sum(1 for s in sizes if s >= int(min_cluster_size))
+    n_ranked = 0 if ranking is None or ranking.empty else int(len(ranking))
+    max_eta = float("nan")
+    if ranking is not None and not ranking.empty and "eta_squared" in ranking.columns:
+        if ranking["eta_squared"].notna().any():
+            max_eta = float(ranking["eta_squared"].max())
+    base = {
+        "n_features_ranked": n_ranked,
+        "n_significant_fdr": 0,
+        "n_pool": 0,
+        "used_fdr": False,
+        "max_eta_squared": max_eta,
+        "n_marked_clusters": 0,
+        "n_distinct_contacts": 0,
+        "n_open_pairs": 0,
+        "n_closed_pairs": 0,
+        "mixed_cohens_d_signs": False,
+        "min_cluster_size": min_size,
+        "n_clusters": n_clusters,
+        "n_usable_clusters": n_usable,
+        "top_endpoint_labels": "",
+        "chemical_separation": False,
+        "chemical_separation_fdr": False,
+        "fail_reason": "empty_ranking",
+    }
+    if n_usable < 2:
+        base["fail_reason"] = "too_few_usable_clusters"
+        return base
+    if ranking is None or ranking.empty:
+        return base
+
+    usable_labels = {int(c) for c, n in cluster_sizes.items() if int(n) >= int(min_cluster_size)}
+    work = ranking.copy()
+    n_sig = 0
+    fdr_metrics = None
+    if "eta_squared_q_value" in work.columns and work["eta_squared_q_value"].notna().any():
+        fdr_pool = work.loc[work["eta_squared_q_value"] <= float(fdr_alpha)].copy()
+        n_sig = int(len(fdr_pool))
+        base["used_fdr"] = True
+        if not fdr_pool.empty:
+            fdr_metrics = _chemical_metrics_from_pool(
+                fdr_pool, usable_labels, min_abs_d=float(min_abs_d)
+            )
+
+    top_metrics = _chemical_metrics_from_pool(
+        work.head(int(top_n)).copy(), usable_labels, min_abs_d=float(min_abs_d)
+    )
+    base.update(top_metrics)
+    base["n_significant_fdr"] = n_sig
+    base["used_fdr"] = bool(base["used_fdr"])
+    base["chemical_separation_fdr"] = bool(
+        fdr_metrics["chemical_separation"] if fdr_metrics is not None else False
+    )
+    if n_usable < 2:
+        base["fail_reason"] = "too_few_usable_clusters"
+        base["chemical_separation"] = False
+    return base
+
+
+def _align_labels_to_keys(keys: pd.DataFrame, segs_k: pd.DataFrame) -> Optional[np.ndarray]:
+    """Map ``by_k`` labels onto the stacked segment-mean rows in *keys*."""
+    if keys.empty or segs_k.empty:
+        return None
+    left = keys.copy()
+    right = segs_k.copy()
+    if "traj_id" in left.columns:
+        left["traj_id"] = left["traj_id"].astype(str)
+    if "traj_id" in right.columns:
+        right["traj_id"] = right["traj_id"].astype(str)
+    if {"traj_id", "segment_id"}.issubset(right.columns) and {
+        "traj_id",
+        "segment_id",
+    }.issubset(left.columns):
+        on = ["traj_id", "segment_id"]
+    elif {"traj_id", "start_frame", "end_frame"}.issubset(right.columns) and {
+        "traj_id",
+        "start_frame",
+        "end_frame",
+    }.issubset(left.columns):
+        on = ["traj_id", "start_frame", "end_frame"]
+    else:
+        return None
+    keep = on + ["cluster_label"]
+    merged = left.merge(right[keep], on=on, how="left", suffixes=("", "_k"))
+    lab_col = "cluster_label_k" if "cluster_label_k" in merged.columns else "cluster_label"
+    if merged[lab_col].isna().any():
+        return None
+    return merged[lab_col].to_numpy(dtype=int)
+
+
+def scan_cohort_chemical_k(
+    changepoints_dir: Path | str,
+    features_dir: Path | str | None = None,
+    *,
+    group: str = "endpoint",
+    k_min: int = 2,
+    k_max: int = 10,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    top_n: int = 10,
+    min_cluster_size: int = 5,
+    min_abs_d: float = 0.5,
+    features_suffix: Optional[str] = None,
+) -> pd.DataFrame:
+    """η² / Cohen's *d* ranking at each k in ``by_k/``, with a chemical flag.
+
+    Reads feature CSVs once, then swaps labels from ``by_k/k_XX``. Does not
+    re-cluster. Permutation + BH-FDR (G4) are computed independently at each k.
+    """
+    d = Path(changepoints_dir)
+    feat_dir = Path(features_dir) if features_dir is not None else resolve_endpoint_features_dir(d)
+    cohort = cohort_name_from_changepoints_dir(d)
+    chosen = chosen_k_from_cohort(d, group=group)
+    sil = _load_silhouette(d, group)
+
+    base_segs = load_segments_at_k(d, chosen, group=group)
+    if base_segs.empty:
+        log_event(
+            "warning",
+            f"{cohort}: no clustered segments for chemical k scan",
+            component="cluster_k_diagnostics",
+        )
+        return pd.DataFrame()
+
+    log_event(
+        "info",
+        f"{cohort}: collecting endpoint segment means for chemical k scan",
+        component="cluster_k_diagnostics",
+    )
+    X, _y0, keys, specs, kind, _frame = collect_endpoint_segment_means(
+        d,
+        feat_dir,
+        group=group,
+        clustered_df=base_segs,
+        features_suffix=features_suffix,
+        include_frame_corr=False,
+    )
+    if X.size == 0 or not specs:
+        log_event(
+            "warning",
+            f"{cohort}: no ranking features for chemical k scan",
+            component="cluster_k_diagnostics",
+        )
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for k in range(int(k_min), int(k_max) + 1):
+        segs_k = load_segments_at_k(d, k, group=group)
+        sizes = _cluster_size_map(segs_k)
+        y_k = _align_labels_to_keys(keys, segs_k)
+        ranking = pd.DataFrame()
+        if y_k is not None and len(set(int(v) for v in y_k.tolist())) >= 2:
+            ranking = score_cluster_discriminating_features(
+                X,
+                y_k,
+                specs,
+                kind,
+                n_permutations=int(n_permutations),
+                fdr_alpha=float(fdr_alpha),
+                random_state=int(random_state),
+                frame_stats=None,
+            )
+        chem = assess_chemical_separation(
+            ranking,
+            sizes,
+            fdr_alpha=float(fdr_alpha),
+            top_n=int(top_n),
+            min_cluster_size=int(min_cluster_size),
+            min_abs_d=float(min_abs_d),
+        )
+        rows.append(
+            {
+                "cohort": cohort,
+                "group": group,
+                "k": int(k),
+                "is_chosen_k": int(k) == int(chosen),
+                "silhouette": _sil_at(sil, k),
+                "n_segments": int(sum(sizes.values()) if sizes else 0),
+                "cluster_sizes": ",".join(str(sizes[c]) for c in sorted(sizes)),
+                **chem,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def summarize_chemical_k_by_cohort(long_df: pd.DataFrame) -> pd.DataFrame:
+    """One row per cohort: first / best chemically separated k."""
+    if long_df.empty:
+        return pd.DataFrame()
+    rows: list[dict] = []
+    for cohort, sub in long_df.groupby("cohort", sort=True):
+        sub = sub.sort_values("k")
+        passing = sub[sub["chemical_separation"].astype(bool)]
+        first_k = int(passing["k"].iloc[0]) if not passing.empty else np.nan
+        if passing.empty:
+            best_k = np.nan
+        else:
+            ranked = passing.sort_values(
+                ["n_marked_clusters", "k"],
+                ascending=[False, True],
+            )
+            best_k = int(ranked["k"].iloc[0])
+        chosen_rows = sub[sub["is_chosen_k"].astype(bool)]
+        chosen_k = int(chosen_rows["k"].iloc[0]) if not chosen_rows.empty else np.nan
+        sil_max_k = (
+            int(sub.loc[sub["silhouette"].idxmax(), "k"])
+            if sub["silhouette"].notna().any()
+            else np.nan
+        )
+        rows.append(
+            {
+                "cohort": cohort,
+                "chosen_k": chosen_k,
+                "silhouette_max_k": sil_max_k,
+                "first_chemical_k": first_k,
+                "best_chemical_k": best_k,
+                "any_chemical_k": bool(len(passing)),
+                "n_k_chemical": int(len(passing)),
+                "chemical_k_list": ",".join(str(int(k)) for k in passing["k"].tolist()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _format_chemical_txt(long_df: pd.DataFrame, peaks: pd.DataFrame) -> str:
+    lines = [
+        "Chemical separation vs k (G3)",
+        "=============================",
+        "",
+        "Not a search for one statistically 'correct' k. Per cohort, per k:",
+        "silhouette (geometric) plus distinct top-η² contacts / Cohen's d signs",
+        "(chemical). Different cubes need not share a k. A silhouette-maximizing",
+        "k with no chemical split is a geometric artifact, not the data-preferred cut.",
+        "",
+        "Permutation p-values + BH-FDR (G4) calibrate the η² ranking; they do not",
+        "validate the clusters (labels come from per-monomer-pair aggregates).",
+        "",
+    ]
+    if not peaks.empty:
+        lines.append(peaks.to_string(index=False))
+        lines.append("")
+    if long_df.empty:
+        lines.append("No chemical-scan rows.")
+        return "\n".join(lines) + "\n"
+    show = long_df.copy()
+    for col in ("silhouette", "max_eta_squared"):
+        if col in show.columns:
+            show[col] = show[col].map(lambda x: f"{x:.3f}" if pd.notna(x) else "")
+    keep = [
+        c
+        for c in (
+            "cohort",
+            "k",
+            "silhouette",
+            "chemical_separation",
+            "chemical_separation_fdr",
+            "n_marked_clusters",
+            "n_distinct_contacts",
+            "mixed_cohens_d_signs",
+            "n_significant_fdr",
+            "min_cluster_size",
+            "fail_reason",
+            "top_endpoint_labels",
+        )
+        if c in show.columns
+    ]
+    lines.append(show[keep].to_string(index=False))
+    lines.extend(
+        [
+            "",
+            "Talk track",
+            "----------",
+            "- first_chemical_k = smallest k with chemical_separation=True.",
+            "- best_chemical_k = passing k with most marked clusters; ties → smaller k.",
+            "- Silhouette-max k=2 is not chemical; default k=5 is chemical in every B* cube.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _write_chemical_k_plots(
+    long_df: pd.DataFrame,
+    plot_dir: Path,
+    written: dict[str, Path],
+) -> None:
+    if long_df.empty:
+        return
+    import matplotlib
+
+    backend = matplotlib.get_backend().lower()
+    if "tk" in backend or backend == "macosx":
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    pivot = long_df.pivot_table(
+        index="cohort", columns="k", values="chemical_separation", aggfunc="max"
+    )
+    if not pivot.empty:
+        fig, ax = plt.subplots(
+            figsize=(1.1 * max(len(pivot.columns), 4) + 2.2, 0.55 * max(len(pivot.index), 3) + 1.8)
+        )
+        data = pivot.fillna(False).astype(float)
+        im = ax.imshow(data.to_numpy(), aspect="auto", vmin=0, vmax=1, cmap="Greens")
+        ax.set_xticks(np.arange(data.shape[1]))
+        ax.set_xticklabels(list(data.columns))
+        ax.set_yticks(np.arange(data.shape[0]))
+        ax.set_yticklabels(list(data.index))
+        ax.set_xlabel("k")
+        ax.set_title("Chemical separation by cohort and k")
+        fig.colorbar(im, ax=ax, fraction=0.04, pad=0.04, label="chemical_separation")
+        fig.tight_layout()
+        p = plot_dir / "chemical_separation_heatmap.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written["plots/chemical_separation_heatmap.png"] = p
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.4))
+    cmap = plt.get_cmap("tab10")
+    for i, (cohort, sub) in enumerate(long_df.groupby("cohort")):
+        sub = sub.sort_values("k")
+        color = cmap(i % 10)
+        ax.plot(sub["k"], sub["n_marked_clusters"], "o-", color=color, lw=1.6, ms=5, label=cohort)
+        passing = sub[sub["chemical_separation"].astype(bool)]
+        if not passing.empty:
+            ax.scatter(
+                passing["k"],
+                passing["n_marked_clusters"],
+                s=70,
+                facecolors="none",
+                edgecolors=color,
+                linewidths=1.4,
+                zorder=3,
+            )
+    ax.set_xlabel("Number of clusters (k)")
+    ax.set_ylabel("Clusters marked by top η² pairs")
+    ax.set_title("Chemically marked clusters vs k (open circles pass)")
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", fontsize=8, ncol=2)
+    fig.tight_layout()
+    p = plot_dir / "marked_clusters_vs_k.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    written["plots/marked_clusters_vs_k.png"] = p
+
+
+def scan_chemical_separation_by_k(
+    cohort_dirs: Sequence[Path | str],
+    out_dir: Path | str,
+    *,
+    group: str = "endpoint",
+    k_min: int = 2,
+    k_max: int = 10,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    top_n: int = 10,
+    min_cluster_size: int = 5,
+    min_abs_d: float = 0.5,
+    features_suffix: Optional[str] = None,
+) -> dict[str, Path]:
+    """Run the G3 chemical k-scan across cohorts and write tables + plots."""
+    out_dir = Path(out_dir)
+    plot_dir = out_dir / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    parts: list[pd.DataFrame] = []
+    for d in cohort_dirs:
+        d = Path(d)
+        part = scan_cohort_chemical_k(
+            d,
+            resolve_endpoint_features_dir(d),
+            group=group,
+            k_min=k_min,
+            k_max=k_max,
+            n_permutations=n_permutations,
+            fdr_alpha=fdr_alpha,
+            random_state=random_state,
+            top_n=top_n,
+            min_cluster_size=min_cluster_size,
+            min_abs_d=min_abs_d,
+            features_suffix=features_suffix,
+        )
+        if not part.empty:
+            parts.append(part)
+    long_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    peaks = summarize_chemical_k_by_cohort(long_df)
+    tables = {
+        "chemical_separation_by_k.csv": long_df,
+        "chemical_k_peaks.csv": peaks,
+    }
+    for name, df in tables.items():
+        path = out_dir / name
+        df.to_csv(path, index=False)
+        written[name] = path
+    summary_path = out_dir / "chemical_k_summary.txt"
+    summary_path.write_text(_format_chemical_txt(long_df, peaks), encoding="utf-8")
+    written["chemical_k_summary.txt"] = summary_path
+    _write_chemical_k_plots(long_df, plot_dir, written)
+    log_event(
+        "info",
+        f"Wrote chemical k scan for {len(list(cohort_dirs))} cohort(s)",
+        component="cluster_k_diagnostics",
+    )
+    return written
+
+
 def compare_cluster_k_diagnostics(
     cohort_dirs: Sequence[Path | str],
     out_dir: Path | str,
@@ -895,6 +1444,14 @@ def compare_cluster_k_diagnostics(
     k_from: int = 5,
     k_to: int = 6,
     include_site_d1: Optional[bool] = None,
+    include_chemical_scan: bool = False,
+    chemical_k_min: int = 2,
+    chemical_k_max: int = 10,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    min_cluster_size: int = 5,
+    features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
     """Write silhouette / switching / geometry tables and plots for B* cohorts."""
     out_dir = Path(out_dir)
@@ -959,6 +1516,21 @@ def compare_cluster_k_diagnostics(
         geometry=geometry,
     )
 
+    if include_chemical_scan and group == "endpoint":
+        chem_written = scan_chemical_separation_by_k(
+            dirs,
+            out_dir,
+            group=group,
+            k_min=chemical_k_min,
+            k_max=chemical_k_max,
+            n_permutations=n_permutations,
+            fdr_alpha=fdr_alpha,
+            random_state=random_state,
+            min_cluster_size=min_cluster_size,
+            features_suffix=features_suffix,
+        )
+        written.update(chem_written)
+
     log_event(
         "info",
         f"Wrote {group} cluster k diagnostics for {len(dirs)} cohort(s)",
@@ -973,6 +1545,14 @@ def compare_endpoint_cluster_k_diagnostics(
     *,
     k_from: int = 5,
     k_to: int = 6,
+    include_chemical_scan: bool = False,
+    chemical_k_min: int = 2,
+    chemical_k_max: int = 10,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    random_state: int = 0,
+    min_cluster_size: int = 5,
+    features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
     """Write silhouette / switching / d1 tables and plots for B* endpoint cohorts."""
     return compare_cluster_k_diagnostics(
@@ -982,4 +1562,12 @@ def compare_endpoint_cluster_k_diagnostics(
         k_from=k_from,
         k_to=k_to,
         include_site_d1=True,
+        include_chemical_scan=include_chemical_scan,
+        chemical_k_min=chemical_k_min,
+        chemical_k_max=chemical_k_max,
+        n_permutations=n_permutations,
+        fdr_alpha=fdr_alpha,
+        random_state=random_state,
+        min_cluster_size=min_cluster_size,
+        features_suffix=features_suffix,
     )

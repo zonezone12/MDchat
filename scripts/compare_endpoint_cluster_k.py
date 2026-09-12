@@ -10,7 +10,8 @@ python scripts/compare_endpoint_cluster_k.py \\
     --output-root output \\
     --pattern "endpoint_changepoints_B*" \\
     --exclude-test \\
-    --out-dir output/endpoint_cluster_k_diagnostics
+    --chemical-scan \\
+    --out-dir output/endpoint_cluster_chemical_k
 """
 
 from __future__ import annotations
@@ -92,6 +93,45 @@ def parse_args() -> argparse.Namespace:
         default=6,
         help="Upper k for Ward-split table (default: 6)",
     )
+    p.add_argument(
+        "--chemical-scan",
+        action="store_true",
+        help=(
+            "G3: rank site pairs at each k=2–10 and flag chemical separation "
+            "(distinct top-η² contacts / Cohen's d signs + G4 permutation FDR). "
+            "Reads endpoint feature CSVs once per cohort."
+        ),
+    )
+    p.add_argument(
+        "--chemical-k-min",
+        type=int,
+        default=2,
+        help="Minimum k for the chemical scan (default: 2)",
+    )
+    p.add_argument(
+        "--chemical-k-max",
+        type=int,
+        default=10,
+        help="Maximum k for the chemical scan (default: 10)",
+    )
+    p.add_argument(
+        "--n-permutations",
+        type=int,
+        default=999,
+        help="Label-shuffle permutations for η² p-values (default: 999)",
+    )
+    p.add_argument(
+        "--fdr-alpha",
+        type=float,
+        default=0.05,
+        help="BH-FDR alpha (default: 0.05)",
+    )
+    p.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=5,
+        help="Ignore clusters smaller than this when scoring chemical splits (default: 5)",
+    )
     return p.parse_args()
 
 
@@ -141,6 +181,12 @@ def main() -> None:
                 out_dir,
                 k_from=args.k_from,
                 k_to=args.k_to,
+                include_chemical_scan=args.chemical_scan,
+                chemical_k_min=args.chemical_k_min,
+                chemical_k_max=args.chemical_k_max,
+                n_permutations=args.n_permutations,
+                fdr_alpha=args.fdr_alpha,
+                min_cluster_size=args.min_cluster_size,
             )
         else:
             written = compare_cluster_k_diagnostics(

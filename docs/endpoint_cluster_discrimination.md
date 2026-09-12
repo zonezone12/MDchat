@@ -307,7 +307,7 @@ Written only during **summarize**, when:
 3. `clusters/<group>/cluster_representatives.csv` exists
 4. Ranking returns a non-empty table
 
-Columns: `feature`, `endpoint_label`, `eta_squared`, `epsilon_squared_kw`, `cohens_d_best`, `best_cluster`, `frame_max_abs_corr`, `rank`.
+Columns: `feature`, `endpoint_label`, `eta_squared`, `epsilon_squared_kw`, `cohens_d_best`, `best_cluster`, `frame_max_abs_corr`, `rank`. With the G4 permutation null (default 999 shuffles): also `eta_squared_p_value`, `eta_squared_q_value`, `n_permutations`, `significant_fdr`.
 
 Timeline labels look like:
 
@@ -384,20 +384,39 @@ Three stacked causes. BMMpM is not a noisier BHHpM; the paper cation–π coordi
 
 ![Pelt switching: BMMpM has few, long segments](../output/endpoint_cluster_k_diagnostics/plots/segment_switching.png)
 
-**1. Methyl-atom hull; paper d1 never enters 4.5–5.5 Å**
+**1. Hull-index d1 was the wrong contact; paper d1 never enters 4.5–5.5 Å on BMM (old CSVs)**
 
 ![Paper d1 occupancy](../output/endpoint_cluster_k_diagnostics/plots/paper_d1_open.png)
 
 ![Endpoint-site kinds](../output/endpoint_cluster_k_diagnostics/plots/hull_site_kinds.png)
 
-| Cube | Hull | `s3` / `s7` | paper-d1 min | segs with any open pair |
+The table below is the **old hull-order run** (do not treat `s3`/`s7` as R2/R3). Canonical QC is now `output/endpoint_changepoints_{CUBE}/endpoint_features/endpoint_sites.png`: eight fixed roles, blue = ring, orange = atom **painted on top** so R=H para carbons (R1 / R2 / R3 / Ph-p) stay orange on their blue rings.
+
+| Cube | Old hull look | Old `s3` / `s7` | paper-d1 min (hull) | segs with any open pair |
 |------|------|-------------|--------------|-------------------------|
 | BHHpH / BHHpM | ring-majority | both 6-atom **ring** | ~4.4 Å | 96–98% |
-| BMHpH / BMHpM | mixed | one ring, one atom | ~4.9 Å | 70–81% |
-| BMMpH | mixed | one ring, one atom | ~9.8 Å | **0%** |
+| BMHpH / BMHpM | mixed 4+4 | one ring, one atom | ~4.9 Å | 70–81% |
+| BMMpH | mixed 4+4 | one ring, one atom | ~9.8 Å | **0%** |
 | **BMMpM** | **atom-majority (62%)** | **both singleton atoms** | **~9.4 Å** | **0%** |
 
-On BMMpM the d1 step-inward *does* fire (`endpoint_atom ≠ d1_ring_atom`). The resulting distances are still ~10–17 Å. BHHpM’s top η² contacts are ring-face openings (`M2S0–M5S0`); BMMpM’s are methyl-site packings (`M2S2–M3S3`).
+**Site-map bug (fixed in code; numbers above are the hull run).** Hull-order `s3`/`s7` were not R2/R3. BMHpM vs BMMpH both showed 4 ring + 4 atom so the maps looked symmetric, but `s3` was the bottom phenyl on BMHpM and an inner ring on BMMpH — that is why d1 was ~4.9 Å vs ~9.8 Å.
+
+**Remapped equatorial d1** (stored `endpoint_dist_*` columns → canonical R2(i)–R3(j), six edges, no traj replay). Quote these instead of the hull table. Details: [changepoint_pipeline.md](changepoint_pipeline.md#remap-stored-pairs--murata-equatorial-d1).
+
+![Remapped equatorial d1](../output/murata_d1/plots/murata_d1_overview.png)
+
+| Cube | Median d1 (Å) | Compact 4.5–5.5 | Elongated ≥ 7 | Stored pair |
+|------|---------------|-----------------|---------------|-------------|
+| BHHpH | 4.97 | 77% | 10% | R2/R3 aryl (H) |
+| BHHpM | 4.99 | 75% | 14% | R2/R3 aryl (H) |
+| BMHpH | 5.04 | 37% | 8% | R2 aryl – R3 methyl |
+| BMHpM | 5.06 | 37% | 8% | R2 aryl – R3 methyl |
+| BMMpH | 4.30 | 27% | 0.3% | methyl–methyl |
+| BMMpM | 4.33 | 27% | 2% | methyl–methyl |
+
+BHHpH / BHHpM now sit in Murata's compact window (plus an 8–9 Å elongated shoulder). BMH / BMM are **methyl-carbon** proxies, ~0.7 Å short of C2–C3; do not treat their compact fractions as Murata d1 until ipso–ipso is re-extracted. Edges are the same 6-cycle on every cube (0→4, 1→5, 2→3, 3→1, 4→2, 5→0).
+
+On the old hull CSVs the d1 step-inward *does* fire on BMMpM (`endpoint_atom ≠ d1_ring_atom`) but those atoms were R1+R3, so distances stayed ~10–17 Å. BHHpM’s top η² contacts are ring-face openings (`M2S0–M5S0`); BMMpM’s are methyl-site packings (`M2S2–M3S3`).
 
 **2. Trajectories almost do not switch**
 
@@ -509,7 +528,61 @@ python scripts/run_gsa_step1_cluster_k.py --groups iodine na_water combined --wo
 
 ---
 
-## 12. Related code
+## 12. G4 — permutation null and BH-FDR on the ranking
+
+η² cannot *validate* the clusters. They are Ward groups of per-monomer-pair aggregates; ranking then scores site pairs that are linear pieces of those same aggregates. Section 4's jump from η² max 0.37 → 0.83 when pair means entered clustering is that circularity.
+
+What G4 adds is a **calibrated ranking**, not a cluster test:
+
+1. Build the segment-mean matrix *X* (raw Å) as before.
+2. Shuffle `cluster_label` *B* times (default 999), preserving cluster sizes.
+3. For each feature, *p* = (1 + #{η²_perm ≥ η²_obs}) / (*B* + 1).
+4. Benjamini–Hochberg *q* across the ~960 candidate columns; `significant_fdr` is *q* ≤ 0.05.
+
+Columns on `endpoint_pair_cluster_correlation.csv`: `eta_squared_p_value`, `eta_squared_q_value`, `n_permutations`, `significant_fdr`. Disable with `--ranking-n-permutations 0`.
+
+Quote η² as "fraction of segment-mean variance associated with these labels, with a permutation *p* against chance assignment." Do not quote it as evidence that the clusters are real states.
+
+---
+
+## 13. G3 — chemical separation vs k (not one "correct" k)
+
+Silhouette's global max is k=2 for most endpoint cohorts (§10). That is geometric compactness, not chemistry. G3 asks, **per cube, per k in 2–10**, whether the existing `by_k/` labels produce distinct driving contacts or mixed open/closed Cohen's *d* signs, with clusters of size ≥ 5 (so BMHpH k=2's singleton outliers do not count).
+
+```powershell
+python scripts/compare_endpoint_cluster_k.py `
+  --chemical-scan `
+  --output-root output `
+  --pattern "endpoint_changepoints_B*" `
+  --exclude-test `
+  --out-dir output/endpoint_cluster_chemical_k
+```
+
+| Flag | Meaning |
+|------|---------|
+| `chemical_separation` | Top-10 pairs mark ≥2 usable clusters with distinct `endpoint_label` **or** mixed *d* signs |
+| `chemical_separation_fdr` | Same test on BH-significant pairs only (stricter; 960 tests need many hits at the *p*-floor) |
+| `first_chemical_k` | Smallest k that passes `chemical_separation` |
+| `best_chemical_k` | Passing k with the most marked clusters, then FDR hits |
+
+Different cubes need not share a k. Results from the published-penalty scan (`output/endpoint_cluster_chemical_k/`):
+
+| Cohort | Silhouette max | first_chemical_k | Chemical at k=5? |
+|--------|----------------|------------------|------------------|
+| BHHpH | k=2 | **3** | yes |
+| BHHpM | k=6 | **3** | yes |
+| BMHpH | k=2 (outlier trap) | **5** | yes |
+| BMHpM | k=2 | **5** | yes |
+| BMMpH | k=2 | **3** | yes (window k=3–5 only) |
+| BMMpM | rising to k=10 | **4** | yes (also 6, 9) |
+
+Silhouette-max k=2 never has chemical_separation. Default k=5 does, in every cube. BMMpM is not empty of discrete cuts — it first splits at k=4 on methyl-site packings (`M2S2–M3S3` at k=5) — but silhouette keeps climbing while chemistry is intermittent.
+
+This scan uses **published-penalty** `by_k/` labels. Own-elbow detections were not re-clustered.
+
+---
+
+## 14. Related code
 
 | Piece | Where |
 |-------|--------|
@@ -518,7 +591,9 @@ python scripts/run_gsa_step1_cluster_k.py --groups iodine na_water combined --wo
 | Clustering feature columns | `summary_base_columns`, `summary_feature_columns` (`feature_groups.py`) |
 | Ranking | `rank_cluster_discriminating_endpoint_features` |
 | Alias | `rank_cluster_correlated_pair_means` |
-| η² | `_eta_squared` |
+| η² | `_eta_squared` / `_eta_squared_columns` |
+| Permutation *p* / BH *q* | `permutation_eta_squared_pvalues`, `benjamini_hochberg_qvalues` |
+| Chemical k-scan | `scan_chemical_separation_by_k`, `assess_chemical_separation` |
 | KW ε² | `_epsilon_squared_kw` |
 | One-vs-rest *d* | `_cohens_d_one_vs_rest` |
 | Panel labels | `cluster_correlated_timeline_panels` |
@@ -527,5 +602,7 @@ python scripts/run_gsa_step1_cluster_k.py --groups iodine na_water combined --wo
 | Detection aggregates | `feature_groups.py` (`endpoint_aggregate_columns`) |
 | k / silhouette diagnostics | `compare_cluster_k_diagnostics` / `compare_endpoint_cluster_k_diagnostics` (`cluster_k_diagnostics.py`) |
 | CLI | `--n-clusters`, `--timeline-top-pairs`, `--include-site-pairs-in-detection` |
-| k-diagnostics CLI | `scripts/compare_endpoint_cluster_k.py` (`--group endpoint` or `gsa`) |
+| Canonical GSA site map | `src/EndpointAnalyzer/gsa_site_map.py` (`CANONICAL_ROLES`, `endpoint_sites.png` labels) |
+| Murata d1 remap | `remap_endpoint_cohort_d1` (`murata_d1.py`); CLI `scripts/remap_murata_d1.py` |
+| k-diagnostics CLI | `scripts/compare_endpoint_cluster_k.py` (`--group endpoint` or `gsa`; `--chemical-scan` for G3) |
 | GSA step-1 per-cube run | `scripts/run_gsa_step1_cluster_k.py` (`gsa_cohort_run.py`) |
