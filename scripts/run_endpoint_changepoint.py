@@ -28,10 +28,8 @@ python scripts/run_endpoint_changepoint.py \\
 from __future__ import annotations
 
 import argparse
-import glob
 import sys
 from pathlib import Path
-from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -43,152 +41,12 @@ from src.ChangepointAnalysis import (
     SegmentClusteringConfig,
 )
 from src.ChangepointAnalysis.pipeline import run_endpoint_changepoint
+from src.ChangepointAnalysis.traj_paths import (
+    expand_trajectories,
+    format_no_trajectories_error,
+    unique_trajectory_ids,
+)
 from src.utils.run_log import RunContext
-
-
-_GENERIC_TRAJ_STEMS = frozenset({
-    "mdcrd", "mdcrd_v", "crd", "dcd", "xtc", "trj", "nc", "prod", "equil",
-})
-_TRAJ_EXTENSIONS = (".trj", ".xtc", ".dcd", ".nc", ".crd")
-
-
-def _trajectory_output_id(traj_path: Path) -> str:
-    stem = traj_path.stem
-    parent = traj_path.parent.name
-    if stem.lower() in _GENERIC_TRAJ_STEMS and parent not in ("", ".", ".."):
-        return f"{parent}_{stem}"
-    return stem
-
-
-def _concrete_traj_files(path: Path) -> list[Path]:
-    """Resolve a glob hit to one or more readable trajectory files.
-
-    Supports HPC nested layouts such as ``$TRAJ_DIR/<run_id>/mdcrd_v``
-    (extensionless Amber mdcrd) as well as ``mdcrd_v.trj`` / directory hits.
-    """
-    if path.is_file():
-        return [path]
-
-    out: list[Path] = []
-    if path.is_dir():
-        for name in ("mdcrd_v", "mdcrd"):
-            base = path / name
-            if base.is_file():
-                out.append(base)
-                continue
-            for ext in _TRAJ_EXTENSIONS:
-                cand = Path(f"{base}{ext}")
-                if cand.is_file():
-                    out.append(cand)
-        if out:
-            return out
-        for ext in ("*.xtc", "*.trj", "*.dcd", "*.nc", "*.crd"):
-            out.extend(sorted(path.glob(ext)))
-        return out
-
-    # Path does not exist as written — try common extensions on the basename.
-    for ext in _TRAJ_EXTENSIONS:
-        cand = Path(f"{path}{ext}")
-        if cand.is_file():
-            out.append(cand)
-    return out
-
-
-def _expand_trajectories(patterns: list[str]) -> list[Path]:
-    """Expand globs / paths into concrete trajectory files.
-
-    Typical HPC pattern::
-
-        --trajectories "$TRAJ_DIR/*/mdcrd_v"
-    """
-    paths: list[Path] = []
-    for pat in patterns:
-        matches = sorted(glob.glob(pat))
-        # Also accept mdcrd_v.trj etc. when the pattern ends with a bare basename.
-        if not matches and not any(ch in Path(pat).name for ch in "*?[]"):
-            for ext in _TRAJ_EXTENSIONS:
-                matches.extend(sorted(glob.glob(f"{pat}{ext}")))
-        elif not matches and Path(pat).name in _GENERIC_TRAJ_STEMS:
-            matches = sorted(glob.glob(f"{pat}.*"))
-
-        # Fallback: "$TRAJ_DIR/*" style — each match is a run folder.
-        if not matches:
-            alt = sorted(glob.glob(pat.rstrip("/")))
-            if not alt and pat.endswith("*/mdcrd_v"):
-                alt = sorted(glob.glob(pat[: -len("/mdcrd_v")]))
-            if alt:
-                matches = alt
-
-        if matches:
-            for m in matches:
-                paths.extend(_concrete_traj_files(Path(m)))
-        else:
-            p = Path(pat)
-            resolved = _concrete_traj_files(p)
-            if resolved:
-                paths.extend(resolved)
-            elif p.is_dir():
-                for ext in ("*.xtc", "*.trj", "*.dcd", "*.nc", "*.crd"):
-                    paths.extend(sorted(p.glob(ext)))
-
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for p in paths:
-        if not p.is_file():
-            continue
-        rp = p.resolve()
-        if rp not in seen:
-            seen.add(rp)
-            unique.append(p)
-    return unique
-
-
-def _format_no_trajectories_error(patterns: list[str]) -> str:
-    """Build a diagnostic message when trajectory globs match nothing."""
-    lines = [
-        "No trajectories found for the given patterns:",
-        *[f"  {pat!r}" for pat in patterns],
-        "",
-        "Hints:",
-        "  • Quote the glob so Python expands it: --trajectories \"$TRAJ_DIR/*/mdcrd_v\"",
-        "  • Put a space before every line-continuation backslash (and no space after \\).",
-        "  • Check the nested layout exists, e.g.:",
-    ]
-    for pat in patterns:
-        norm = pat.replace("\\", "/")
-        traj_dir: Optional[Path] = None
-        if "/*/mdcrd_v" in norm:
-            traj_dir = Path(norm.split("/*/mdcrd_v", 1)[0])
-        elif norm.endswith("/*"):
-            traj_dir = Path(norm[:-2])
-        else:
-            parent = Path(pat).parent
-            if "*" not in parent.name:
-                traj_dir = parent
-        if traj_dir is None:
-            continue
-        lines.append(f"      ls \"{traj_dir}\" | head")
-        if traj_dir.is_dir():
-            kids = sorted(traj_dir.iterdir())[:8]
-            if not kids:
-                lines.append(f"    (directory exists but is empty: {traj_dir})")
-            else:
-                lines.append(f"    Found under {traj_dir}:")
-                for kid in kids:
-                    marker = ""
-                    if kid.is_dir():
-                        md = kid / "mdcrd_v"
-                        marker = (
-                            " [has mdcrd_v]"
-                            if md.is_file()
-                            else " [NO mdcrd_v]"
-                        )
-                    lines.append(f"      - {kid.name}{marker}")
-                if len(list(traj_dir.iterdir())) > 8:
-                    lines.append("      - ...")
-        else:
-            lines.append(f"    (path does not exist: {traj_dir})")
-    return "\n".join(lines)
 
 
 def parse_args() -> argparse.Namespace:
@@ -368,23 +226,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    traj_paths = _expand_trajectories(args.trajectories)
+    traj_paths = expand_trajectories(args.trajectories)
     if not traj_paths:
-        raise SystemExit(_format_no_trajectories_error(args.trajectories))
+        raise SystemExit(format_no_trajectories_error(args.trajectories))
     print(f"Found {len(traj_paths)} trajectory file(s):")
     for p in traj_paths[:20]:
         print(f"  {p}")
     if len(traj_paths) > 20:
         print(f"  ... and {len(traj_paths) - 20} more")
 
-    traj_ids = [_trajectory_output_id(p) for p in traj_paths]
-    # Disambiguate collisions
-    counts: dict[str, int] = {}
-    unique_ids: list[str] = []
-    for tid in traj_ids:
-        n = counts.get(tid, 0)
-        counts[tid] = n + 1
-        unique_ids.append(tid if n == 0 else f"{tid}_{n}")
+    traj_ids = unique_trajectory_ids(traj_paths)
+    # Disambiguate collisions already handled by unique_trajectory_ids.
 
     detection = ChangepointConfig(
         method=args.method,
@@ -436,7 +288,7 @@ def main() -> None:
             stop=args.stop,
             step=args.step,
             time_per_frame_ps=args.time_per_frame_ps,
-            traj_ids=unique_ids,
+            traj_ids=traj_ids,
             detection=detection,
             clustering=clustering,
             with_sweep=args.with_sweep,

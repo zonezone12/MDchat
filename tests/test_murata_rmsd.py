@@ -113,6 +113,9 @@ def test_attach_open_cation_pi_strips_cube_prefix() -> None:
     )
     out = attach_open_cation_pi(rmsd, opened, cube="BHHpM")
     assert list(out["n_open_cation_pi"]) == [0, 1]
+    assert list(open_count_bin(out["n_open_cation_pi"])) == [0.0, 1.0]
+
+
 def test_attach_guest_occupancy_joins_on_frame() -> None:
     import tempfile
     from pathlib import Path

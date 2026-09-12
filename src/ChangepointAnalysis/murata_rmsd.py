@@ -493,6 +493,7 @@ def compute_trajectory_motif_rmsd(
     step: int = 1,
     ref_frame: int = 0,
     n_monomers: int = 6,
+    traj_format: Optional[str] = None,
 ) -> pd.DataFrame:
     """Kabsch RMSD of Murata cation–π and equatorial motifs vs ``ref_frame``.
 
@@ -507,7 +508,7 @@ def compute_trajectory_motif_rmsd(
     from src.TrajectoryMetrics.TrajectoryMetrics import rmsd_value_aligned
     from src.utils.gsa_selections import resolve_selections
 
-    u = _load_universe(topology, trajectory)
+    u = _load_universe(topology, trajectory, traj_format=traj_format)
     n_traj = len(u.trajectory)
     frame_indices = list(range(*slice(start, stop, step).indices(n_traj)))
     if not frame_indices:
@@ -550,3 +551,43 @@ def attach_guest_occupancy(
     if "frame" not in gsa.columns or "n_guest_inside_cavity" not in gsa.columns:
         raise KeyError(str(gsa_csv))
     return rmsd_df.merge(gsa.drop_duplicates("frame"), on="frame", how="left")
+
+
+def write_trajectory_motif_rmsd(
+    topology: str,
+    trajectory: str,
+    traj_id: str,
+    cube: str,
+    out_csv: str,
+    gsa_csv: Optional[str] = None,
+    start: Optional[int] = None,
+    stop: Optional[int] = None,
+    step: int = 1,
+    ref_frame: int = 0,
+    n_monomers: int = 6,
+    traj_format: Optional[str] = None,
+) -> dict[str, object]:
+    """Worker: motif RMSD for one replica, write CSV, return the path.
+
+    Importable top-level so ``ProcessPoolExecutor`` can pickle it on spawn.
+    """
+    df = compute_trajectory_motif_rmsd(
+        topology,
+        trajectory,
+        traj_id=traj_id,
+        start=start,
+        stop=stop,
+        step=step,
+        ref_frame=ref_frame,
+        n_monomers=n_monomers,
+        traj_format=traj_format,
+    )
+    df.insert(0, "cohort", cube)
+    if gsa_csv:
+        df = attach_guest_occupancy(df, gsa_csv)
+    elif "n_guest_inside_cavity" not in df.columns:
+        df["n_guest_inside_cavity"] = 0.0
+    path = Path(out_csv)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    return {"cube": cube, "traj_id": traj_id, "path": str(path), "n": int(len(df))}
