@@ -482,6 +482,320 @@ MOTIF_XLABELS = {
     "assembly_rmsd_to_ref": "whole-cube RMSD to initial NVT (Å)",
 }
 
+_MOTIF_RMSD_USECOLS = (
+    "cohort",
+    "traj_id",
+    "frame",
+    "time_ps",
+    "assembly_rmsd_to_ref",
+    "rmsd_cation_pi",
+    "rmsd_equator",
+    "n_guest_inside_cavity",
+)
+
+
+def time_ns_from_frames(df: pd.DataFrame) -> np.ndarray:
+    """Time in ns. Prefer ``time_ps`` (1 ps/frame in these runs); else ``frame``."""
+    if "time_ps" in df.columns:
+        t = pd.to_numeric(df["time_ps"], errors="coerce").to_numpy(dtype=float)
+        if np.isfinite(t).any():
+            return t / 1000.0
+    if "frame" in df.columns:
+        return pd.to_numeric(df["frame"], errors="coerce").to_numpy(dtype=float) / 1000.0
+    raise KeyError("Need time_ps or frame to plot RMSD vs time")
+
+
+def discover_motif_rmsd_csvs_by_cube(
+    output_root: Path | str,
+    *,
+    cubes: Optional[Sequence[str]] = None,
+) -> dict[str, list[Path]]:
+    """Find ``*_motif_rmsd.csv`` under ``output/{CUBE}_motif_rmsd`` (and the mixed folder)."""
+    output_root = Path(output_root)
+    wanted = tuple(cubes) if cubes else KNOWN_CUBES
+    by_cube: dict[str, list[Path]] = {}
+    extra = output_root / "murata_motif_rmsd"
+    for cube in wanted:
+        hits: list[Path] = []
+        named = output_root / f"{cube}_motif_rmsd"
+        if named.is_dir():
+            hits.extend(named.rglob("*_motif_rmsd.csv"))
+        nested = extra / cube
+        if nested.is_dir():
+            hits.extend(nested.rglob("*_motif_rmsd.csv"))
+        uniq = sorted({p.resolve() for p in hits if p.is_file()})
+        if uniq:
+            by_cube[cube] = uniq
+    return by_cube
+
+
+def load_motif_rmsd_csvs(paths: Sequence[Path | str]) -> pd.DataFrame:
+    """Stack per-replica motif RMSD CSVs."""
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        header = pd.read_csv(path, nrows=0)
+        cols = [
+            c
+            for c in header.columns
+            if c in _MOTIF_RMSD_USECOLS
+            or str(c).startswith(
+                ("cation_pi_pole_e", "cation_pi_eq_e", "cation_pi_e", "cation_pi_angle_e", "equator_d1_e", "equator_d2_e", "equator_angle_e", "rmsd_cation_pi_e", "rmsd_equator_e")
+            )
+            or str(c) == "n_open_cation_pi"
+        ]
+        if "traj_id" not in cols:
+            continue
+        df = pd.read_csv(path, usecols=cols)
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def plot_rmsd_vs_time(
+    df: pd.DataFrame,
+    output_path: Path | str,
+    *,
+    rmsd_col: str = "rmsd_cation_pi",
+    ylabel: Optional[str] = None,
+    title: Optional[str] = None,
+    color: str = "0.35",
+) -> Path:
+    """Spaghetti of replicas plus mean RMSD vs time in ns."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if rmsd_col not in df.columns:
+        raise KeyError(rmsd_col)
+    work = df.loc[:, [c for c in ("traj_id", "time_ps", "frame", rmsd_col) if c in df.columns]].copy()
+    work["_t_ns"] = time_ns_from_frames(work)
+    work["_y"] = pd.to_numeric(work[rmsd_col], errors="coerce")
+    work = work[np.isfinite(work["_t_ns"]) & np.isfinite(work["_y"])]
+    fig, ax = plt.subplots(figsize=(8.5, 3.6), constrained_layout=True)
+    n_traj = 0
+    if "traj_id" in work.columns:
+        for _, sub in work.groupby(work["traj_id"].astype(str), sort=False):
+            sub = sub.sort_values("_t_ns")
+            ax.plot(
+                sub["_t_ns"],
+                sub["_y"],
+                color=color,
+                lw=0.55,
+                alpha=0.28,
+                rasterized=True,
+            )
+            n_traj += 1
+    else:
+        ax.plot(work["_t_ns"], work["_y"], color=color, lw=0.8, alpha=0.7)
+        n_traj = 1
+    mean = work.groupby("_t_ns", sort=True)["_y"].mean()
+    ax.plot(mean.index.to_numpy(), mean.to_numpy(), color="0.05", lw=1.35, label="mean", zorder=4)
+    for x in MURATA_RMSD_PEAKS_A:
+        ax.axhline(x, color="0.35", ls="--", lw=0.8, zorder=3)
+    ax.set_xlabel("time (ns)")
+    ax.set_ylabel(ylabel or MOTIF_XLABELS.get(rmsd_col, f"{rmsd_col} (Å)"))
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.set_title(title or f"{rmsd_col}  n_traj={n_traj}")
+    ax.legend(loc="upper right", fontsize=8)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_rmsd_vs_time_three_motifs(
+    df: pd.DataFrame,
+    output_path: Path | str,
+    *,
+    color: str = "0.35",
+    title: Optional[str] = None,
+) -> Path:
+    """Stacked cation–π / equator / whole-cube RMSD vs time (ns)."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cols = [c for c in MOTIF_XLABELS if c in df.columns]
+    if not cols:
+        raise ValueError("No motif RMSD columns to plot")
+    fig, axes = plt.subplots(
+        len(cols), 1, figsize=(8.5, 2.7 * len(cols)), sharex=True, constrained_layout=True
+    )
+    if len(cols) == 1:
+        axes = [axes]
+    n_traj = int(df["traj_id"].nunique()) if "traj_id" in df.columns else 1
+    work = df.copy()
+    work["_t_ns"] = time_ns_from_frames(work)
+    for ax, col in zip(axes, cols):
+        y = pd.to_numeric(work[col], errors="coerce")
+        ok = np.isfinite(work["_t_ns"]) & np.isfinite(y)
+        sub = work.loc[ok]
+        if "traj_id" in sub.columns:
+            for _, traj in sub.groupby(sub["traj_id"].astype(str), sort=False):
+                traj = traj.sort_values("_t_ns")
+                ax.plot(
+                    traj["_t_ns"],
+                    pd.to_numeric(traj[col], errors="coerce"),
+                    color=color,
+                    lw=0.5,
+                    alpha=0.25,
+                    rasterized=True,
+                )
+        mean = sub.assign(_y=pd.to_numeric(sub[col], errors="coerce")).groupby("_t_ns")["_y"].mean()
+        ax.plot(mean.index.to_numpy(), mean.to_numpy(), color="0.05", lw=1.3, zorder=4)
+        for x in MURATA_RMSD_PEAKS_A:
+            ax.axhline(x, color="0.35", ls="--", lw=0.75, zorder=3)
+        ax.set_ylabel(MOTIF_XLABELS[col].replace(" to initial NVT (Å)", "\n(Å)"))
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0)
+    axes[-1].set_xlabel("time (ns)")
+    fig.suptitle(title or f"RMSD vs time  (n={n_traj} replicas; dashed 1.0 / 1.5 / 2.7 Å)")
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_rmsd_vs_time_mean_by_cube(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    output_path: Path | str,
+    *,
+    rmsd_col: str = "rmsd_cation_pi",
+    ylabel: Optional[str] = None,
+) -> Path:
+    """Mean RMSD vs time, one line per cube."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.5, 4.2), constrained_layout=True)
+    cohorts = [c for c in KNOWN_CUBES if c in frames_by_cohort] or list(frames_by_cohort)
+    for cube in cohorts:
+        df = frames_by_cohort[cube]
+        if rmsd_col not in df.columns:
+            continue
+        t = time_ns_from_frames(df)
+        y = pd.to_numeric(df[rmsd_col], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(t) & np.isfinite(y)
+        tmp = pd.DataFrame({"t": t[ok], "y": y[ok]})
+        mean = tmp.groupby("t", sort=True)["y"].mean()
+        ax.plot(
+            mean.index.to_numpy(),
+            mean.to_numpy(),
+            color=CUBE_COLORS.get(cube, None),
+            lw=1.5,
+            label=cube,
+        )
+    for x in MURATA_RMSD_PEAKS_A:
+        ax.axhline(x, color="0.4", ls="--", lw=0.8)
+    ax.set_xlabel("time (ns)")
+    ax.set_ylabel(ylabel or MOTIF_XLABELS.get(rmsd_col, f"{rmsd_col} (Å)"))
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.set_title("Mean RMSD vs time (dashed: Murata 1.0 / 1.5 / 2.7 Å)")
+    ax.legend(fontsize=8, ncol=2)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def unit_series_columns(df: pd.DataFrame, prefix: str) -> list[str]:
+    """Columns like ``cation_pi_pole_e0_…`` / ``equator_d1_e0_…`` (not pooled RMSD)."""
+    cols = sorted(c for c in df.columns if str(c).startswith(prefix))
+    if prefix == "cation_pi_e":
+        cols = [c for c in cols if not str(c).startswith("cation_pi_eq")]
+    return cols
+
+
+def _unit_legend_label(col: str) -> str:
+    import re
+
+    name = str(col)
+    hit = re.search(r"_e(\d+)_m(\d+)\w+_m(\d+)", name)
+    if hit:
+        return f"e{hit.group(1)}  m{hit.group(2)}→m{hit.group(3)}"
+    hit = re.search(r"_e(\d+)$", name)
+    if hit:
+        return f"e{hit.group(1)}"
+    return name
+
+
+def plot_unit_series_vs_time(
+    df: pd.DataFrame,
+    output_path: Path | str,
+    *,
+    prefix: str,
+    ylabel: str,
+    title: Optional[str] = None,
+    hlines: Sequence[float] = (),
+) -> Path:
+    """Mean-over-replicas trace for each locked unit (six cation–π or d1 contacts)."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cols = unit_series_columns(df, prefix)
+    if not cols:
+        raise ValueError(f"No columns starting with {prefix!r}")
+    work = df.copy()
+    work["_t_ns"] = time_ns_from_frames(work)
+    fig, ax = plt.subplots(figsize=(8.5, 3.8), constrained_layout=True)
+    for col in cols:
+        y = pd.to_numeric(work[col], errors="coerce")
+        ok = np.isfinite(work["_t_ns"]) & np.isfinite(y)
+        tmp = pd.DataFrame({"t": work.loc[ok, "_t_ns"], "y": y[ok]})
+        mean = tmp.groupby("t", sort=True)["y"].mean()
+        ax.plot(mean.index.to_numpy(), mean.to_numpy(), lw=1.3, label=_unit_legend_label(col))
+    for x in hlines:
+        ax.axhline(float(x), color="0.4", ls="--", lw=0.8)
+    ax.set_xlabel("time (ns)")
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(left=0)
+    if "°" in ylabel or "angle" in prefix:
+        ax.set_ylim(0, 180)
+    else:
+        ax.set_ylim(bottom=0)
+    ax.set_title(title or ylabel)
+    ax.legend(fontsize=7, ncol=3)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_per_unit_motif_series(
+    df: pd.DataFrame,
+    plots_dir: Path | str,
+    *,
+    cube: str,
+) -> list[Path]:
+    """Write mean-over-replicas traces for the six locked units, if present."""
+    plots_dir = Path(plots_dir)
+    written: list[Path] = []
+    specs = (
+        ("cation_pi_pole_e", "π(pole) Py⁺–Ph (Å)", (6.5,), "cation_pi_pole"),
+        ("cation_pi_eq_e", "π(equator) Py⁺–Ph (Å)", (6.5,), "cation_pi_eq"),
+        ("cation_pi_e", "cation–π π(pole) (Å)", (6.5,), "cation_pi_units"),
+        ("equator_d1_e", "equatorial d1 C2–C3 (Å)", (4.5, 5.5, 7.0), "equator_d1_units"),
+        ("equator_d2_e", "equatorial d2 CPy–C3 (Å)", (), "equator_d2_units"),
+        ("cation_pi_angle_e", "π(pole)–Ph–π(eq) angle (°)", (180.0,), "cation_pi_angle"),
+        ("equator_angle_e", "d1–C3–d2 angle (°)", (), "equator_angle"),
+        ("rmsd_cation_pi_e", "cation–π unit RMSD (Å)", MURATA_RMSD_PEAKS_A, "cation_pi_unit_rmsd"),
+        ("rmsd_equator_e", "equator unit RMSD (Å)", MURATA_RMSD_PEAKS_A, "equator_unit_rmsd"),
+    )
+    for prefix, ylabel, hlines, tag in specs:
+        if not unit_series_columns(df, prefix):
+            continue
+        path = plot_unit_series_vs_time(
+            df,
+            plots_dir / f"rmsd_vs_time_{tag}.png",
+            prefix=prefix,
+            ylabel=ylabel,
+            title=f"{cube}  {ylabel}  (six locked units)",
+            hlines=hlines,
+        )
+        written.append(path)
+    return written
+
 
 def compute_trajectory_motif_rmsd(
     topology: Path | str,
@@ -495,14 +809,32 @@ def compute_trajectory_motif_rmsd(
     n_monomers: int = 6,
     traj_format: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Kabsch RMSD of Murata cation–π and equatorial motifs vs ``ref_frame``.
+    """Per-unit cation–π / equatorial distances and RMSD vs ``ref_frame``.
 
-    Reads only the motif / MOL AtomGroups each frame (not the full solvent box).
+    Pooled ``rmsd_cation_pi`` / ``rmsd_equator`` are kept for comparison.
+    Each Ph sandwich stores π(pole), π(equator), and the angle at Ph.
+    Each equatorial edge stores d1, d2, and the angle at C3.
     """
     from src.ChangepointAnalysis.murata_criteria import (
+        CATION_PI_OPEN_LO,
         MURATA_RMSD_MOTIFS,
+        cation_pi_angle_column,
+        cation_pi_eq_column,
+        cation_pi_pole_column,
+        cation_pi_unit_indices,
+        equator_angle_column,
+        equator_d1_column,
+        equator_d1_d2_angle_deg,
+        equator_d2_column,
+        equator_d2_distance,
+        equator_unit_indices,
+        angle_at_vertex_deg,
+        lock_cation_pi_sandwiches,
+        lock_equator_edges,
         motif_atom_indices,
         resolve_murata_criteria_atoms,
+        _indices_for,
+        _role_point,
     )
     from src.ChangepointAnalysis.pipeline import _load_universe
     from src.TrajectoryMetrics.TrajectoryMetrics import rmsd_value_aligned
@@ -517,11 +849,69 @@ def compute_trajectory_motif_rmsd(
         u, gsa_resname="MOL", n_monomers=int(n_monomers), auto_tooth=False
     )
     roles = resolve_murata_criteria_atoms(u, sels.monomer_selections)
+    monomers = sorted(set(int(m) for m in roles["monomer"]))
     u.trajectory[int(ref_frame)]
+    pos0 = np.asarray(u.atoms.positions, dtype=float)
+    sandwiches = lock_cation_pi_sandwiches(pos0, roles)
+    equator_edges = lock_equator_edges(pos0, roles)
+
     groups: dict[str, Any] = {"assembly_rmsd_to_ref": u.select_atoms("resname MOL")}
     for name, role_names in MURATA_RMSD_MOTIFS.items():
         idx = motif_atom_indices(roles, role_names)
         groups[f"rmsd_{name}"] = u.atoms[idx]
+    pole_dist_cols: list[str] = []
+    eq_pi_dist_cols: list[str] = []
+    cation_angle_cols: list[str] = []
+    equator_d1_cols: list[str] = []
+    equator_d2_cols: list[str] = []
+    equator_angle_cols: list[str] = []
+    unit_rows: list[dict[str, object]] = []
+    pole_ags = {m: u.atoms[_indices_for(roles, m, "py_pole")] for m in monomers}
+    ph_ags = {m: u.atoms[_indices_for(roles, m, "ph")] for m in monomers}
+    eq_ags = {m: u.atoms[_indices_for(roles, m, "py_eq")] for m in monomers}
+    for k, (pole_m, ph_m, eq_m) in enumerate(sandwiches):
+        pole_col = cation_pi_pole_column(k, pole_m, ph_m)
+        eq_col = cation_pi_eq_column(k, eq_m, ph_m)
+        ang_col = cation_pi_angle_column(k, ph_m)
+        rmsd_col = f"rmsd_cation_pi_e{k}"
+        pole_dist_cols.append(pole_col)
+        eq_pi_dist_cols.append(eq_col)
+        cation_angle_cols.append(ang_col)
+        groups[rmsd_col] = u.atoms[cation_pi_unit_indices(roles, pole_m, ph_m, eq_m)]
+        unit_rows.append(
+            {
+                "kind": "cation_pi",
+                "edge": k,
+                "mon_a": pole_m,
+                "mon_b": ph_m,
+                "mon_c": eq_m,
+                "distance_column": pole_col,
+                "eq_distance_column": eq_col,
+                "angle_column": ang_col,
+                "rmsd_column": rmsd_col,
+            }
+        )
+    for k, (i, j) in enumerate(equator_edges):
+        d1_col = equator_d1_column(k, i, j)
+        d2_col = equator_d2_column(k, i, j)
+        ang_col = equator_angle_column(k, j)
+        rmsd_col = f"rmsd_equator_e{k}"
+        equator_d1_cols.append(d1_col)
+        equator_d2_cols.append(d2_col)
+        equator_angle_cols.append(ang_col)
+        groups[rmsd_col] = u.atoms[equator_unit_indices(roles, i, j)]
+        unit_rows.append(
+            {
+                "kind": "equator",
+                "edge": k,
+                "mon_a": i,
+                "mon_b": j,
+                "distance_column": d1_col,
+                "d2_distance_column": d2_col,
+                "angle_column": ang_col,
+                "rmsd_column": rmsd_col,
+            }
+        )
     refs = {col: ag.positions.copy() for col, ag in groups.items()}
     rows: list[dict[str, object]] = []
     for ts in u.trajectory[start:stop:step]:
@@ -532,11 +922,27 @@ def compute_trajectory_motif_rmsd(
         }
         for col, ag in groups.items():
             row[col] = rmsd_value_aligned(ag.positions, refs[col])
+        pos = np.asarray(u.atoms.positions, dtype=float)
+        for k, (pole_m, ph_m, eq_m) in enumerate(sandwiches):
+            pole = pole_ags[pole_m].positions.mean(axis=0)
+            ph = ph_ags[ph_m].positions.mean(axis=0)
+            eq = eq_ags[eq_m].positions.mean(axis=0)
+            row[pole_dist_cols[k]] = float(np.linalg.norm(pole - ph))
+            row[eq_pi_dist_cols[k]] = float(np.linalg.norm(eq - ph))
+            row[cation_angle_cols[k]] = angle_at_vertex_deg(pole, ph, eq)
+        for k, (i, j) in enumerate(equator_edges):
+            r2 = _role_point(pos, roles, i, "r2")
+            r3 = _role_point(pos, roles, j, "r3")
+            row[equator_d1_cols[k]] = float(np.linalg.norm(r2 - r3))
+            row[equator_d2_cols[k]] = equator_d2_distance(pos, roles, i, j)
+            row[equator_angle_cols[k]] = equator_d1_d2_angle_deg(pos, roles, i, j)
+        if pole_dist_cols:
+            dists = np.array([row[c] for c in pole_dist_cols], dtype=float)
+            row["n_open_cation_pi"] = int(np.sum(dists >= CATION_PI_OPEN_LO))
         rows.append(row)
     out = pd.DataFrame(rows)
-    out.attrs["motif_atom_counts"] = {
-        col: int(len(ag)) for col, ag in groups.items()
-    }
+    out.attrs["motif_atom_counts"] = {col: int(len(ag)) for col, ag in groups.items()}
+    out.attrs["motif_units"] = pd.DataFrame(unit_rows)
     return out
 
 
@@ -582,6 +988,10 @@ def write_trajectory_motif_rmsd(
         n_monomers=n_monomers,
         traj_format=traj_format,
     )
+    # Snapshot before guest merge: pandas drops DataFrame.attrs on merge.
+    units = df.attrs.get("motif_units")
+    if isinstance(units, pd.DataFrame):
+        units = units.copy()
     df.insert(0, "cohort", cube)
     if gsa_csv:
         df = attach_guest_occupancy(df, gsa_csv)
@@ -590,4 +1000,9 @@ def write_trajectory_motif_rmsd(
     path = Path(out_csv)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+    if isinstance(units, pd.DataFrame) and len(units):
+        units_path = path.with_name(path.name.replace("_motif_rmsd.csv", "_motif_units.csv"))
+        units.insert(0, "traj_id", traj_id)
+        units.insert(0, "cohort", cube)
+        units.to_csv(units_path, index=False)
     return {"cube": cube, "traj_id": traj_id, "path": str(path), "n": int(len(df))}

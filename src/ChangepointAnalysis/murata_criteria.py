@@ -2,9 +2,10 @@
 
 G0 implements Murata 2026 operationally:
 
-* cation–π unit = intermolecular pole-Py⁺ ring COM to Ph ring COM; **open ≥ 6.5 Å**
-* d1 elongated = equatorial C2–C3 ≥ 7.0 Å (six locked edges)
-* d2 = intramolecular CPy (para-to-N on equatorial Py⁺) to C3 (R3 ipso); no threshold
+* cation–π sandwich = Ph between **π(pole)** (pole Py⁺ of monomer *i*) and
+  **π(equator)** (equatorial Py⁺ of a third monomer *k*); **open** is π(pole) ≥ 6.5 Å
+* d1 = C2 (R2 of *i*) to C3 (R3 of *j*) on a locked equatorial edge
+* d2 = CPy (eq Py⁺ carbon **para to the phenylene linker**) to C3 (R3 of *j*)
 * labels A / B / C1 / C2 / other from opened cation–π count and elongated d1
 
 The six cation–π units and six d1 edges are locked by Hungarian assignment on
@@ -177,6 +178,240 @@ def motif_atom_indices(
     if not idx:
         raise ValueError(f"No atoms for Murata RMSD roles {tuple(roles)}")
     return np.unique(np.asarray(idx, dtype=int))
+
+
+def _role_indices_by_monomer(roles_df: pd.DataFrame, role: str) -> dict[int, list[int]]:
+    monomers = sorted(set(int(m) for m in roles_df["monomer"]))
+    return {int(m): _indices_for(roles_df, m, role) for m in monomers}
+
+
+def _coms_from_indices(pos: np.ndarray, by_mon: dict[int, list[int]]) -> np.ndarray:
+    monomers = sorted(by_mon)
+    return np.stack([np.asarray(pos[by_mon[m]], dtype=float).mean(axis=0) for m in monomers])
+
+
+def _role_point(pos: np.ndarray, roles_df: pd.DataFrame, monomer: int, role: str) -> np.ndarray:
+    """Ipso coordinate when mapped, otherwise the role-atom COM."""
+    try:
+        return np.asarray(pos[_scalar_index(roles_df, monomer, role, "ipso_index")], dtype=float)
+    except KeyError:
+        idx = _indices_for(roles_df, monomer, role)
+        return np.asarray(pos[idx], dtype=float).mean(axis=0)
+
+
+def _cpy_point(pos: np.ndarray, roles_df: pd.DataFrame, monomer: int) -> np.ndarray:
+    """CPy (para to the Py⁺–benzene linker), else the Py⁺ ring COM."""
+    try:
+        return np.asarray(pos[_scalar_index(roles_df, monomer, "py_eq", "cpy_index")], dtype=float)
+    except KeyError:
+        idx = _indices_for(roles_df, monomer, "py_eq")
+        return np.asarray(pos[idx], dtype=float).mean(axis=0)
+
+
+def lock_intermolecular_edges(src_coms: np.ndarray, dst_coms: np.ndarray) -> list[tuple[int, int]]:
+    """Hungarian 1-1 pairing of intermolecular COMs (diagonal forbidden)."""
+    n = int(len(src_coms))
+    if len(dst_coms) != n:
+        raise ValueError("src and dst COM arrays must have the same length")
+    cost = np.full((n, n), np.inf, dtype=float)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            cost[i, j] = float(np.linalg.norm(src_coms[i] - dst_coms[j]))
+    return assign_equatorial_r2_r3_edges(cost)
+
+
+def _map_edge_monomers(
+    edges: Sequence[tuple[int, int]], monomers: Sequence[int]
+) -> list[tuple[int, int]]:
+    mons = [int(m) for m in monomers]
+    return [(mons[int(i)], mons[int(j)]) for i, j in edges]
+
+
+def lock_cation_pi_edges(pos: np.ndarray, roles_df: pd.DataFrame) -> list[tuple[int, int]]:
+    """Six pole-Py⁺ → Ph pairs from the current coordinates."""
+    by_pole = _role_indices_by_monomer(roles_df, "py_pole")
+    monomers = sorted(by_pole)
+    pole = _coms_from_indices(pos, by_pole)
+    ph = _coms_from_indices(pos, _role_indices_by_monomer(roles_df, "ph"))
+    return _map_edge_monomers(lock_intermolecular_edges(pole, ph), monomers)
+
+
+def lock_cation_pi_eq_edges(
+    pos: np.ndarray,
+    roles_df: pd.DataFrame,
+    *,
+    forbidden_src_for_dst: Optional[dict[int, int]] = None,
+) -> list[tuple[int, int]]:
+    """Six equatorial-Py⁺ → Ph pairs (the other face of each sandwich)."""
+    by_eq = _role_indices_by_monomer(roles_df, "py_eq")
+    monomers = sorted(by_eq)
+    eq = _coms_from_indices(pos, by_eq)
+    ph = _coms_from_indices(pos, _role_indices_by_monomer(roles_df, "ph"))
+    n = len(monomers)
+    cost = np.full((n, n), np.inf, dtype=float)
+    forbid = {int(k): int(v) for k, v in (forbidden_src_for_dst or {}).items()}
+    for i, src in enumerate(monomers):
+        for j, dst in enumerate(monomers):
+            if src == dst:
+                continue
+            if forbid.get(int(dst)) == int(src):
+                continue
+            cost[i, j] = float(np.linalg.norm(eq[i] - ph[j]))
+    return _map_edge_monomers(assign_equatorial_r2_r3_edges(cost), monomers)
+
+
+def assign_equatorial_pi_partners(
+    pos: np.ndarray,
+    roles_df: pd.DataFrame,
+    pole_ph_edges: Sequence[tuple[int, int]],
+) -> list[tuple[int, int, int]]:
+    """Complete ``(pole, ph)`` edges with the equatorial Py⁺ on the same Ph.
+
+    Each sandwich is three gears: pole Py⁺(*i*) · Ph(*j*) · eq Py⁺(*k*).
+    For six monomers, *k* is forbidden from equaling the pole partner of that Ph.
+    """
+    ordered = [(int(a), int(b)) for a, b in pole_ph_edges]
+    ph_to_pole = {ph: pole for pole, ph in ordered}
+    forbid = ph_to_pole if len(ph_to_pole) > 2 else None
+    eq_edges = lock_cation_pi_eq_edges(
+        pos, roles_df, forbidden_src_for_dst=forbid
+    )
+    ph_to_eq = {int(ph): int(eq) for eq, ph in eq_edges}
+    missing = [ph for _, ph in ordered if ph not in ph_to_eq]
+    if missing:
+        raise ValueError(f"No equatorial Py⁺ assigned for Ph monomers {missing}")
+    return [(pole, ph, ph_to_eq[ph]) for pole, ph in ordered]
+
+
+def lock_cation_pi_sandwiches(
+    pos: np.ndarray, roles_df: pd.DataFrame
+) -> list[tuple[int, int, int]]:
+    """Six ``(pole_mon, ph_mon, eq_mon)`` sandwiches from the current coordinates."""
+    return assign_equatorial_pi_partners(
+        pos, roles_df, lock_cation_pi_edges(pos, roles_df)
+    )
+
+
+def lock_equator_edges(pos: np.ndarray, roles_df: pd.DataFrame) -> list[tuple[int, int]]:
+    """Six R2 → R3 pairs from the current coordinates."""
+    monomers = sorted(set(int(m) for m in roles_df["monomer"]))
+    r2 = np.stack([_role_point(pos, roles_df, m, "r2") for m in monomers])
+    r3 = np.stack([_role_point(pos, roles_df, m, "r3") for m in monomers])
+    return _map_edge_monomers(lock_intermolecular_edges(r2, r3), monomers)
+
+
+def cation_pi_unit_indices(
+    roles_df: pd.DataFrame,
+    pole_mon: int,
+    ph_mon: int,
+    eq_mon: Optional[int] = None,
+) -> np.ndarray:
+    """Atoms of one sandwich: pole Py⁺(*i*), Ph(*j*), equatorial Py⁺(*k*)."""
+    if eq_mon is None:
+        eq_mon = ph_mon
+    idx = (
+        _indices_for(roles_df, pole_mon, "py_pole")
+        + _indices_for(roles_df, ph_mon, "ph")
+        + _indices_for(roles_df, eq_mon, "py_eq")
+    )
+    return np.unique(np.asarray(idx, dtype=int))
+
+
+def equator_unit_indices(roles_df: pd.DataFrame, r2_mon: int, r3_mon: int) -> np.ndarray:
+    """Atoms of one equatorial edge: eq Py⁺(*i*), R2(*i*), R3(*j*)."""
+    idx = (
+        _indices_for(roles_df, r2_mon, "py_eq")
+        + _indices_for(roles_df, r2_mon, "r2")
+        + _indices_for(roles_df, r3_mon, "r3")
+    )
+    return np.unique(np.asarray(idx, dtype=int))
+
+
+def cation_pi_pole_column(edge: int, pole_mon: int, ph_mon: int) -> str:
+    return f"cation_pi_pole_e{int(edge)}_m{int(pole_mon)}pole_m{int(ph_mon)}ph"
+
+
+def cation_pi_eq_column(edge: int, eq_mon: int, ph_mon: int) -> str:
+    return f"cation_pi_eq_e{int(edge)}_m{int(eq_mon)}eq_m{int(ph_mon)}ph"
+
+
+def cation_pi_unit_column(edge: int, pole_mon: int, ph_mon: int) -> str:
+    """Backward-compatible alias for the π(pole) column."""
+    return cation_pi_pole_column(edge, pole_mon, ph_mon)
+
+
+def equator_d1_column(edge: int, r2_mon: int, r3_mon: int) -> str:
+    return f"equator_d1_e{int(edge)}_m{int(r2_mon)}r2_m{int(r3_mon)}r3"
+
+
+def equator_d2_column(edge: int, r2_mon: int, r3_mon: int) -> str:
+    return f"equator_d2_e{int(edge)}_m{int(r2_mon)}cpy_m{int(r3_mon)}r3"
+
+
+def equator_d2_distance(
+    pos: np.ndarray, roles_df: pd.DataFrame, r2_mon: int, r3_mon: int
+) -> float:
+    """CPy of R2's equatorial Py⁺ (para to the benzene linker) to C3 (R3 ipso)."""
+    cpy = _cpy_point(pos, roles_df, r2_mon)
+    c3 = _role_point(pos, roles_df, r3_mon, "r3")
+    return float(np.linalg.norm(cpy - c3))
+
+
+def angle_at_vertex_deg(
+    a: np.ndarray, vertex: np.ndarray, b: np.ndarray
+) -> float:
+    """Angle A–vertex–B in degrees (0–180)."""
+    va = np.asarray(a, dtype=float) - np.asarray(vertex, dtype=float)
+    vb = np.asarray(b, dtype=float) - np.asarray(vertex, dtype=float)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na < 1e-12 or nb < 1e-12:
+        return float("nan")
+    cos = float(np.clip(np.dot(va, vb) / (na * nb), -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos)))
+
+
+def cation_pi_angle_column(edge: int, ph_mon: int) -> str:
+    return f"cation_pi_angle_e{int(edge)}_m{int(ph_mon)}ph"
+
+
+def equator_angle_column(edge: int, r3_mon: int) -> str:
+    return f"equator_angle_e{int(edge)}_m{int(r3_mon)}c3"
+
+
+def equator_d1_d2_angle_deg(
+    pos: np.ndarray, roles_df: pd.DataFrame, r2_mon: int, r3_mon: int
+) -> float:
+    """Angle at C3 between d1 (C2–C3) and d2 (CPy–C3)."""
+    r2 = _role_point(pos, roles_df, r2_mon, "r2")
+    r3 = _role_point(pos, roles_df, r3_mon, "r3")
+    cpy = _cpy_point(pos, roles_df, r2_mon)
+    return angle_at_vertex_deg(r2, r3, cpy)
+
+
+def cation_pi_unit_label(
+    edge: int,
+    pole_mon: int,
+    ph_mon: int,
+    eq_mon: Optional[int] = None,
+) -> str:
+    """Sidebar / plot label: π(pole) and optional π(eq) faces of one sandwich."""
+    text = (
+        f"Cation–π unit {int(edge)}: π(pole) Py⁺ {int(pole_mon)} → Ph {int(ph_mon)}"
+    )
+    if eq_mon is None:
+        return text
+    return f"{text} · π(eq) Py⁺ {int(eq_mon)} → Ph {int(ph_mon)}"
+
+
+def equator_unit_label(edge: int, r2_mon: int, r3_mon: int) -> str:
+    """Sidebar / plot label: ``Equator unit k: d1 R2 i → R3 j · d2 CPy i → R3 j``."""
+    return (
+        f"Equator unit {int(edge)}: d1 R2 {int(r2_mon)} → R3 {int(r3_mon)} "
+        f"· d2 CPy {int(r2_mon)} → R3 {int(r3_mon)}"
+    )
 
 
 def snapshot_motif_rmsd_refs(

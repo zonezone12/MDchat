@@ -71,7 +71,9 @@ class GSASite:
     ipso_rdkit: Optional[int] = None
     subst_rdkit: Optional[int] = None
     methyl: bool = False
-    # Para-to-N carbon on Py+ rings (Murata CPy for d2).
+    # Carbon para to the Py+ atom that bonds to the neighboring benzene
+    # (Murata CPy for d2). On these 3-linked Py+ rings that atom is ortho to N,
+    # not para to N.
     cpy_rdkit: Optional[int] = None
 
     @property
@@ -182,6 +184,48 @@ def _pyridinium_n_and_para(mol: Any, ring_tuple: tuple[int, ...]) -> tuple[int, 
     if n_idx is None:
         raise GSASiteMapError("Py+ ring has no nitrogen")
     return n_idx, _para_atom(ring_tuple, n_idx)
+
+
+def _py_ring_id_for_item(mol: Any, it: dict[str, Any], rings: Sequence[set[int]]) -> int:
+    n_links = [x for x in it["links"] if _has_n(mol, rings[x])]
+    return int(n_links[0] if n_links else it["srid"])
+
+
+def _para_to_benzene_linker(
+    mol: Any,
+    ring_tuple: tuple[int, ...],
+    linker_atoms: set[int],
+) -> int:
+    """Carbon para to the ring atom that bonds into the neighboring benzene."""
+    ring = set(int(x) for x in ring_tuple)
+    attach = None
+    for aidx in ring_tuple:
+        atom = mol.GetAtomWithIdx(int(aidx))
+        if any(
+            int(n.GetIdx()) not in ring and int(n.GetIdx()) in linker_atoms
+            for n in atom.GetNeighbors()
+        ):
+            attach = int(aidx)
+            break
+    if attach is None:
+        raise GSASiteMapError("Py+ ring has no bond to the neighboring benzene")
+    return _para_atom(ring_tuple, attach)
+
+
+def _cpy_para_to_py_benzene_linker(
+    mol: Any,
+    it: dict[str, Any],
+    rings: Sequence[set[int]],
+    ring_tuples: Sequence[tuple[int, ...]],
+    core: set[int],
+) -> tuple[int, int]:
+    """Return ``(py_ring_id, cpy_rdkit)`` for a Py-linker item."""
+    py_rid = _py_ring_id_for_item(mol, it, rings)
+    linker = set(rings[int(it["srid"])]) - set(rings[int(py_rid)])
+    if not linker:
+        linker = set(core)
+    cpy = _para_to_benzene_linker(mol, ring_tuples[int(py_rid)], linker)
+    return int(py_rid), int(cpy)
 
 
 def _r_substituent(
@@ -325,18 +369,19 @@ def classify_gsa_monomer(mol: Any) -> GSAMonomerMap:
 
     py_eq_rid = None
     py_pole_rid = None
+    cpy_eq = None
+    cpy_pole = None
     for it in items:
         if it["role"] == "py_eq":
-            n_links = [x for x in it["links"] if _has_n(mol, rings[x])]
-            py_eq_rid = n_links[0] if n_links else it["srid"]
+            py_eq_rid, cpy_eq = _cpy_para_to_py_benzene_linker(
+                mol, it, rings, ring_tuples, core
+            )
         elif it["role"] == "py_pole":
-            n_links = [x for x in it["links"] if _has_n(mol, rings[x])]
-            py_pole_rid = n_links[0] if n_links else it["srid"]
+            py_pole_rid, cpy_pole = _cpy_para_to_py_benzene_linker(
+                mol, it, rings, ring_tuples, core
+            )
     if py_eq_rid is None or py_pole_rid is None:
         raise GSASiteMapError("Missing Py+ rings")
-
-    _, cpy_eq = _pyridinium_n_and_para(mol, ring_tuples[int(py_eq_rid)])
-    _, cpy_pole = _pyridinium_n_and_para(mol, ring_tuples[int(py_pole_rid)])
 
     r1_it = by_role["r1"]
     sites = [

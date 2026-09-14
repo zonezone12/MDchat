@@ -68,6 +68,50 @@ def test_canonical_roles_match_methyl_pattern() -> None:
         assert role_index["BMHpM"] == role_index["BMMpH"] == list(CANONICAL_ROLES)
 
 
+def _ring_steps(ring_tuple, a: int, b: int) -> int:
+    order = [int(x) for x in ring_tuple]
+    ia, ib = order.index(int(a)), order.index(int(b))
+    d = abs(ia - ib)
+    return min(d, 6 - d)
+
+
+def test_cpy_is_para_to_benzene_linker_not_para_to_n() -> None:
+    pytest.importorskip("rdkit")
+
+    from src.EndpointAnalyzer.gsa_site_map import (
+        _para_atom,
+        _pyridinium_n_and_para,
+        _six_rings,
+        classify_gsa_monomer,
+    )
+
+    _, _, mol = _monomer0_mol("BMMpM")
+    gsa = classify_gsa_monomer(mol)
+    py_eq = gsa.by_role("py_eq")
+    ring_atoms = set(int(x) for x in py_eq.rdkit_atoms)
+    ring_tuple = next(r for r in _six_rings(mol) if set(r) == ring_atoms)
+    n_idx, para_n = _pyridinium_n_and_para(mol, ring_tuple)
+    cpy = int(py_eq.cpy_rdkit)
+    attach = None
+    for aidx in ring_tuple:
+        atom = mol.GetAtomWithIdx(int(aidx))
+        if any(
+            int(n.GetIdx()) not in ring_atoms and n.GetIsAromatic()
+            for n in atom.GetNeighbors()
+        ):
+            attach = int(aidx)
+            break
+    assert attach is not None
+    assert mol.GetAtomWithIdx(cpy).GetSymbol() == "C"
+    assert cpy != n_idx
+    assert cpy != para_n
+    assert cpy == _para_atom(ring_tuple, attach)
+    assert _ring_steps(ring_tuple, attach, cpy) == 3
+    # Phenylene attaches at Py+ C3 (meta to N); CPy is then C2 (ortho to N).
+    assert _ring_steps(ring_tuple, n_idx, attach) == 2
+    assert _ring_steps(ring_tuple, n_idx, cpy) == 1
+
+
 def test_find_residue_sites_uses_canonical_gsa() -> None:
     pytest.importorskip("rdkit")
     import MDAnalysis as mda

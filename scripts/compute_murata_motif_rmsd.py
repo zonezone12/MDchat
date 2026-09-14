@@ -1,7 +1,11 @@
-"""Compute Murata motif RMSD: cation–π (Py+, Ph, Py+) and equator (Py+, R2, R3, Py+).
+"""Compute Murata motif RMSD and per-unit contact distances.
 
-Whole-cube ``assembly_rmsd_to_ref`` smears those openings. This pass Kabsch-
-aligns only the motif heavy atoms vs each replica's frame 0.
+Pooled ``rmsd_cation_pi`` / ``rmsd_equator`` mix all six units. This pass also
+locks six Ph sandwiches and six equatorial edges at frame 0 (Hungarian) and
+writes π(pole)/π(equator) plus equatorial **d1** (R2–R3) and **d2** (CPy–R3).
+
+Whole-cube ``assembly_rmsd_to_ref`` smears those openings. Motif RMSD is Kabsch
+alignment of the motif heavy atoms vs each replica's frame 0.
 
 Trajectory globs match ``run_endpoint_changepoint.py`` (HPC nested
 ``$TRAJ_DIR/<run>/mdcrd_v``). Replicas run in parallel via ``--traj-jobs``.
@@ -40,6 +44,9 @@ from src.ChangepointAnalysis.murata_rmsd import (
     MOTIF_XLABELS,
     plot_murata_rmsd_distributions,
     plot_murata_rmsd_overlay,
+    plot_per_unit_motif_series,
+    plot_rmsd_vs_time,
+    plot_rmsd_vs_time_three_motifs,
     summarize_apo_rmsd,
     write_trajectory_motif_rmsd,
 )
@@ -184,6 +191,29 @@ def _plot_stacked(stacked: dict[str, pd.DataFrame], out_dir: Path) -> pd.DataFra
                 rmsd_col=col,
                 xlabel=xlabel,
             )
+    from src.ChangepointAnalysis.murata_rmsd import CUBE_COLORS
+
+    for cube, df in stacked.items():
+        color = CUBE_COLORS.get(cube, "0.35")
+        plot_rmsd_vs_time_three_motifs(
+            df,
+            plots / "rmsd_vs_time_three_motifs.png",
+            color=color,
+            title=f"{cube} RMSD vs time (n={df['traj_id'].nunique()} replicas)",
+        )
+        for col, xlabel in MOTIF_XLABELS.items():
+            if col not in df.columns:
+                continue
+            tag = col.replace("rmsd_", "").replace("_to_ref", "")
+            plot_rmsd_vs_time(
+                df,
+                plots / f"rmsd_vs_time_{tag}.png",
+                rmsd_col=col,
+                ylabel=xlabel,
+                title=f"{cube}  {xlabel.split(' RMSD')[0]}",
+                color=color,
+            )
+        plot_per_unit_motif_series(df, plots, cube=cube)
     return pd.DataFrame(summaries)
 
 

@@ -62,6 +62,7 @@ from .murata_criteria import (
     lock_cation_pi_units,
     remap_endpoint_cohort_cation_pi,
 )
+from .murata_units_ngl import write_murata_units_ngl_html
 from .murata_rmsd import (
     filter_non_encapsulated,
     load_gsa_rmsd_frames,
@@ -220,6 +221,7 @@ __all__ = [
     "write_cohort_cluster_outputs",
     "write_cohort_tables",
     "write_endpoint_features_csv",
+    "write_murata_units_ngl_html",
     "write_sweep_artifacts",
     "write_transition_sites_ngl_html",
 ]
