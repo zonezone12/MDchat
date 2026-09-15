@@ -12,6 +12,11 @@ python scripts/compare_endpoint_cluster_k.py \\
     --exclude-test \\
     --chemical-scan \\
     --out-dir output/endpoint_cluster_chemical_k
+
+To pick k automatically (chemical_separation, then max Murata-label NMI;
+silhouette is not used):
+
+python scripts/select_chemical_k.py
 """
 
 from __future__ import annotations

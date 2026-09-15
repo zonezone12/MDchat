@@ -95,6 +95,7 @@ from .cluster_k_diagnostics import (
     discover_endpoint_k_cohort_dirs,
     scan_chemical_separation_by_k,
     scan_cohort_chemical_k,
+    select_k_by_chemical_information,
 )
 from .gsa_cohort_run import (
     discover_gsa_feature_csvs_by_cube,
@@ -208,6 +209,7 @@ __all__ = [
     "run_gsa_step1_cohorts",
     "scan_chemical_separation_by_k",
     "scan_cohort_chemical_k",
+    "select_k_by_chemical_information",
     "score_cluster_discriminating_features",
     "stage_cube_feature_dir",
     "score_transition_features",

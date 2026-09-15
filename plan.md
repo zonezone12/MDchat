@@ -2,7 +2,7 @@
 
 **Target:** methods-and-application manuscript on the automated changepoint pipeline applied to GSA nanocubes.
 **Companion:** [Manuscript planning brief (artifact)](https://claude.ai/code/artifact/a7594487-ffa7-4190-8ed5-5c7eb65257a0)
-**Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.18 : 4.70**. G3 and G4 remain done (`output/endpoint_cluster_chemical_k/`).
+**Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.18 : 4.70**. G3 now has an automatic k rule (chemical_separation gate, then max Murata-label NMI; silhouette is not used) at `output/endpoint_cluster_chemical_k/chemical_k_selected.csv`. G4 remains done. k=5 is still the published comparability cut used in G5 cluster tables.
 
 ---
 
@@ -266,32 +266,57 @@ This is a looser criterion than Murata's "encapsulation" (any visit, not permane
 
 ### G3 `[x]` Scan k=2–10 per cohort for chemically meaningful clusters — **implemented, run, and reviewed**
 
-Implemented in `src/ChangepointAnalysis/cluster_k_diagnostics.py` (`scan_cohort_chemical_k`, `assess_chemical_separation`, `scan_chemical_separation_by_k`), wired into `scripts/compare_endpoint_cluster_k.py` via an opt-in `--chemical-scan` flag, covered by `tests/test_cluster_attribution.py` (6/6 passing, including a synthetic replica of the BMHpH outlier-trap scenario), and already run: `output/endpoint_cluster_chemical_k/{chemical_separation_by_k.csv, chemical_k_peaks.csv, chemical_k_summary.txt}`. Verified all numbers below directly against those CSVs.
+Implemented in `src/ChangepointAnalysis/cluster_k_diagnostics.py` (`scan_cohort_chemical_k`, `assess_chemical_separation`, `scan_chemical_separation_by_k`, `select_k_by_chemical_information`), wired into `scripts/compare_endpoint_cluster_k.py --chemical-scan` and `scripts/select_chemical_k.py`, covered by `tests/test_cluster_attribution.py`, and already run: `output/endpoint_cluster_chemical_k/{chemical_separation_by_k.csv, chemical_k_peaks.csv, chemical_k_murata_nmi_by_k.csv, chemical_k_selected.csv}`.
 
-**Design matches the framing decided earlier:** per cohort, per k in 2–10, report silhouette (geometric) alongside whether the top-ranked site pairs mark ≥2 usable clusters (size ≥ 5) with distinct contacts or mixed open/closed Cohen's *d* signs (`chemical_separation`). No requirement that cohorts agree on a k. `first_chemical_k` is the smallest passing k; `best_chemical_k` is the passing k with the most marked clusters, ties broken toward smaller k.
+**Gate (not a k picker):** per cohort, per k in 2–10, `chemical_separation` is true when the top-ranked site pairs mark ≥2 usable clusters (size ≥ 5) with distinct contacts or mixed open/closed Cohen's *d* signs. Silhouette is geometric only. `first_chemical_k` = smallest passing k. `best_chemical_k` = passing k with the most marked clusters (ties → smaller k). That last rule inflates with k and is **not** the automatic pick.
+
+**Automatic k (chemical information):** silhouette is never in the argmax.
+
+1. Keep only k with `chemical_separation=True` (kills the k=2 silhouette trap).
+2. Among those, maximize NMI between frame-level apo `cluster_label` and independent Murata A/B/C1/C2/other (`label_motif_metastructures` on motif CSVs; those labels were not used to build the clusters).
+3. Ties: more `n_marked_clusters`, then smaller k.
+4. AMI (chance-corrected) is reported; with ~1.3–2.3×10⁵ apo frames it agrees with NMI on every cube. Cramér's V is reported but not used to pick (it peaks at k=2, which fails the chemical gate).
+
+Script: `python scripts/select_chemical_k.py`. Plot: `output/endpoint_cluster_chemical_k/plots/murata_nmi_vs_k.png`.
+
+**Roles — clustering vs the site-pair gate vs NMI/AMI (do not invert causality).**
+
+The gate does **not** separate segments. Clustering does. Order:
+
+1. Pelt cuts each trajectory into segments (dwells).
+2. Clustering groups those segments in endpoint-feature space. That assignment *is* `cluster_label`.
+3. Site-pair ranking (η² / Cohen's *d*) takes those labels and asks which named contacts (`M2S2–M3S3`, …) differ between groups. A site pair is one intermolecular endpoint–endpoint distance.
+4. `chemical_separation` is a yes/no on that ranking: did the top-10 pairs mark ≥2 clusters of size ≥ 5 with distinct contacts **or** mixed open/closed *d* (`|d| ≥ 0.5`)? If no, discard that k (`too_few_usable_clusters`, `single_marked_cluster`, `no_distinct_contacts_or_signs`). The gate has no rule like "if this pair is open, this is cluster 2."
+5. NMI/AMI score surviving partitions against independent Murata A/B/C1/C2/other on apo frames.
+
+Without clustering there are no groups for the gate to inspect. We still cluster even though Murata already has A/B/C1/C2/other: those are **hand geometric criteria on frames** (π(pole) ≥ 6.5 Å, d1 ≥ 7.0 Å). The clusters are **unsupervised segment states** from the changepoint pipeline (aggregates, not Murata's thresholds). The claim is whether those data-driven dwells recover chemically distinct contacts and, secondarily, Murata's table — not to re-implement Murata as a classifier. Using Murata labels or the site-pair gate to *define* groups would make later NMI and η² circular.
+
+**NMI vs AMI.** Both measure shared information between `cluster_label` and Murata A/B/C1/C2/other. They are not the chemical gate and not percent-correct. NMI is shared entropy on `[0, 1]` (`0` = independent, `1` = one label is a function of the other). BHHpH selected NMI **0.28** is moderate overlap; BMMpH **0.72** is tight coupling (A-heavy cube). AMI is the same mutual information minus chance agreement at that k — the check that extra clusters are not inflating NMI. Here AMI ≈ NMI to ~10⁻⁵ and `ami_among_chemical_k` equals `selected_k` on every cube, so chance-correction does not change k = 4, 3, 7, 5, 3, 9. The picker still maximizes **NMI among gated k**; AMI is the diagnostic.
 
 **Real per-cohort results (published-penalty `by_k/` labels; own-elbow segments not yet re-clustered):**
 
-| Cohort | Silhouette-max k | `chemical_separation` at silhouette-max k | first_chemical_k | best_chemical_k | Chemical at k=5? |
-|---|---|---|---|---|---|
-| BHHpH | 2 | No | 3 | 5 | Yes |
-| BHHpM | 6 | **Yes** | 3 | 8 | Yes |
-| BMHpH | 2 (outlier trap) | No — `too_few_usable_clusters` | 5 | 7 | Yes |
-| BMHpM | 2 | No | 5 | 7 | Yes |
-| BMMpH | 2 | No | 3 | 3 | Yes (window k=3–5 only) |
-| BMMpM | 10 (rising) | No | 4 | 6 | Yes (also 6, 9) |
+| Cohort | Silhouette-max k | Chem at sil-max? | first_chem | best_chem | **selected_k (NMI)** | NMI | Chem at k=5? |
+|---|---|---|---|---|---|---:|---|
+| BHHpH | 2 | No | 3 | 5 | **4** | 0.280 | Yes |
+| BHHpM | 6 | **Yes** | 3 | 8 | **3** | 0.272 | Yes |
+| BMHpH | 2 (outlier trap) | No | 5 | 7 | **7** | 0.346 | Yes |
+| BMHpM | 2 | No | 5 | 7 | **5** | 0.534 | Yes |
+| BMMpH | 2 | No | 3 | 3 | **3** | 0.719 | Yes (k=3–5 only) |
+| BMMpM | 10 (rising) | No | 4 | 6 | **9** | 0.617 | Yes (also 4, 6, 9) |
 
 Three things worth stating plainly:
 
-1. **k=5 passes `chemical_separation` in all six cohorts.** The fixed default is not just a comparability convenience; it is independently chemically meaningful everywhere it's used.
-2. **Silhouette-max k=2 never passes `chemical_separation`.** That is four of six cubes (BHHpH, BMHpH, BMHpM, BMMpH). BHHpM is the exception: its silhouette peak is k=6, and that cut *does* pass chemically. BMMpM's rising curve peaks at k=10, which fails. Geometric compactness and chemical distinctness are different axes — that is the point of the scan.
-3. **BMHpH's notorious k=2/k=3 silhouette spike (0.917 / 0.877, previously explained as an "outlier trap" from the exploded-cage replica) is now automatically excluded** via the `min_cluster_size=5` filter (`too_few_usable_clusters`), rather than needing a manual caveat every time it's cited.
+1. **k=5 passes `chemical_separation` in all six cohorts.** It remains the comparability default used in G5 cluster tables. It is the NMI pick only for BMHpM; elsewhere the information-max k is cube-specific (3, 4, 7, or 9).
+2. **Silhouette-max k=2 never passes `chemical_separation`.** Four of six cubes (BHHpH, BMHpH, BMHpM, BMMpH). BHHpM's silhouette peak is k=6 and *does* pass chemically, but NMI prefers the smaller chemical cut k=3. BMMpM's rising silhouette peaks at k=10, which fails the gate.
+3. **BMHpH's k=2/k=3 silhouette spike (0.917 / 0.877, exploded-cage replica) is excluded** by `min_cluster_size=5`. Its NMI at k=2 is ~0.006; the chemical+NMI pick is k=7, where four clusters are marked and NMI jumps from 0.265 (k=5) to 0.346.
+
+BHHpH k=3/4/5 is a plateau (NMI 0.273 / 0.280 / 0.270). BMMpM k=9 beats k=4 (0.617 vs 0.570) and AMI agrees; extra splits at k=7–8 fail `chemical_separation` even though NMI is already high.
 
 **Correction to the previous draft of this section:** it speculated BMMpM might show "no chemical separation at any k" as a "clean negative case." **That speculation is wrong, checked against the real scan.** BMMpM passes `chemical_separation` at k=4, 5, 6, and 9 (4 of 9 tested), while its silhouette rises essentially monotonically across the whole range (0.298 → 0.412) with no correlation to which k passes chemically. That is a *better* illustration of the core point than a flat "never separates" result would have been: the geometric-compactness score and the chemical-separation flag are tracking genuinely different things, visibly disagreeing at most steps rather than one simply being empty. Do not describe BMMpM as chemically featureless; describe it as chemically intermittent while silhouette climbs steadily. `docs/endpoint_cluster_discrimination.md` §13 already has this corrected version.
 
 **One interpretive caveat worth carrying into the manuscript:** `n_significant_fdr` runs 500–950 out of ~960 candidate columns at almost every k with ≥2 usable clusters. That is expected given the known redundancy among raw site-pair columns (~26 PCs explain 80% of their variance, per `docs/endpoint_cluster_discrimination.md` §4) and should not be read as 900 independent discoveries — report it as "most of a highly correlated feature set clears the FDR bar," not as a large number of separate findings.
 
-**Still open:** the scan used published-penalty `by_k/` labels, not the final own-elbow detections from G1/G1a/G1b. If the paper re-clusters on the final own-elbow segments (see the note below), re-run `scan_chemical_separation_by_k` on those — do not port these numbers over.
+**Still open:** the scan used published-penalty `by_k/` labels, not the final own-elbow detections from G1/G1a/G1b. If the paper re-clusters on the final own-elbow segments (see the note below), re-run `scan_chemical_separation_by_k` **and** `select_chemical_k.py` on those — do not port these numbers over.
 
 **Note:** clustering has *not* been re-run on any of the G1/G1a/G1b detections. All existing cluster artifacts (including the `by_k/` sweep above) belong to the published penalties. Decide whether the paper clusters the final own-elbow segments (`output/endpoint_changepoints_matched_*` for four cohorts, `output/endpoint_changepoints_g1a_BMHpH`, `output/endpoint_changepoints_g1b_BMMpM` — preferable, for consistency with section 3) or keeps clustering on the published tables and reports detection-only results at the own-elbow penalties.
 
@@ -330,9 +355,33 @@ G0 no longer blocks this. Occupancy is from motif frames labeled A/B/C1/C2/other
 
 **2. Transition-frequency comparison `[x]`.** Section 3.3's own-elbow ratio (1 : 3.18 : 4.70 vs Murata 1 : 2.67 : 3.67) is the number to quote. G1b is decided.
 
-**3. Resolving "other" `[~]`.** Tables written: `output/murata_g5/murata_vs_endpoint_cluster.csv` (row-normalized % of each Murata label in each endpoint cluster) and `murata_other_vs_endpoint_cluster.csv`. On apo frames, BHHpM other is 30.8% of frames (vs Murata 46.1%) and sits mainly in clusters 1 (40%) and 4 (31%); BMHpM/BMMpM other is only ~2% (vs 0.5% / 0.2%). Cluster integers are arbitrary — the draft still needs a one-paragraph reading of the 3₆ C2/other split and of those BHHpM clusters. 2₆′ other (9.0%) cannot be resolved.
+**3. Resolving "other" `[~]`.**
 
-**Code:** `scripts/compare_to_murata_metastructures.py` (`label_motif_metastructures` in `src/ChangepointAnalysis/murata_rmsd.py`).
+**How the numbers were generated** (do not re-derive by hand). Script:
+
+```
+python scripts/compare_to_murata_metastructures.py
+```
+
+Two file families are joined, only for the three mapped cubes (BHHpM / BMHpM / BMMpM):
+
+| Role | Files | What is used |
+|---|---|---|
+| Murata label, per 1 ps frame | `output/{CUBE}_motif_rmsd/**/*_motif_rmsd.csv` | `n_open_cation_pi` (pole π ≥ 6.5 Å) and locked `equator_d1_e*` ≥ 7.0 Å → A/B/C1/C2/other via `label_motif_metastructures`. Apo = `n_guest_inside_cavity < 1` (`guest_filter=frames`) |
+| Endpoint cluster, per segment | `output/endpoint_changepoints_{CUBE}/clusters/endpoint/segments_clustered.csv` | `cluster_label` (k=5 Ward/k-means integer 0–4), `start_frame`, `end_frame`, `traj_id` |
+| Murata Table 1 % | hardcoded `MURATA_TABLE1_PCT` in `src/ChangepointAnalysis/murata_criteria.py` | Published occupancies. **Not** recomputed from Murata's trajectories |
+
+Join key: cube prefix stripped from `traj_id` (`BHHpM_109345_mdcrd_v` → `109345_mdcrd_v`), then motif `frame` inside the segment interval `[start_frame, end_frame]`. Frames with no matching segment are dropped.
+
+Outputs under `output/murata_g5/`:
+
+- `murata_table1_occupancy.csv` — our % vs Table 1. BHHpM apo **other = 30.8%** of frames vs Murata 3₆ **46.1%**. BMHpM/BMMpM apo other ≈ **2.2% / 2.4%** vs **0.5% / 0.2%**.
+- `murata_vs_endpoint_cluster.csv` — row-normalized % of each Murata label in each endpoint cluster.
+- `murata_other_vs_endpoint_cluster.csv` — among apo frames with label **other**, fraction in each cluster. BHHpM: cluster **1 = 40.5%**, cluster **4 = 31.1%** (n = 56,756 joined other frames; occupancy other n = 57,119, so a few apo-other frames had no segment).
+
+**Cluster integers are arbitrary and per-cohort.** BHHpM cluster 1 is not the same chemical state as BMHpM cluster 1. The script does not match IDs across cubes. The draft still needs a one-paragraph reading of the 3₆ C2/other split and of those BHHpM clusters. 2₆′ other (9.0%) cannot be resolved.
+
+**Code:** `scripts/compare_to_murata_metastructures.py` (`label_motif_metastructures` in `src/ChangepointAnalysis/murata_rmsd.py`; Table 1 constants in `src/ChangepointAnalysis/murata_criteria.py`).
 
 ---
 
@@ -424,7 +473,7 @@ G1b ──► R2 ──► R3
 | Remapped equatorial d1 (old hull remap) | **superseded for G5** | `output/murata_d1/` was the hull-column remap. G5 uses motif-CSV ipso d1 (`output/B*_motif_rmsd/`) |
 | Top site-pair η² 0.81–0.84 | partly circular, now calibrated | Permutation null + BH-FDR implemented and tested (G4). Not yet re-run on the published `endpoint_pair_cluster_correlation.csv` files — none carry the new p/q columns as of this check |
 | BMMpM 37% static at true own elbow | **holds, final** | 19/51 have zero breakpoints at 5.489. The earlier 41% (21/51) used the wrong-grid elbow (5.256) and is superseded. Corroborates Murata's 78.4% A for 1₆ |
-| k=5 is chemically meaningful | **new, verified** | `chemical_separation`=True at k=5 in all six cohorts (G3, real scan output). Silhouette-max k=2 never passes; BHHpM's k=6 peak does |
+| k=5 is chemically meaningful | **new, verified** | `chemical_separation`=True at k=5 in all six cohorts (G3). Silhouette-max k=2 never passes. Automatic k is NMI among chemical k (`chemical_k_selected.csv`): 4, 3, 7, 5, 3, 9 for BHHpH→BMMpM. k=5 stays the G5 comparability cut |
 | "BMMpM shows no chemical separation at any k" | **withdrawn** | Was speculation, not yet checked. Real scan: passes at k=4,5,6,9 (4/9); silhouette rises monotonically with no correlation to the chemical flag. See G3 |
 
 ---

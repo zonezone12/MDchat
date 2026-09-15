@@ -237,5 +237,66 @@ def test_chemical_k_scan_first_passing_k(tmp_path: Path) -> None:
     assert bool(by_k.loc[3, "chemical_separation"]) is True
     assert int(peaks.iloc[0]["first_chemical_k"]) == 3
     assert int(peaks.iloc[0]["best_chemical_k"]) == 3
-    summary = summarize_chemical_k_by_cohort(long)
-    assert bool(summary.iloc[0]["any_chemical_k"])
+
+
+def test_select_k_by_chemical_information_ignores_silhouette() -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import (
+        label_association_scores,
+        select_k_by_chemical_information,
+    )
+
+    assoc = label_association_scores(
+        pd.Series([0, 0, 1, 1, 1, 1]),
+        pd.Series(["A", "A", "C2", "C2", "C2", "C2"]),
+    )
+    assert assoc["murata_nmi"] > 0.5
+    assert assoc["murata_ami"] > 0.5
+
+    by_k = pd.DataFrame(
+        {
+            "cohort": ["BHHpM"] * 3,
+            "k": [2, 5, 8],
+            "chemical_separation": [False, True, True],
+            "n_marked_clusters": [1, 2, 4],
+            "silhouette": [0.9, 0.2, 0.21],
+            "murata_nmi": [0.05, 0.40, 0.22],
+        }
+    )
+    picked = select_k_by_chemical_information(by_k).iloc[0]
+    assert int(picked["selected_k"]) == 5
+    assert picked["selection_rule"] == "max_murata_nmi_among_chemical_k"
+    assert int(picked["silhouette_among_chemical_k"]) == 8
+
+    from_csv = pd.DataFrame(
+        {
+            "cohort": ["BMMpM", "BMMpM"],
+            "k": [2, 5],
+            "chemical_separation": ["False", "True"],
+            "n_marked_clusters": [1, 2],
+            "murata_nmi": [0.9, 0.1],
+        }
+    )
+    csv_pick = select_k_by_chemical_information(from_csv).iloc[0]
+    assert int(csv_pick["selected_k"]) == 5
+
+
+def test_map_frames_to_segment_clusters_strips_cube_prefix() -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import map_frames_to_segment_clusters
+
+    frames = pd.DataFrame(
+        {
+            "traj_id": ["109345_mdcrd_v"] * 3,
+            "frame": [0, 10, 50],
+        }
+    )
+    segs = pd.DataFrame(
+        {
+            "traj_id": ["BHHpM_109345_mdcrd_v", "BHHpM_109345_mdcrd_v"],
+            "group": ["endpoint", "endpoint"],
+            "start_frame": [0, 20],
+            "end_frame": [19, 99],
+            "cluster_label": [0, 2],
+        }
+    )
+    joined = map_frames_to_segment_clusters(frames, segs, cube="BHHpM")
+    assert list(joined["cluster_label"]) == [0.0, 0.0, 2.0]

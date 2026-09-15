@@ -549,6 +549,10 @@ Quote η² as "fraction of segment-mean variance associated with these labels, w
 
 Silhouette's global max is k=2 for most endpoint cohorts (§10). That is geometric compactness, not chemistry. G3 asks, **per cube, per k in 2–10**, whether the existing `by_k/` labels produce distinct driving contacts or mixed open/closed Cohen's *d* signs, with clusters of size ≥ 5 (so BMHpH k=2's singleton outliers do not count).
 
+**Causality.** The site-pair gate does not split segments. Pelt makes segments; clustering assigns `cluster_label`; η² ranks named contacts (`MiSa–MjSb`); `chemical_separation` is a yes/no on that ranking (top-10 pairs mark ≥2 usable clusters with distinct labels or mixed open/closed *d*). NMI/AMI then score those labels against independent Murata A/B/C1/C2/other. The gate cannot invent states. Clustering stays unsupervised so that NMI and η² are tests of the states, not how they were defined. Murata's table is hand frame criteria, not a substitute for segment clustering.
+
+**NMI vs AMI.** Shared information, not percent-correct. NMI ∈ [0, 1]; AMI subtracts chance agreement at that k. With ~10⁵ apo frames AMI ≈ NMI (~10⁻⁵) and picks the same k. Cramér's V is reported but not used (it peaks at k=2, which fails the gate). Automatic k: max NMI among `chemical_separation` k (`scripts/select_chemical_k.py`).
+
 ```powershell
 python scripts/compare_endpoint_cluster_k.py `
   --chemical-scan `
@@ -563,20 +567,21 @@ python scripts/compare_endpoint_cluster_k.py `
 | `chemical_separation` | Top-10 pairs mark ≥2 usable clusters with distinct `endpoint_label` **or** mixed *d* signs |
 | `chemical_separation_fdr` | Same test on BH-significant pairs only (stricter; 960 tests need many hits at the *p*-floor) |
 | `first_chemical_k` | Smallest k that passes `chemical_separation` |
-| `best_chemical_k` | Passing k with the most marked clusters, then FDR hits |
+| `best_chemical_k` | Passing k with the most marked clusters (inflates with k; **not** the automatic pick) |
+| `selected_k` | Max Murata-label NMI among chemical k; silhouette never used |
 
 Different cubes need not share a k. Results from the published-penalty scan (`output/endpoint_cluster_chemical_k/`):
 
-| Cohort | Silhouette max | first_chemical_k | Chemical at k=5? |
-|--------|----------------|------------------|------------------|
-| BHHpH | k=2 | **3** | yes |
-| BHHpM | k=6 | **3** | yes |
-| BMHpH | k=2 (outlier trap) | **5** | yes |
-| BMHpM | k=2 | **5** | yes |
-| BMMpH | k=2 | **3** | yes (window k=3–5 only) |
-| BMMpM | rising to k=10 | **4** | yes (also 6, 9) |
+| Cohort | Silhouette max | first_chemical_k | **selected_k (NMI)** | Chemical at k=5? |
+|--------|----------------|------------------|----------------------|------------------|
+| BHHpH | k=2 | **3** | **4** (0.280) | yes |
+| BHHpM | k=6 | **3** | **3** (0.272) | yes |
+| BMHpH | k=2 (outlier trap) | **5** | **7** (0.346) | yes |
+| BMHpM | k=2 | **5** | **5** (0.534) | yes |
+| BMMpH | k=2 | **3** | **3** (0.719) | yes (window k=3–5 only) |
+| BMMpM | rising to k=10 | **4** | **9** (0.617) | yes (also 6, 9) |
 
-Silhouette-max k=2 never has chemical_separation. Default k=5 does, in every cube. BMMpM is not empty of discrete cuts — it first splits at k=4 on methyl-site packings (`M2S2–M3S3` at k=5) — but silhouette keeps climbing while chemistry is intermittent.
+Silhouette-max k=2 never has chemical_separation. Default k=5 does, in every cube, and remains the G5 comparability cut; it is the NMI pick only for BMHpM. BMMpM is not empty of discrete cuts — it first splits at k=4 on methyl-site packings (`M2S2–M3S3` at k=5) — but silhouette keeps climbing while chemistry is intermittent. AMI agrees with NMI on every selected k.
 
 This scan uses **published-penalty** `by_k/` labels. Own-elbow detections were not re-clustered.
 
@@ -594,6 +599,7 @@ This scan uses **published-penalty** `by_k/` labels. Own-elbow detections were n
 | η² | `_eta_squared` / `_eta_squared_columns` |
 | Permutation *p* / BH *q* | `permutation_eta_squared_pvalues`, `benjamini_hochberg_qvalues` |
 | Chemical k-scan | `scan_chemical_separation_by_k`, `assess_chemical_separation` |
+| Automatic k (NMI/AMI) | `select_k_by_chemical_information`, `score_murata_nmi_by_k`; CLI `scripts/select_chemical_k.py` |
 | KW ε² | `_epsilon_squared_kw` |
 | One-vs-rest *d* | `_cohens_d_one_vs_rest` |
 | Panel labels | `cluster_correlated_timeline_panels` |

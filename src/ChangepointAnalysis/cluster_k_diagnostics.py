@@ -1213,6 +1213,16 @@ def scan_cohort_chemical_k(
     return pd.DataFrame(rows)
 
 
+def _chemical_flag(series: pd.Series) -> pd.Series:
+    """True where a chemical_separation column is true (CSV-safe)."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.fillna(0).astype(bool)
+    text = series.astype(str).str.strip().str.lower()
+    return text.isin(["true", "1", "yes"])
+
+
 def summarize_chemical_k_by_cohort(long_df: pd.DataFrame) -> pd.DataFrame:
     """One row per cohort: first / best chemically separated k."""
     if long_df.empty:
@@ -1220,7 +1230,7 @@ def summarize_chemical_k_by_cohort(long_df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict] = []
     for cohort, sub in long_df.groupby("cohort", sort=True):
         sub = sub.sort_values("k")
-        passing = sub[sub["chemical_separation"].astype(bool)]
+        passing = sub[_chemical_flag(sub["chemical_separation"])]
         first_k = int(passing["k"].iloc[0]) if not passing.empty else np.nan
         if passing.empty:
             best_k = np.nan
@@ -1249,6 +1259,213 @@ def summarize_chemical_k_by_cohort(long_df: pd.DataFrame) -> pd.DataFrame:
                 "chemical_k_list": ",".join(str(int(k)) for k in passing["k"].tolist()),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def _norm_traj_id(traj_id: str, cube: str) -> str:
+    text = str(traj_id)
+    prefix = f"{cube}_"
+    return text[len(prefix) :] if text.startswith(prefix) else text
+
+
+def map_frames_to_segment_clusters(
+    frames: pd.DataFrame,
+    segments: pd.DataFrame,
+    *,
+    cube: str,
+) -> pd.DataFrame:
+    """Assign each frame the ``cluster_label`` of the covering segment."""
+    out = frames.copy()
+    out["_tid"] = out["traj_id"].map(lambda t: _norm_traj_id(t, cube))
+    segs = segments.copy()
+    if "group" in segs.columns:
+        segs = segs[segs["group"].astype(str) == "endpoint"]
+    segs["_tid"] = segs["traj_id"].map(lambda t: _norm_traj_id(t, cube))
+    out["cluster_label"] = np.nan
+    for tid, grp in segs.groupby("_tid"):
+        mask = out["_tid"] == tid
+        if not mask.any():
+            continue
+        fr = pd.to_numeric(out.loc[mask, "frame"], errors="coerce").to_numpy()
+        lab = np.full(fr.shape, np.nan)
+        for rec in grp.itertuples(index=False):
+            start = float(rec.start_frame)
+            end = float(rec.end_frame)
+            hit = (fr >= start) & (fr <= end)
+            lab[hit] = rec.cluster_label
+        out.loc[mask, "cluster_label"] = lab
+    return out.drop(columns=["_tid"])
+
+
+def label_association_scores(
+    cluster: pd.Series,
+    chem: pd.Series,
+) -> dict[str, float]:
+    """Independent chemical information: NMI, AMI, and Cramér's V."""
+    from sklearn.metrics import (
+        adjusted_mutual_info_score,
+        normalized_mutual_info_score,
+    )
+
+    a = pd.Series(cluster).astype(str)
+    b = pd.Series(chem).astype(str)
+    ok = a.notna() & b.notna() & (a != "nan") & (b != "nan")
+    a = a.loc[ok]
+    b = b.loc[ok]
+    n = int(len(a))
+    empty = {
+        "n_paired": n,
+        "murata_nmi": float("nan"),
+        "murata_ami": float("nan"),
+        "murata_cramers_v": float("nan"),
+    }
+    if n < 2 or int(a.nunique()) < 2 or int(b.nunique()) < 2:
+        return empty
+    tab = pd.crosstab(a, b)
+    observed = tab.to_numpy(dtype=float)
+    n_obs = float(observed.sum())
+    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0)) / n_obs
+    with np.errstate(divide="ignore", invalid="ignore"):
+        chi2 = float(
+            np.nansum((observed - expected) ** 2 / np.where(expected == 0, np.nan, expected))
+        )
+    r, c = observed.shape
+    denom = n_obs * (min(r, c) - 1)
+    cramers = float(np.sqrt(chi2 / denom)) if denom > 0 else float("nan")
+    labels_a = a.to_numpy()
+    labels_b = b.to_numpy()
+    nmi = float(normalized_mutual_info_score(labels_a, labels_b))
+    ami = float(adjusted_mutual_info_score(labels_a, labels_b))
+    return {
+        "n_paired": n,
+        "murata_nmi": nmi,
+        "murata_ami": ami,
+        "murata_cramers_v": cramers,
+    }
+
+
+def select_k_by_chemical_information(by_k: pd.DataFrame) -> pd.DataFrame:
+    """Automatic k: chemical_separation must pass, then max Murata NMI.
+
+    Silhouette is **not** used to pick k. Among k with ``chemical_separation``,
+    maximize ``murata_nmi`` (independent A/B/C1/C2/other labels). Ties: more
+    ``n_marked_clusters``, then smaller k. If NMI is missing, fall back to
+    ``n_marked_clusters`` (the old ``best_chemical_k`` rule).
+    """
+    if by_k.empty:
+        return pd.DataFrame()
+    rows: list[dict] = []
+    has_nmi = "murata_nmi" in by_k.columns
+    for cohort, sub in by_k.groupby("cohort", sort=True):
+        sub = sub.sort_values("k")
+        passing = sub[_chemical_flag(sub["chemical_separation"])].copy()
+        sil_chem_k = np.nan
+        ami_chem_k = np.nan
+        if (
+            not passing.empty
+            and "silhouette" in passing.columns
+            and passing["silhouette"].notna().any()
+        ):
+            sil_chem_k = int(passing.loc[passing["silhouette"].idxmax(), "k"])
+        if (
+            not passing.empty
+            and "murata_ami" in passing.columns
+            and passing["murata_ami"].notna().any()
+        ):
+            ami_chem_k = int(passing.loc[passing["murata_ami"].idxmax(), "k"])
+        if passing.empty:
+            rows.append(
+                {
+                    "cohort": cohort,
+                    "selected_k": np.nan,
+                    "selection_rule": "no_chemical_k",
+                    "selected_nmi": np.nan,
+                    "selected_ami": np.nan,
+                    "silhouette_among_chemical_k": sil_chem_k,
+                    "ami_among_chemical_k": ami_chem_k,
+                    "n_k_chemical": 0,
+                }
+            )
+            continue
+        work = passing.copy()
+        if has_nmi and work["murata_nmi"].notna().any():
+            work["_score"] = pd.to_numeric(work["murata_nmi"], errors="coerce")
+            rule = "max_murata_nmi_among_chemical_k"
+        else:
+            work["_score"] = pd.to_numeric(work.get("n_marked_clusters", 0), errors="coerce")
+            rule = "max_marked_clusters_among_chemical_k"
+        marked = pd.to_numeric(work.get("n_marked_clusters", 0), errors="coerce")
+        ranked = work.assign(_marked=marked).sort_values(
+            ["_score", "_marked", "k"],
+            ascending=[False, False, True],
+        )
+        pick = ranked.iloc[0]
+        rows.append(
+            {
+                "cohort": cohort,
+                "selected_k": int(pick["k"]),
+                "selection_rule": rule,
+                "selected_nmi": (
+                    float(pick["murata_nmi"])
+                    if has_nmi and pd.notna(pick.get("murata_nmi"))
+                    else np.nan
+                ),
+                "selected_ami": (
+                    float(pick["murata_ami"])
+                    if "murata_ami" in pick.index and pd.notna(pick.get("murata_ami"))
+                    else np.nan
+                ),
+                "selected_n_marked_clusters": (
+                    int(pick["n_marked_clusters"])
+                    if "n_marked_clusters" in pick.index and pd.notna(pick["n_marked_clusters"])
+                    else np.nan
+                ),
+                "silhouette_among_chemical_k": sil_chem_k,
+                "ami_among_chemical_k": ami_chem_k,
+                "n_k_chemical": int(len(passing)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def score_murata_nmi_by_k(
+    changepoints_dir: Path | str,
+    motif_frames: pd.DataFrame,
+    *,
+    cube: str,
+    k_min: int = 2,
+    k_max: int = 10,
+    group: str = "endpoint",
+) -> pd.DataFrame:
+    """NMI / AMI / Cramér's V of cluster labels vs Murata A/B/C1/C2/other (apo frames)."""
+    from .murata_rmsd import filter_non_encapsulated
+
+    if "murata_metastructure" not in motif_frames.columns:
+        raise KeyError("murata_metastructure")
+    apo = motif_frames
+    if "n_guest_inside_cavity" in motif_frames.columns:
+        apo = filter_non_encapsulated(motif_frames, traj_filter="frames")
+    rows: list[dict] = []
+    for k in range(int(k_min), int(k_max) + 1):
+        segs = load_segments_at_k(changepoints_dir, k, group=group)
+        if segs.empty:
+            rows.append(
+                {
+                    "cohort": cube,
+                    "k": int(k),
+                    "n_paired": 0,
+                    "murata_nmi": float("nan"),
+                    "murata_ami": float("nan"),
+                    "murata_cramers_v": float("nan"),
+                }
+            )
+            continue
+        joined = map_frames_to_segment_clusters(apo, segs, cube=cube)
+        joined = joined.dropna(subset=["cluster_label", "murata_metastructure"])
+        scores = label_association_scores(
+            joined["cluster_label"], joined["murata_metastructure"]
+        )
+        rows.append({"cohort": cube, "k": int(k), **scores})
     return pd.DataFrame(rows)
 
 
@@ -1302,6 +1519,8 @@ def _format_chemical_txt(long_df: pd.DataFrame, peaks: pd.DataFrame) -> str:
             "----------",
             "- first_chemical_k = smallest k with chemical_separation=True.",
             "- best_chemical_k = passing k with most marked clusters; ties → smaller k.",
+            "- selected_k (automatic) = max Murata NMI among chemical_separation k;",
+            "  silhouette is never used to pick k.",
             "- Silhouette-max k=2 is not chemical; default k=5 is chemical in every B* cube.",
         ]
     )
