@@ -2,7 +2,7 @@
 
 **Target:** methods-and-application manuscript on the automated changepoint pipeline applied to GSA nanocubes.
 **Companion:** [Manuscript planning brief (artifact)](https://claude.ai/code/artifact/a7594487-ffa7-4190-8ed5-5c7eb65257a0)
-**Revised:** G1b decided — **each cube keeps its own elbow**, no forced shared-relative penalty. Automatic, minimal-assumption pipeline is the stated design goal; a matched penalty would itself be a hand-picked human choice. BMMpM reverts from the matched 4.361 test value to its true own elbow, 5.48888, now backed by a genuine full 51-trajectory detection (`output/endpoint_changepoints_g1b_BMMpM`). Headline ratio in §3.3 is the own-elbow number, **1 : 3.18 : 4.70**. **G3 and G4 are now implemented, tested, and run** (real output at `output/endpoint_cluster_chemical_k/`) — reviewed in this revision, including a correction: a prior speculative claim that BMMpM shows no chemical separation at any k was checked and is wrong (see §5, G3).
+**Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.18 : 4.70**. G3 and G4 remain done (`output/endpoint_cluster_chemical_k/`).
 
 ---
 
@@ -54,21 +54,21 @@ Naming decodes as `B[eq][eq]p[pole]` (H = hydrogen, M = methyl). Equatorial lett
 
 ---
 
-## 2. Murata's criteria, and why our implementation does not match them
+## 2. Murata's criteria — implemented (G0)
 
-**Still the highest-priority gap.** The G1 re-detection did not touch this.
+**Closed.** Classification now uses locked intermolecular contacts on the motif CSVs, not hull `s3`/`s7` and not whole-cube RMSD. The visual gate is Murata Fig. S11: d1 stays compact (~4–5 Å) when all pole π are closed and grows an elongated peak (~8–9 Å) as π opens (`output/murata_motif_rmsd/plots/dist_d1_d2_by_open_cation_pi.png`).
 
-### What Murata actually defines
+### What Murata defines, and how we compute it
 
-| Quantity | Definition | Thresholds |
-|---|---|---|
-| cation–π opening | Distance between **Py⁺ near the pole** and **Ph** | **open when ≥ 6.5 Å** |
-| `d1` | **C2–C3**: ipso-carbons bonding to R2 and R3, across an equatorial edge between two GSAs. Six sites (S6) | normal **4.5–5.5 Å**; elongated **≥ 7.0 Å** |
-| `d2` | **CPy–C3**, CPy = carbon of equatorial Py⁺. Six sites | used for the methyl/vdW analysis, no threshold |
+| Quantity | Definition | Thresholds | Our implementation |
+|---|---|---|---|
+| cation–π opening | **π(pole):** pole Py⁺ COM to Ph COM. The sandwich also has **π(equator)** (third monomer's eq Py⁺ → same Ph); opening is pole-side | **open when π(pole) ≥ 6.5 Å** | Six sandwiches locked at frame 0 (Hungarian). `n_open_cation_pi` counts π(pole) ≥ 6.5 Å |
+| `d1` | **C2–C3**: R2 and R3 **ipso** carbons across an equatorial edge. Six sites | compact **4.5–5.5 Å**; elongated **≥ 7.0 Å** | Six R2(*i*)–R3(*j*) edges locked at frame 0. Ipso carbon, not the methyl carbon |
+| `d2` | **CPy–C3** on the same edge; no threshold | methyl/vdW analysis | CPy = eq Py⁺ carbon **para to the phenylene linker** (Py⁺ C3 in these GSAs; that places CPy at C2, ortho to N). Not para-to-N (C4) |
 
-Metastructures:
+Metastructures (unchanged):
 
-| | opened cation–π | d1 condition | RMSD |
+| | opened cation–π | d1 condition | RMSD (Murata, local motif) |
 |---|---|---|---|
 | **A** | 0 | — | ≈ 1.0 Å |
 | **B** | 1 | — | ≈ 1.5 Å |
@@ -76,28 +76,28 @@ Metastructures:
 | **C2** | 2 | one d1 ≥ 7.0 Å | ≈ 2.7 Å |
 | **other** | anything else, including ≥ 3 opened | — | — |
 
-### What our code does
+Murata RMSD is **local heavy atoms of the opening motif**, not Kabsch of the whole cube. We store pooled `rmsd_cation_pi` / `rmsd_equator` and per-unit `rmsd_*_e{k}` plus the distances above.
 
-1. **The cation–π distance does not exist in this repository.** No Py⁺–Ph pole-to-equator distance anywhere in `src/` or `scripts/`. Murata's *primary* classification axis is not computed at all.
-2. **`paper_d1` uses the 4.5–5.5 Å window with inverted meaning.** `endpoint_features.py:41-42` sets `paper_d1_open_lo = 4.5`, `paper_d1_open_hi = 5.5`, and `paper_d1_n_open` counts values *inside* that window (line 176). In Murata that window is the **normal, compact** state.
-3. **Hull `s3`/`s7` d1 was the wrong contact.** Those values ran ~9.4–17 Å because the sites were not R2/R3 (on BMMpM they were R1 and R3). **Remapped** (`output/murata_d1/`): six equatorial R2(i)–R3(j) edges from stored `endpoint_dist_*` columns. BHHpH/BHHpM median ≈ 5.0 Å, 75–77% in 4.5–5.5 Å, 10–14% ≥ 7 Å — Murata's compact window. BMH/BMM still use methyl-carbon sites (~4.3 Å median on BMM), so they are not yet C2–C3. Canonical roles: `src/EndpointAnalyzer/gsa_site_map.py`.
-4. **`d2` is not implemented.**
+### What was wrong (withdrawn)
 
-### What this invalidates
+1. Cation–π was missing, then later CPy was taken as para-to-N. **Fixed:** CPy is para to the Py⁺–benzene linker.
+2. `paper_d1_n_open` counted the compact 4.5–5.5 Å window as "open." Labels now use elongated d1 ≥ 7.0 Å. The old column name is leftover hygiene (item 7 below).
+3. Hull `s3`/`s7` was not R2/R3. Canonical roles: `src/EndpointAnalyzer/gsa_site_map.py`.
+4. Whole-cube `assembly_rmsd_to_ref` is unimodal and does not show Murata's 1.0 / 1.5 / 2.7 Å peaks. Motif RMSD is the right coordinate.
 
-The earlier claim that **BMMpH and BMMpM show 0% open cation–π** is an artifact of a mis-specified criterion. BMMpM is Murata's 1₆, their *most stable* system at 78.4% metastructure A, so "zero closed structures" is backwards. Claim withdrawn.
+The earlier claim that **BMMpH and BMMpM show 0% open cation–π** is an artifact of a mis-specified criterion. Withdrawn.
 
-### G0 `[~]` Implement Murata's criteria properly — **BLOCKS G5 and every metastructure claim**
+### G0 `[x]` Implement Murata's criteria properly
 
-1. Identify, per monomer, the pole Py⁺ ring, the equatorial Py⁺ ring, and the Ph ring forming each of the six cation–π units (Murata Figure 1c).
-2. Compute the pole-Py⁺-to-Ph distance per unit per frame; flag open at ≥ 6.5 Å; emit `n_open_cation_pi`.
-3. Reimplement `d1` as the C2–C3 ipso-carbon distance across each of the six equatorial edges. **Sanity gate:** the distribution must be bimodal near 4.5–5.5 Å and above 7.0 Å. **`[~]` remap done:** `scripts/remap_murata_d1.py` → `output/murata_d1/`. BHHpH/BHHpM pass the gate (median ≈ 5.0 Å). Remaining: ipso–ipso extract for CH3 cubes (BMH/BMM methyl-carbon proxy is ~0.7 Å short).
-4. Implement `d2` (CPy–C3).
-5. Emit a per-frame metastructure label A / B / C1 / C2 / other using Murata's rules exactly.
-6. Compute RMSD to the initial NVT structure and check peaks near 1.0 / 1.5 / 1.6–2.5 / 2.7 Å. **This is the strongest available validation of the reimplementation.**
-7. Rename `paper_d1_n_open` to `d1_n_compact`, or remove it.
+1. `[x]` Pole Py⁺, equatorial Py⁺, Ph per monomer; six Ph sandwiches (pole *i*, Ph *j*, eq Py⁺ *k*).
+2. `[x]` π(pole) and π(equator) per sandwich; open = π(pole) ≥ 6.5 Å; `n_open_cation_pi`.
+3. `[x]` d1 = C2–C3 ipso on six locked equatorial edges. **Sanity gate passed:** overlay histograms are compact near 4–5 Å with an elongated shoulder ≥ 7 Å that grows when π opens (S11-style split).
+4. `[x]` d2 = CPy–C3 (CPy para to the phenylene linker).
+5. `[x]` Per-frame A / B / C1 / C2 / other (`label_motif_metastructures`).
+6. `[x]` Motif RMSD vs frame 0. Whole-cube RMSD is kept only as a negative control.
+7. `[ ]` Rename leftover `paper_d1_n_open` to `d1_n_compact` (or remove). Does not affect G5 labels.
 
-**Code:** `src/EndpointAnalyzer/gsa_site_map.py`, `src/ChangepointAnalysis/murata_d1.py` (`scripts/remap_murata_d1.py`), `src/ChangepointAnalysis/endpoint_features.py` (`resolve_paper_d1_atoms`), plus a new cation–π observer. Hull `s3`/`s7` is fallback only for non-GSA monomers.
+**Code:** `src/EndpointAnalyzer/gsa_site_map.py`, `src/ChangepointAnalysis/murata_criteria.py`, `src/ChangepointAnalysis/murata_rmsd.py`. Batch: `scripts/compute_murata_motif_rmsd.py`. Plots: `scripts/plot_murata_motif_rmsd_timeseries.py`. Frames: `output/B*_motif_rmsd/`. Combined plots: `output/murata_motif_rmsd/plots/` (`dist_pole_eq_d1_d2.png`, `dist_d1_d2_by_open_cation_pi.png`, plus `_apo` and per-metric overlays).
 
 ---
 
@@ -239,7 +239,7 @@ The elbow discrepancy is resolved in favour of the `penalty_recommendation.txt` 
 
 **This is itself a result.** At the final own-elbow penalty, 37% of BMMpM replicas show no regime change at all across 5 ns, against 0% for four of the six cohorts. That independently corroborates Murata's 78.4% metastructure A and 0.2% "other" for 1₆. Report it as a per-cohort static fraction, using the 37% figure, not the earlier wrong-grid 41%.
 
-**Guest starting state, verified directly:** checked `n_guest_inside_cavity` / `n_guest_bulk` at frame 0 for every replica in all six cohorts (`output/gsa_features_step1/*_gsa_features.csv`). Result is uniform: **all 24 iodide start in bulk, zero inside the cavity, at t=0, in every cohort with no exceptions.** This matches Murata's stated protocol (extra iodide added specifically to *enhance the chance of* encapsulation during the run) and contradicts a literal reading of "trajectories start from encapsulation states." **Open question O2 below** — resolve before finalizing the G5 comparability claim.
+**Guest starting state, verified directly:** checked `n_guest_inside_cavity` / `n_guest_bulk` at frame 0 for every replica in all six cohorts (`output/gsa_features_step1/*_gsa_features.csv`). Result is uniform: **all 24 iodide start in bulk, zero inside the cavity, at t=0, in every cohort with no exceptions.** This matches Murata's stated protocol (extra iodide added specifically to *enhance the chance of* encapsulation during the run) and contradicts a literal reading of "trajectories start from encapsulation states." **O2 is closed** (apo-optimized cage).
 
 Guest entry *during* the run (`n_guest_inside_cavity > 0` at any frame) does vary sharply by cohort and tracks methylation:
 
@@ -262,7 +262,7 @@ This is a looser criterion than Murata's "encapsulation" (any visit, not permane
 
 **User confirmed:** our starting structures are a "pure cage form" — an optimized GSA cube built with no guest ever involved — with water and iodide dropped in externally afterward. This is consistent with the frame-0 data above (guest in bulk, zero inside at t=0) and is not a contradiction; the earlier flag was raised because the phrasing was ambiguous, not because the data was wrong.
 
-**This is a methodological point in our favor, worth stating in C1.** Murata's cage geometry traces back to the X-ray structure of the 4₆·(TBM)₂ complex, with the TBM guests removed before their own iodide is added — meaning their starting cavity shape could carry transient memory of a bound aromatic guest. Ours is built as an idealized apo structure with no such history. Comparability to Murata's Table 1 is **not** blocked by any starting-state issue; the guest-entry-rate table above remains useful context (it independently tracks their methylation-dependent encapsulation trend) but is not a required filtering step for G5.
+**This is a methodological point in our favor, worth stating in C1.** Murata's cage geometry traces back to the X-ray structure of the 4₆·(TBM)₂ complex, with the TBM guests removed before their own iodide is added — meaning their starting cavity shape could carry transient memory of a bound aromatic guest. Ours is built as an idealized apo structure with no such history. Comparability to Murata's Table 1 is **not** blocked by any starting-state issue. G5 occupancy uses apo frames (`n_guest_inside_cavity < 1`), matching Murata's non-encapsulated filter. The guest-entry-rate table remains useful context (it independently tracks their methylation-dependent encapsulation trend).
 
 ### G3 `[x]` Scan k=2–10 per cohort for chemically meaningful clusters — **implemented, run, and reviewed**
 
@@ -310,27 +310,29 @@ Ran the full existing test suite after this refactor (`rank_cluster_discriminati
 
 **Code:** `src/ChangepointAnalysis/reporting.py` — `_eta_squared_columns`, `benjamini_hochberg_qvalues`, `permutation_eta_squared_pvalues`, `score_cluster_discriminating_features`, `rank_cluster_discriminating_endpoint_features` (now a thin wrapper). Tests: `tests/test_cluster_attribution.py`.
 
-### G5 `[ ]` The Murata comparison
+### G5 `[~]` The Murata comparison — Table 1 occupancy done
 
-Depends on G0. G3 and G4 are done and do not block this. Three concrete comparisons:
+G0 no longer blocks this. Occupancy is from motif frames labeled A/B/C1/C2/other, apo filter (`n_guest_inside_cavity < 1`). **2₆′ has no cohort** — three-way comparison only.
 
-**1. Population comparison** against Murata Table 1 (percentages, non-encapsulated trajectories). **Cohort mapping resolved (O1):** BMHpM = 2₆, confirmed. **2₆′ has no cohort in our design** — three-way comparison only, not four:
+**1. Population comparison `[x]`** against Murata Table 1. Source: `output/murata_g5/murata_table1_occupancy.csv`, bar plot `output/murata_g5/plots/occupancy_vs_murata_table1.png`.
 
-| | 1₆ / BMMpM | **2₆ / BMHpM** | 2₆′ — no cohort | 3₆ / BHHpM |
-|---|---:|---:|---:|---|
-| A | 78.4 | 45.3 | 19.7 | 7.2 |
-| B | 8.7 | 13.8 | 13.3 | 15.8 |
-| C1 | 2.3 | 1.7 | 19.1 | 4.7 |
-| C2 | 10.4 | 38.6 | 38.9 | 26.3 |
-| other | 0.2 | 0.5 | 9.0 | 46.1 |
+| | 1₆ / BMMpM ours | Murata | **2₆ / BMHpM** ours | Murata | 2₆′ — no cohort | 3₆ / BHHpM ours | Murata |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 76.6 | 78.4 | 44.0 | 45.3 | 19.7 | 7.5 | 7.2 |
+| B | 8.6 | 8.7 | 13.7 | 13.8 | 13.3 | 15.8 | 15.8 |
+| C1 | 2.2 | 2.3 | 1.7 | 1.7 | 19.1 | 5.4 | 4.7 |
+| C2 | 10.2 | 10.4 | 38.4 | 38.6 | 38.9 | 40.4 | 26.3 |
+| other | 2.4 | 0.2 | 2.2 | 0.5 | 9.0 | 30.8 | 46.1 |
 
-With G0 done, label every frame by Murata's rules and cross-tabulate against our cluster labels for the three mapped cohorts. The 2₆′ column is retained above only for reference to Murata's own divergence result (§0), not as a target for our G5 comparison.
+**1₆ and 2₆ match Table 1 to ~1–2 pp.** 3₆ matches A/B/C1; the residual is C2 vs other (+14 pp C2, −15 pp other). Frames we call C2 (exactly two π open + exactly one elongated d1) are the ones Murata more often files as other (≥3 openings, or two openings with ≥2 elongated d1). Quote the apo-frame numbers above, not the `all`/`never` slices, unless a sensitivity paragraph is needed.
 
-**2. Transition-frequency comparison.** Section 3.3's final own-elbow ratio (1 : 3.18 : 4.70 vs Murata 1 : 2.67 : 3.67) is the number to quote. No longer pending — G1b is decided.
+`pH` series (not in Murata), same labels, apo frames: BHHpH 5.8 / 10.8 / 10.0 / 37.6 / 35.8 (tracks 3₆); BMHpH 44.0 / 11.8 / 3.2 / 39.2 / 1.8 (tracks 2₆); BMMpH **91.2 / 7.2 / 0.4 / 1.2 / 0.0** (more locked in A than 1₆). Pole-H × equatorial-methyl is a result Murata's design cannot show.
 
-**3. Resolving "other".** For the frames Murata calls "other" in our three mapped cohorts — 0.5% of 2₆, 46.1% of 3₆ — report what our clusters make of them. The 9.0% figure for 2₆′ is not something we can resolve, since we have no 2₆′ trajectories.
+**2. Transition-frequency comparison `[x]`.** Section 3.3's own-elbow ratio (1 : 3.18 : 4.70 vs Murata 1 : 2.67 : 3.67) is the number to quote. G1b is decided.
 
-**Code:** new `scripts/compare_to_murata_metastructures.py`
+**3. Resolving "other" `[~]`.** Tables written: `output/murata_g5/murata_vs_endpoint_cluster.csv` (row-normalized % of each Murata label in each endpoint cluster) and `murata_other_vs_endpoint_cluster.csv`. On apo frames, BHHpM other is 30.8% of frames (vs Murata 46.1%) and sits mainly in clusters 1 (40%) and 4 (31%); BMHpM/BMMpM other is only ~2% (vs 0.5% / 0.2%). Cluster integers are arbitrary — the draft still needs a one-paragraph reading of the 3₆ C2/other split and of those BHHpM clusters. 2₆′ other (9.0%) cannot be resolved.
+
+**Code:** `scripts/compare_to_murata_metastructures.py` (`label_motif_metastructures` in `src/ChangepointAnalysis/murata_rmsd.py`).
 
 ---
 
@@ -372,23 +374,23 @@ No free-energy surface, no rate constants, attribution is correlational, cluster
 ## 7. Release hygiene
 
 - **R1 `[ ]`** Clean the working tree. Note `output/_recompute_matched_penalties.py` is a new untracked script — move it into `scripts/` and commit it, since it produced published numbers.
-- **R2 `[ ]`** Tag a release and mint a Zenodo DOI, after G0 lands and the re-cluster decision (published penalties vs final own-elbow segments — G3 note) is made; if re-clustering happens, re-run the G3 chemical-k scan and G4 ranking on the new segments first.
+- **R2 `[ ]`** Tag a release and mint a Zenodo DOI, after the re-cluster decision (published penalties vs final own-elbow segments — G3 note) is made; if re-clustering happens, re-run the G3 chemical-k scan and G4 ranking on the new segments first.
 - **R3 `[ ]`** Data availability. Feature CSVs are small enough to deposit in full.
-- **R4 `[~]`** Tests for the G0 criteria and the G4 permutation null. G4's tests are done (`tests/test_cluster_attribution.py`, 6/6 passing). G0's cation–π / d2 tests are still needed once that code exists.
+- **R4 `[~]`** Tests for the G0 criteria and the G4 permutation null. G4: `tests/test_cluster_attribution.py`. G0: `tests/test_gsa_site_map.py` (CPy para to phenylene linker), `tests/test_murata_criteria.py` (A/B/C1/C2 labels, occupancy vs Table 1 mapping), `tests/test_murata_rmsd.py` (unit columns, distance plots, metastructure labels from elongated d1). Remaining hygiene: rename `paper_d1_n_open` (G0 item 7).
 
 ---
 
 ## 8. Dependency order
 
 ```
-G0 ──► G5
+G0 ✓ done ──► G5 `[~]` Table 1 occupancy done; 3₆ C2/other + cluster reading still open
 G1 ─► G1a ─► G1b ✓ done ─► §3.3 final ─► G5
 G3 ✓ done, G4 ✓ done ──► Results (attribution)
 C1 ──► Methods (done)
 G1b ──► R2 ──► R3
 ```
 
-**Critical path:** G0 (reimplement Murata's criteria) → G5 → abstract resolved. G1b, O1, G3, and G4 are all closed; G0 is the only thing left upstream of G5. The G3 re-cluster decision (published penalties vs final own-elbow segments) is a quality choice for R2, not a blocker for G5 or the draft.
+**Critical path:** G5 remaining work is draft interpretation of the 3₆ C2/other split and of endpoint clusters on Murata "other" frames — not a reimplementation. G0, G1b, O1, G3, and G4 are closed. The G3 re-cluster decision (published penalties vs final own-elbow segments) is a quality choice for R2, not a blocker for the occupancy table or the draft.
 
 ---
 
@@ -397,8 +399,8 @@ G1b ──► R2 ──► R3
 | Stage | Work | Gate |
 |---|---|---|
 | 1 | ~~Correct `docs/penalty_sweep_B_cohorts.md`~~ done | Docs match code |
-| 2 | G0 implementation | d1 bimodal, RMSD peaks reproduce |
-| 3 | G5 three-way comparison (G3, G4 done and do not block this) | Contingency table, "other" resolved |
+| 2 | ~~G0 implementation~~ done | S11-style d1 vs open π; CPy = para to phenylene linker |
+| 3 | G5 three-way comparison | Table 1 occupancy done (1₆/2₆ match; 3₆ C2 vs other). Remaining: interpret 3₆ split + BHHpM "other" clusters |
 | 4 | Re-cluster decision for R2 (published penalties vs final own-elbow segments); re-run G3/G4 on new segments if so | Quality choice, not a blocker |
 | 5 | C2, C3, draft | Full draft |
 | 6 | R1–R4, submit | Release tagged |
@@ -416,8 +418,10 @@ G1b ──► R2 ──► R3
 | Transition-rate ratio | **1 : 3.18 : 4.70 — final** | Own elbow throughout (G1b decided). vs Murata 1 : 2.67 : 3.67 — this overshoots, by design: BMMpM's genuine elbow sits at a higher relative penalty (0.795×) than the rest (0.50–0.63×). Do not quote the intermediate matched-relative figure of 1 : 2.29 : 3.39; that run is rejected |
 | GSA-vs-endpoint event ratio | 4.9–13.2x | Not "2–3x". Both cover 5 ns, so comparable, but endpoint cannot resolve sub-5 ps events |
 | "0% open cation–π in BMM" | **withdrawn** | Mis-specified criterion; see section 2 |
-| Remapped equatorial d1 (BHH*) | **4.97–4.99 Å median** | `output/murata_d1/`. 75–77% in 4.5–5.5 Å, 10–14% ≥ 7 Å. Do **not** quote BMH/BMM compact fractions as C2–C3 (methyl-carbon proxy) |
-| Hull `s3`/`s7` d1 ~9–17 Å | **superseded** | Wrong sites; use remapped R2–R3 edges |
+| Motif d1 / π(pole) (all B*) | **S11-style, verified** | `output/murata_motif_rmsd/plots/dist_d1_d2_by_open_cation_pi.png`. Compact ~4–5 Å when π closed; elongated ~8–9 Å grows as π opens. C2–C3 ipso, not methyl-carbon proxy |
+| Hull `s3`/`s7` d1 ~9–17 Å | **superseded** | Wrong sites; use locked R2–R3 ipso edges in motif CSVs |
+| Table 1 occupancy (apo frames) | **new, verified** | BMMpM 76.6/8.6/2.2/10.2/2.4 vs 78.4/8.7/2.3/10.4/0.2; BMHpM 44.0/13.7/1.7/38.4/2.2 vs 45.3/13.8/1.7/38.6/0.5; BHHpM 7.5/15.8/5.4/40.4/30.8 vs 7.2/15.8/4.7/26.3/46.1. Quote apo frames. 3₆ residual is C2 vs other |
+| Remapped equatorial d1 (old hull remap) | **superseded for G5** | `output/murata_d1/` was the hull-column remap. G5 uses motif-CSV ipso d1 (`output/B*_motif_rmsd/`) |
 | Top site-pair η² 0.81–0.84 | partly circular, now calibrated | Permutation null + BH-FDR implemented and tested (G4). Not yet re-run on the published `endpoint_pair_cluster_correlation.csv` files — none carry the new p/q columns as of this check |
 | BMMpM 37% static at true own elbow | **holds, final** | 19/51 have zero breakpoints at 5.489. The earlier 41% (21/51) used the wrong-grid elbow (5.256) and is superseded. Corroborates Murata's 78.4% A for 1₆ |
 | k=5 is chemically meaningful | **new, verified** | `chemical_separation`=True at k=5 in all six cohorts (G3, real scan output). Silhouette-max k=2 never passes; BHHpM's k=6 peak does |
@@ -425,4 +429,4 @@ G1b ──► R2 ──► R3
 
 ---
 
-*Repository state: branch `MDchat`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` + `output/endpoint_vs_gsa_timing_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run, generated in this session to replace an unverified sweep-only estimate).*
+*Repository state: branch `MDchat`. G0 from `output/B*_motif_rmsd/` and `output/murata_motif_rmsd/plots/`. G5 occupancy from `output/murata_g5/`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` + `output/endpoint_vs_gsa_timing_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run).*

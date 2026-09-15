@@ -797,6 +797,336 @@ def plot_per_unit_motif_series(
     return written
 
 
+CONTACT_DISTANCE_SPECS: tuple[tuple[str, str, tuple[float, ...], str], ...] = (
+    ("cation_pi_pole_e", "π(pole) Py⁺–Ph (Å)", (6.5,), "cation_pi_pole"),
+    ("cation_pi_eq_e", "π(equator) Py⁺–Ph (Å)", (6.5,), "cation_pi_eq"),
+    ("equator_d1_e", "equatorial d1 C2–C3 (Å)", (4.5, 5.5, 7.0), "equator_d1"),
+    ("equator_d2_e", "equatorial d2 CPy–C3 (Å)", (), "equator_d2"),
+)
+
+_OPEN_PI_PANEL_TITLES = {
+    0: "all cation–π closed",
+    1: "one cation–π opened",
+    2: "two cation–π opened",
+}
+
+
+def stacked_unit_values(df: pd.DataFrame, prefix: str) -> np.ndarray:
+    """All finite distances for locked units with ``prefix`` (six units × frames)."""
+    cols = unit_series_columns(df, prefix)
+    if not cols:
+        return np.array([], dtype=float)
+    vals = df[cols].to_numpy(dtype=float).ravel()
+    return vals[np.isfinite(vals)]
+
+
+def stacked_unit_values_with_open(
+    df: pd.DataFrame, prefix: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unit distances paired with the frame-level opened π count."""
+    cols = unit_series_columns(df, prefix)
+    if not cols or "n_open_cation_pi" not in df.columns:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    vals = df[cols].to_numpy(dtype=float)
+    n_open = pd.to_numeric(df["n_open_cation_pi"], errors="coerce").to_numpy(dtype=float)
+    n_open = np.repeat(n_open, vals.shape[1])
+    flat = vals.ravel()
+    ok = np.isfinite(flat) & np.isfinite(n_open)
+    return flat[ok], n_open[ok]
+
+
+def _draw_distance_hist(
+    ax,
+    vals: np.ndarray,
+    *,
+    bins: np.ndarray,
+    color: str,
+    label: Optional[str] = None,
+    filled: bool = False,
+) -> None:
+    vals = np.asarray(vals, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
+    if filled:
+        ax.hist(
+            vals,
+            bins=bins,
+            density=True,
+            histtype="stepfilled",
+            color=color,
+            alpha=0.35,
+            lw=0,
+        )
+    ax.hist(
+        vals,
+        bins=bins,
+        density=True,
+        histtype="step",
+        color=color,
+        lw=1.4,
+        label=label,
+    )
+
+
+def _mark_distance_guides(ax, hlines: Sequence[float]) -> None:
+    for x in hlines:
+        ax.axvline(float(x), color="0.35", ls="--", lw=0.8, zorder=3)
+
+
+def plot_contact_distance_overlay(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    output_path: Path | str,
+    *,
+    prefix: str,
+    xlabel: str,
+    hlines: Sequence[float] = (),
+    xmax: float = 12.0,
+    traj_filter: str = "all",
+) -> Path:
+    """Overlay cubes: pooled histogram of one locked-unit distance."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    bins = np.arange(0.0, xmax + 0.1, 0.1)
+    fig, ax = plt.subplots(figsize=(8.0, 4.2), constrained_layout=True)
+    for cube in [c for c in KNOWN_CUBES if c in frames_by_cohort] or list(frames_by_cohort):
+        apo = filter_non_encapsulated(frames_by_cohort[cube], traj_filter=traj_filter)
+        vals = stacked_unit_values(apo, prefix)
+        vals = vals[(vals >= 0) & (vals <= xmax)]
+        _draw_distance_hist(
+            ax,
+            vals,
+            bins=bins,
+            color=CUBE_COLORS.get(cube, "0.35"),
+            label=f"{cube}  n={len(vals):,}",
+        )
+    _mark_distance_guides(ax, hlines)
+    ax.set_xlim(0, xmax)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("distribution")
+    ax.set_title(_filter_title(traj_filter))
+    ax.legend(fontsize=8, ncol=2)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_contact_distance_by_cube(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    output_path: Path | str,
+    *,
+    prefix: str,
+    xlabel: str,
+    hlines: Sequence[float] = (),
+    xmax: float = 12.0,
+    traj_filter: str = "all",
+) -> Path:
+    """Per-cube panels of one locked-unit distance."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cohorts = [c for c in KNOWN_CUBES if c in frames_by_cohort] or list(frames_by_cohort)
+    n = len(cohorts)
+    ncols = 3
+    nrows = int(np.ceil(n / ncols)) if n else 1
+    fig, axes = plt.subplots(nrows, ncols, figsize=(11, 3.2 * nrows), squeeze=False)
+    bins = np.arange(0.0, xmax + 0.1, 0.1)
+    for i, cube in enumerate(cohorts):
+        ax = axes[i // ncols][i % ncols]
+        apo = filter_non_encapsulated(frames_by_cohort[cube], traj_filter=traj_filter)
+        vals = stacked_unit_values(apo, prefix)
+        vals = vals[(vals >= 0) & (vals <= xmax)]
+        color = CUBE_COLORS.get(cube, "0.4")
+        _draw_distance_hist(ax, vals, bins=bins, color=color, filled=True)
+        _mark_distance_guides(ax, hlines)
+        ax.set_xlim(0, xmax)
+        ax.set_title(f"{cube}  n={len(vals):,}")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("distribution")
+    for j in range(n, nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+    fig.suptitle(_filter_title(traj_filter), fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_contact_distance_four_panel(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    output_path: Path | str,
+    *,
+    xmax: float = 12.0,
+    traj_filter: str = "all",
+) -> Path:
+    """One figure: pole π, equator π, d1, and d2 overlays."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.2), constrained_layout=True)
+    bins = np.arange(0.0, xmax + 0.1, 0.1)
+    cubes = [c for c in KNOWN_CUBES if c in frames_by_cohort] or list(frames_by_cohort)
+    for ax, (prefix, xlabel, hlines, _) in zip(axes.ravel(), CONTACT_DISTANCE_SPECS):
+        for cube in cubes:
+            apo = filter_non_encapsulated(frames_by_cohort[cube], traj_filter=traj_filter)
+            vals = stacked_unit_values(apo, prefix)
+            vals = vals[(vals >= 0) & (vals <= xmax)]
+            _draw_distance_hist(
+                ax,
+                vals,
+                bins=bins,
+                color=CUBE_COLORS.get(cube, "0.35"),
+                label=cube,
+            )
+        _mark_distance_guides(ax, hlines)
+        ax.set_xlim(0, xmax)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("distribution")
+        ax.set_title(xlabel.split(" (")[0])
+    axes[0, 1].legend(fontsize=7, ncol=2, loc="upper right")
+    fig.suptitle(_filter_title(traj_filter), fontsize=11)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def plot_d1_d2_by_open_cation_pi(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    output_path: Path | str,
+    *,
+    xmax: float = 12.0,
+    traj_filter: str = "all",
+) -> Path:
+    """Murata Fig. S11-style: d1 and d2 vs 0 / 1 / ≥2 opened pole π contacts."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = (
+        ("equator_d1_e", "d1 [Å]", (4.5, 5.5, 7.0)),
+        ("equator_d2_e", "d2 [Å]", ()),
+    )
+    fig, axes = plt.subplots(2, 3, figsize=(11.5, 6.6), constrained_layout=True)
+    bins = np.arange(0.0, xmax + 0.1, 0.1)
+    cubes = [c for c in KNOWN_CUBES if c in frames_by_cohort] or list(frames_by_cohort)
+    for row, (prefix, xlabel, hlines) in enumerate(metrics):
+        for col, n_open in enumerate((0, 1, 2)):
+            ax = axes[row, col]
+            for cube in cubes:
+                apo = filter_non_encapsulated(
+                    frames_by_cohort[cube], traj_filter=traj_filter
+                )
+                vals, opened = stacked_unit_values_with_open(apo, prefix)
+                if vals.size == 0:
+                    continue
+                keep = open_count_bin(pd.Series(opened)).to_numpy() == n_open
+                subset = vals[keep]
+                subset = subset[(subset >= 0) & (subset <= xmax)]
+                _draw_distance_hist(
+                    ax,
+                    subset,
+                    bins=bins,
+                    color=CUBE_COLORS.get(cube, "0.35"),
+                    label=cube if row == 0 and col == 0 else None,
+                )
+            _mark_distance_guides(ax, hlines)
+            ax.set_xlim(0, xmax)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel("distribution")
+            if row == 0:
+                ax.set_title(_OPEN_PI_PANEL_TITLES[n_open])
+    axes[0, 0].legend(fontsize=7, loc="upper right")
+    fig.suptitle(
+        f"{_filter_title(traj_filter)}  ·  d1 / d2 when pole π is closed or opened",
+        fontsize=11,
+    )
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def write_contact_distance_plots(
+    frames_by_cohort: dict[str, pd.DataFrame],
+    plots_dir: Path | str,
+    *,
+    traj_filter: str = "all",
+    suffix: str = "",
+) -> list[Path]:
+    """Write pole/eq π, d1, d2 histograms and the S11-style open/closed split."""
+    plots_dir = Path(plots_dir)
+    written: list[Path] = []
+    if not any(
+        unit_series_columns(df, "cation_pi_pole_e")
+        or unit_series_columns(df, "equator_d1_e")
+        for df in frames_by_cohort.values()
+    ):
+        return written
+    four = plot_contact_distance_four_panel(
+        frames_by_cohort,
+        plots_dir / f"dist_pole_eq_d1_d2{suffix}.png",
+        traj_filter=traj_filter,
+    )
+    written.append(four)
+    if any("n_open_cation_pi" in df.columns for df in frames_by_cohort.values()):
+        split = plot_d1_d2_by_open_cation_pi(
+            frames_by_cohort,
+            plots_dir / f"dist_d1_d2_by_open_cation_pi{suffix}.png",
+            traj_filter=traj_filter,
+        )
+        written.append(split)
+    for prefix, xlabel, hlines, tag in CONTACT_DISTANCE_SPECS:
+        if not any(unit_series_columns(df, prefix) for df in frames_by_cohort.values()):
+            continue
+        written.append(
+            plot_contact_distance_overlay(
+                frames_by_cohort,
+                plots_dir / f"dist_{tag}_overlay{suffix}.png",
+                prefix=prefix,
+                xlabel=xlabel,
+                hlines=hlines,
+                traj_filter=traj_filter,
+            )
+        )
+        written.append(
+            plot_contact_distance_by_cube(
+                frames_by_cohort,
+                plots_dir / f"dist_{tag}_by_cube{suffix}.png",
+                prefix=prefix,
+                xlabel=xlabel,
+                hlines=hlines,
+                traj_filter=traj_filter,
+            )
+        )
+    return written
+
+
+def count_elongated_d1(
+    df: pd.DataFrame,
+    *,
+    elongated_lo: float = 7.0,
+) -> pd.Series:
+    """Per-frame count of locked equatorial d1 values ≥ 7.0 Å."""
+    cols = unit_series_columns(df, "equator_d1_e")
+    if not cols:
+        return pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+    vals = df[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    return pd.Series(np.sum(vals >= float(elongated_lo), axis=1).astype(int), index=df.index)
+
+
+def label_motif_metastructures(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``murata_d1_n_elongated`` and ``murata_metastructure`` on motif CSVs."""
+    from src.ChangepointAnalysis.murata_criteria import attach_murata_metastructure_labels
+    from src.ChangepointAnalysis.murata_d1 import D1_ELONGATED_LO
+
+    out = df.copy()
+    out["murata_d1_n_elongated"] = count_elongated_d1(out, elongated_lo=D1_ELONGATED_LO)
+    return attach_murata_metastructure_labels(out)
+
+
 def compute_trajectory_motif_rmsd(
     topology: Path | str,
     trajectory: Path | str,

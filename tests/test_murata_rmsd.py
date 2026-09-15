@@ -264,6 +264,70 @@ def test_plot_per_unit_motif_series_writes_png(tmp_path) -> None:
     assert all(p.is_file() and p.stat().st_size > 0 for p in written)
 
 
+def test_write_contact_distance_plots_splits_by_open_pi(tmp_path) -> None:
+    from src.ChangepointAnalysis.murata_rmsd import (
+        stacked_unit_values,
+        stacked_unit_values_with_open,
+        write_contact_distance_plots,
+    )
+
+    rng = np.random.default_rng(1)
+    n = 80
+    closed = pd.DataFrame(
+        {
+            "traj_id": ["a"] * n,
+            "n_open_cation_pi": [0] * n,
+            "n_guest_inside_cavity": [0] * n,
+            "cation_pi_pole_e0_m0pole_m1ph": rng.normal(4.2, 0.2, n),
+            "cation_pi_eq_e0_m5eq_m1ph": rng.normal(4.5, 0.2, n),
+            "equator_d1_e0_m0r2_m1r3": rng.normal(5.0, 0.2, n),
+            "equator_d2_e0_m0cpy_m1r3": rng.normal(6.0, 0.3, n),
+        }
+    )
+    opened = pd.DataFrame(
+        {
+            "traj_id": ["b"] * n,
+            "n_open_cation_pi": [2] * n,
+            "n_guest_inside_cavity": [0] * n,
+            "cation_pi_pole_e0_m0pole_m1ph": rng.normal(8.5, 0.3, n),
+            "cation_pi_eq_e0_m5eq_m1ph": rng.normal(5.0, 0.2, n),
+            "equator_d1_e0_m0r2_m1r3": rng.normal(8.5, 0.3, n),
+            "equator_d2_e0_m0cpy_m1r3": rng.normal(7.5, 0.3, n),
+        }
+    )
+    stacked = {
+        "BHHpH": closed,
+        "BMMpM": pd.concat([closed, opened], ignore_index=True),
+    }
+    written = write_contact_distance_plots(stacked, tmp_path, traj_filter="all")
+    names = {p.name for p in written}
+    assert "dist_pole_eq_d1_d2.png" in names
+    assert "dist_d1_d2_by_open_cation_pi.png" in names
+    assert "dist_cation_pi_pole_overlay.png" in names
+    assert "dist_equator_d1_by_cube.png" in names
+    assert all(p.is_file() and p.stat().st_size > 0 for p in written)
+    vals = stacked_unit_values(opened, "equator_d1_e")
+    assert len(vals) == n
+    d1, n_open = stacked_unit_values_with_open(opened, "equator_d1_e")
+    assert set(n_open.astype(int)) == {2}
+    assert len(d1) == n
+
+
+def test_label_motif_metastructures_uses_elongated_d1() -> None:
+    from src.ChangepointAnalysis.murata_rmsd import label_motif_metastructures
+
+    df = pd.DataFrame(
+        {
+            "n_open_cation_pi": [0, 2, 2],
+            "equator_d1_e0_m0r2_m1r3": [5.0, 5.0, 8.0],
+            "equator_d1_e1_m1r2_m2r3": [5.0, 5.0, 5.0],
+        }
+    )
+    out = label_motif_metastructures(df)
+    assert list(out["murata_d1_n_elongated"]) == [0, 0, 1]
+    assert list(out["murata_metastructure"]) == ["A", "C1", "C2"]
+
+
 def test_compute_emits_per_unit_distance_columns() -> None:
     from src.ChangepointAnalysis.murata_rmsd import compute_trajectory_motif_rmsd
 

@@ -3,7 +3,8 @@
 Does not re-read trajectories. Per-unit plots appear only after CSVs include
 ``cation_pi_pole_e*`` / ``cation_pi_eq_e*`` / ``cation_pi_angle_e*`` /
 ``equator_d1_e*`` / ``equator_d2_e*`` / ``equator_angle_e*``
-columns (re-run compute_murata_motif_rmsd).
+columns (re-run compute_murata_motif_rmsd). Also writes pole/eq π, d1, and d2
+histograms plus d1/d2 split by opened pole π (Murata Fig. S11 style).
 
 Example
 -------
@@ -30,6 +31,7 @@ from src.ChangepointAnalysis.murata_rmsd import (
     plot_rmsd_vs_time,
     plot_rmsd_vs_time_mean_by_cube,
     plot_rmsd_vs_time_three_motifs,
+    write_contact_distance_plots,
 )
 
 
@@ -92,6 +94,13 @@ def main() -> int:
             print(f"  wrote {path}", flush=True)
         for path in plot_per_unit_motif_series(df, plots, cube=cube):
             print(f"  wrote {path}", flush=True)
+        for path in write_contact_distance_plots({cube: df}, plots, traj_filter="all"):
+            print(f"  wrote {path}", flush=True)
+        if "n_guest_inside_cavity" in df.columns:
+            for path in write_contact_distance_plots(
+                {cube: df}, plots, traj_filter="frames", suffix="_apo"
+            ):
+                print(f"  wrote {path}", flush=True)
 
     if len(stacked) > 1:
         combined = args.output_root / "murata_motif_rmsd" / "plots"
@@ -106,6 +115,13 @@ def main() -> int:
                 ylabel=xlabel,
             )
             print(f"wrote {path}", flush=True)
+        for path in write_contact_distance_plots(stacked, combined, traj_filter="all"):
+            print(f"wrote {path}", flush=True)
+        if any("n_guest_inside_cavity" in df.columns for df in stacked.values()):
+            for path in write_contact_distance_plots(
+                stacked, combined, traj_filter="frames", suffix="_apo"
+            ):
+                print(f"wrote {path}", flush=True)
     return 0
 
 

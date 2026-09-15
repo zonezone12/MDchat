@@ -48,6 +48,7 @@ from src.ChangepointAnalysis.murata_rmsd import (
     plot_rmsd_vs_time,
     plot_rmsd_vs_time_three_motifs,
     summarize_apo_rmsd,
+    write_contact_distance_plots,
     write_trajectory_motif_rmsd,
 )
 from src.ChangepointAnalysis.pipeline import _resolve_traj_workers
@@ -214,6 +215,9 @@ def _plot_stacked(stacked: dict[str, pd.DataFrame], out_dir: Path) -> pd.DataFra
                 color=color,
             )
         plot_per_unit_motif_series(df, plots, cube=cube)
+    write_contact_distance_plots(stacked, plots, traj_filter="all")
+    if any("n_guest_inside_cavity" in df.columns for df in stacked.values()):
+        write_contact_distance_plots(stacked, plots, traj_filter="frames", suffix="_apo")
     return pd.DataFrame(summaries)
 
 

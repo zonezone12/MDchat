@@ -33,6 +33,19 @@ from .transition_attribution import parse_site_pair_feature
 CATION_PI_OPEN_LO = 6.5
 METASTRUCTURES = ("A", "B", "C1", "C2", "other")
 
+# Murata 2026 Table 1, non-encapsulated trajectories. 2₆′ has no cohort here.
+MURATA_TABLE1_PCT: dict[str, dict[str, float]] = {
+    "1₆": {"A": 78.4, "B": 8.7, "C1": 2.3, "C2": 10.4, "other": 0.2},
+    "2₆": {"A": 45.3, "B": 13.8, "C1": 1.7, "C2": 38.6, "other": 0.5},
+    "2₆′": {"A": 19.7, "B": 13.3, "C1": 19.1, "C2": 38.9, "other": 9.0},
+    "3₆": {"A": 7.2, "B": 15.8, "C1": 4.7, "C2": 26.3, "other": 46.1},
+}
+COHORT_TO_MURATA_SYSTEM: dict[str, str] = {
+    "BMMpM": "1₆",
+    "BMHpM": "2₆",
+    "BHHpM": "3₆",
+}
+
 # Murata RMSD is **not** whole-cube Kabsch. It is local heavy-atom RMSD of
 # the motif that opens: cation–π sandwich (pole Py+, Ph, equatorial Py+) or
 # the equatorial interlocking belt (Py+, R2, R3, neighboring Py+).
@@ -778,6 +791,28 @@ def occupancy_table(labels: pd.Series) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def occupancy_vs_murata(
+    labels: pd.Series,
+    *,
+    cohort: str,
+    guest_filter: str,
+) -> pd.DataFrame:
+    """Our A/B/C1/C2/other % next to Murata Table 1 when the cohort maps."""
+    occ = occupancy_table(labels)
+    system = COHORT_TO_MURATA_SYSTEM.get(str(cohort))
+    ref = MURATA_TABLE1_PCT.get(system or "", {})
+    out = occ.copy()
+    out.insert(0, "cohort", cohort)
+    out.insert(1, "murata_system", system or "")
+    out.insert(2, "guest_filter", guest_filter)
+    out["our_percent"] = out["percent"]
+    out["murata_percent"] = [
+        ref.get(str(name), np.nan) for name in out["metastructure"]
+    ]
+    out["delta_percent"] = out["our_percent"] - out["murata_percent"]
+    return out
 
 
 def remap_endpoint_cohort_cation_pi(

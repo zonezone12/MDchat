@@ -35,6 +35,7 @@ from src.ChangepointAnalysis.murata_criteria import (
     lock_intermolecular_edges,
     motif_atom_indices,
     occupancy_table,
+    occupancy_vs_murata,
     angle_at_vertex_deg,
 )
 from src.ChangepointAnalysis.murata_d1 import match_hull_sites_to_roles, role_site_index
@@ -134,6 +135,15 @@ def test_occupancy_table_percentages() -> None:
     assert occ.loc["A", "percent"] == 50.0
     assert occ.loc["B", "percent"] == 25.0
     assert occ.loc["C1", "n_frames"] == 0
+
+
+def test_occupancy_vs_murata_maps_bmmpm_to_1six() -> None:
+    labels = pd.Series(["A"] * 8 + ["B"] * 2)
+    cmp = occupancy_vs_murata(labels, cohort="BMMpM", guest_filter="frames")
+    row = cmp.set_index("metastructure").loc["A"]
+    assert row["murata_system"] == "1₆"
+    assert row["our_percent"] == 80.0
+    assert row["murata_percent"] == 78.4
 
 
 def test_match_hull_ring_role_ph() -> None:
