@@ -280,6 +280,52 @@ def test_select_k_by_chemical_information_ignores_silhouette() -> None:
     assert int(csv_pick["selected_k"]) == 5
 
 
+def test_select_k_one_se_rule_prefers_smallest_k_within_noise() -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import select_k_by_chemical_information
+
+    by_k = pd.DataFrame(
+        {
+            "cohort": ["BMHpM"] * 5,
+            "k": [3, 4, 8, 12, 15],
+            "chemical_separation": [False, True, True, True, True],
+            "n_marked_clusters": [1, 2, 2, 3, 3],
+            "murata_nmi": [0.60, 0.30, 0.41, 0.425, 0.43],
+            "murata_nmi_se": [0.02, 0.02, 0.02, 0.016, 0.015],
+        }
+    )
+    picked = select_k_by_chemical_information(by_k).iloc[0]
+    assert int(picked["selected_k"]) == 12
+    assert picked["selection_rule"] == "one_se_murata_nmi_among_chemical_k"
+    assert int(picked["max_nmi_k"]) == 15
+    assert picked["max_nmi_se"] == pytest.approx(0.015)
+    assert picked["selected_nmi"] == pytest.approx(0.425)
+
+
+def test_nmi_from_contingency_matches_sklearn_and_bootstrap_se() -> None:
+    from sklearn.metrics import normalized_mutual_info_score
+
+    from src.ChangepointAnalysis.cluster_k_diagnostics import (
+        bootstrap_nmi_se,
+        nmi_from_contingency,
+    )
+
+    rng = np.random.default_rng(3)
+    clusters = rng.integers(0, 4, size=400)
+    labels = (clusters + rng.integers(0, 3, size=400)) % 5
+    table = pd.crosstab(clusters, labels).to_numpy()
+    assert nmi_from_contingency(table) == pytest.approx(
+        normalized_mutual_info_score(clusters, labels), abs=1e-12
+    )
+
+    traj = np.repeat(np.arange(8), 50)
+    per_traj = np.zeros((8, 4, 5))
+    np.add.at(per_traj, (traj, clusters, labels), 1.0)
+    se = bootstrap_nmi_se({4: per_traj, 5: per_traj}, n_bootstrap=50, random_state=0)
+    assert se[4] == pytest.approx(se[5])
+    assert 0.0 < se[4] < 0.2
+    assert np.isnan(bootstrap_nmi_se({4: per_traj[:1]}, n_bootstrap=50)[4])
+
+
 def test_map_frames_to_segment_clusters_strips_cube_prefix() -> None:
     from src.ChangepointAnalysis.cluster_k_diagnostics import map_frames_to_segment_clusters
 

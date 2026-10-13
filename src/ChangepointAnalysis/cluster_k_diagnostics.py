@@ -1355,12 +1355,15 @@ def label_association_scores(
 
 
 def select_k_by_chemical_information(by_k: pd.DataFrame) -> pd.DataFrame:
-    """Automatic k: chemical_separation must pass, then max Murata NMI.
+    """Automatic k: chemical_separation must pass, then Murata NMI.
 
     Silhouette is **not** used to pick k. Among k with ``chemical_separation``,
-    maximize ``murata_nmi`` (independent A/B/C1/C2/other labels). Ties: more
-    ``n_marked_clusters``, then smaller k. If NMI is missing, fall back to
-    ``n_marked_clusters`` (the old ``best_chemical_k`` rule).
+    find the max ``murata_nmi`` (independent A/B/C1/C2/other labels). With a
+    ``murata_nmi_se`` column (replica bootstrap, :func:`score_murata_nmi_by_k`)
+    the pick is the smallest such k within one SE of that max; NMI keeps
+    creeping up with k by less than its own noise. Without SE: the max itself,
+    ties to more ``n_marked_clusters``, then smaller k. If NMI is missing, fall
+    back to ``n_marked_clusters`` (the old ``best_chemical_k`` rule).
     """
     if by_k.empty:
         return pd.DataFrame()
@@ -1409,7 +1412,16 @@ def select_k_by_chemical_information(by_k: pd.DataFrame) -> pd.DataFrame:
             ["_score", "_marked", "k"],
             ascending=[False, False, True],
         )
-        pick = ranked.iloc[0]
+        best = ranked.iloc[0]
+        pick = best
+        best_se = np.nan
+        nmi_ranked = rule == "max_murata_nmi_among_chemical_k"
+        if nmi_ranked and "murata_nmi_se" in work.columns:
+            best_se = float(pd.to_numeric(pd.Series([best["murata_nmi_se"]]), errors="coerce").iloc[0])
+            if np.isfinite(best_se):
+                near = work[work["_score"] >= float(best["_score"]) - best_se]
+                pick = near.sort_values("k").iloc[0]
+                rule = "one_se_murata_nmi_among_chemical_k"
         rows.append(
             {
                 "cohort": cohort,
@@ -1430,12 +1442,58 @@ def select_k_by_chemical_information(by_k: pd.DataFrame) -> pd.DataFrame:
                     if "n_marked_clusters" in pick.index and pd.notna(pick["n_marked_clusters"])
                     else np.nan
                 ),
+                "max_nmi_k": int(best["k"]) if nmi_ranked else np.nan,
+                "max_nmi": float(best["murata_nmi"]) if nmi_ranked else np.nan,
+                "max_nmi_se": best_se,
                 "silhouette_among_chemical_k": sil_chem_k,
                 "ami_among_chemical_k": ami_chem_k,
                 "n_k_chemical": int(len(passing)),
             }
         )
     return pd.DataFrame(rows)
+
+
+def nmi_from_contingency(table: np.ndarray) -> float:
+    """NMI of a cluster × label count table (arithmetic normalization, as sklearn)."""
+    t = np.asarray(table, dtype=float)
+    n = t.sum()
+    if n <= 0:
+        return float("nan")
+    p = t / n
+    pa = p.sum(axis=1)
+    pb = p.sum(axis=0)
+    nz = p > 0
+    mi = float((p[nz] * np.log(p[nz] / np.outer(pa, pb)[nz])).sum())
+    ha = -float((pa[pa > 0] * np.log(pa[pa > 0])).sum())
+    hb = -float((pb[pb > 0] * np.log(pb[pb > 0])).sum())
+    if ha + hb <= 0:
+        return float("nan")
+    return max(mi, 0.0) / ((ha + hb) / 2.0)
+
+
+def bootstrap_nmi_se(
+    tables_by_k: dict[int, np.ndarray],
+    *,
+    n_bootstrap: int = 500,
+    random_state: int = 0,
+) -> dict[int, float]:
+    """Replica-bootstrap SE of NMI per k.
+
+    Each table is ``(n_traj, n_clusters, n_labels)`` counts with the same
+    trajectory order for every k; one set of trajectory resamples is shared
+    across k.
+    """
+    if not tables_by_k:
+        return {}
+    n_traj = next(iter(tables_by_k.values())).shape[0]
+    if n_traj < 2 or n_bootstrap < 2:
+        return {k: float("nan") for k in tables_by_k}
+    draws = np.random.default_rng(random_state).integers(0, n_traj, size=(int(n_bootstrap), n_traj))
+    out: dict[int, float] = {}
+    for k, tab in tables_by_k.items():
+        boot = np.array([nmi_from_contingency(tab[d].sum(axis=0)) for d in draws])
+        out[k] = float(np.nanstd(boot, ddof=1))
+    return out
 
 
 def score_murata_nmi_by_k(
@@ -1446,8 +1504,15 @@ def score_murata_nmi_by_k(
     k_min: int = 2,
     k_max: int = 10,
     group: str = "endpoint",
+    n_bootstrap: int = 0,
+    random_state: int = 0,
 ) -> pd.DataFrame:
-    """NMI / AMI / Cramér's V of cluster labels vs Murata A/B/C1/C2/other (apo frames)."""
+    """NMI / AMI / Cramér's V of cluster labels vs Murata A/B/C1/C2/other (apo frames).
+
+    ``n_bootstrap > 0`` adds ``murata_nmi_se``, the SE of NMI over replica
+    (trajectory) resamples, for the one-SE rule in
+    :func:`select_k_by_chemical_information`.
+    """
     from .murata_rmsd import filter_non_encapsulated
 
     if "murata_metastructure" not in motif_frames.columns:
@@ -1456,6 +1521,7 @@ def score_murata_nmi_by_k(
     if "n_guest_inside_cavity" in motif_frames.columns:
         apo = filter_non_encapsulated(motif_frames, traj_filter="frames")
     rows: list[dict] = []
+    per_traj: dict[int, pd.DataFrame] = {}
     for k in range(int(k_min), int(k_max) + 1):
         segs = load_segments_at_k(changepoints_dir, k, group=group)
         if segs.empty:
@@ -1476,7 +1542,25 @@ def score_murata_nmi_by_k(
             joined["cluster_label"], joined["murata_metastructure"]
         )
         rows.append({"cohort": cube, "k": int(k), **scores})
-    return pd.DataFrame(rows)
+        if n_bootstrap > 0 and not joined.empty:
+            per_traj[int(k)] = pd.crosstab(
+                [joined["traj_id"].astype(str), joined["cluster_label"].astype(int)],
+                joined["murata_metastructure"].astype(str),
+            )
+    out = pd.DataFrame(rows)
+    if n_bootstrap > 0 and not out.empty:
+        trajs = sorted({t for tab in per_traj.values() for t in tab.index.get_level_values(0)})
+        labels = sorted({c for tab in per_traj.values() for c in tab.columns})
+        tables: dict[int, np.ndarray] = {}
+        for k, tab in per_traj.items():
+            clusters = sorted(tab.index.get_level_values(1).unique())
+            full = pd.MultiIndex.from_product([trajs, clusters])
+            dense = tab.reindex(index=full, columns=labels, fill_value=0).to_numpy(dtype=float)
+            tables[k] = dense.reshape(len(trajs), len(clusters), len(labels))
+        se = bootstrap_nmi_se(tables, n_bootstrap=n_bootstrap, random_state=random_state)
+        out["murata_nmi_se"] = out["k"].map(se)
+        out["n_bootstrap"] = int(n_bootstrap)
+    return out
 
 
 def _format_chemical_txt(long_df: pd.DataFrame, peaks: pd.DataFrame) -> str:

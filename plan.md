@@ -2,9 +2,15 @@
 
 **Target:** methods-and-application manuscript on the automated changepoint pipeline applied to GSA nanocubes.
 **Companion:** [Manuscript planning brief (artifact)](https://claude.ai/code/artifact/a7594487-ffa7-4190-8ed5-5c7eb65257a0)
-**Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1 within 0.6 pp in every class; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`; reading drafted in G5 item 3). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.11 : 4.60** per 5 ns. The paper clusters the own-elbow segments. G3's automatic k on them (chemical gate, then max Murata-label NMI; silhouette is not used) is 9, 4, 4, 10, 3, 4 for BHHpH, BHHpM, BMHpH, BMHpM, BMMpH, BMMpM (`output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv`). G4 p/q columns are populated on all six own-elbow folders.
+**Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1 within 0.6 pp in every class; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`; reading drafted in G5 item 3). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.11 : 4.60** per 5 ns. The paper clusters the own-elbow segments. G3's automatic k on them is 7, 4, 4, 12, 3, 4 for BHHpH, BHHpM, BMHpH, BMHpM, BMMpH, BMMpM (`output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv`). The rule: pass the chemical gate, then take the smallest k within one replica-bootstrap SE of the best Murata-label NMI over k=2–15; silhouette is not used. G4 p/q columns are populated on all six own-elbow folders, and the site pairs are re-ranked at those k (`output/endpoint_pair_ranking_selected_k/`).
 
-**Update (Oct 13):**
+**Update (Oct 13, afternoon):**
+- The G3 k scan was extended to k=15 (re-clustered; the stored k=5 labels came out identical). Max NMI did not settle: BMHpM plateaus at about 0.43 from k=12, and the BHHpH and BHHpM maxima moved to k=15 and k=14 for gains of 0.013 and 0.003, smaller than their replica-bootstrap SEs (0.024 and 0.018). k is now picked by the one-SE rule (user's call; G3).
+- Site pairs are re-ranked at the selected k (G4). BMHpH's top pairs mostly mark the single loosened replica `157923`.
+- The three belt-broken BHHpM clusters are one deformation in three symmetry-related orientations. Each stretches the cage along a different pair of opposite monomers (G5 item 3).
+- R1 closed: `scripts/recompute_own_elbow_g1.py` reproduces the g1a/g1b detections and timing from scratch.
+
+**Update (Oct 13, morning):**
 - Cohort definition decided: `_re_` re-runs stay alongside their originals, the truncated runs stay in, and rates are per simulated time (G2, §3.3).
 - Own-elbow re-cluster done for all six cubes with the QC rule, which drops only `BMHpH_563849_mdcrd_v`. The summarize step populated G4, and the G3 scan and k selection were re-run. On these segments k=5 fails the chemical gate in BHHpM, BMHpH and BMMpM (G3).
 - G5 corrected: old RMSD-only motif CSVs in `output/murata_motif_rmsd/` were being loaded on top of the full ones, and their frames counted as "other". With that fixed, 1₆ and 2₆ "other" is 0.2% and 0.5%, as in Table 1 (G5 item 1).
@@ -285,20 +291,20 @@ This is a looser criterion than Murata's "encapsulation" (any visit, not permane
 
 **This is a methodological point in our favor, worth stating in C1.** Murata's cage geometry traces back to the X-ray structure of the 4₆·(TBM)₂ complex, with the TBM guests removed before their own iodide is added — meaning their starting cavity shape could carry transient memory of a bound aromatic guest. Ours is built as an idealized apo structure with no such history. Comparability to Murata's Table 1 is **not** blocked by any starting-state issue. G5 occupancy uses apo frames (`n_guest_inside_cavity < 1`), matching Murata's non-encapsulated filter. The guest-entry-rate table remains useful context (it independently tracks their methylation-dependent encapsulation trend).
 
-### G3 `[x]` Scan k=2–10 per cohort for chemically meaningful clusters — **implemented, run on the own-elbow segments, and reviewed**
+### G3 `[x]` Scan k=2–15 per cohort for chemically meaningful clusters — **implemented, run on the own-elbow segments, and reviewed**
 
 Implemented in `src/ChangepointAnalysis/cluster_k_diagnostics.py` (`scan_cohort_chemical_k`, `assess_chemical_separation`, `scan_chemical_separation_by_k`, `select_k_by_chemical_information`), wired into `scripts/compare_endpoint_cluster_k.py --chemical-scan` and `scripts/select_chemical_k.py`, covered by `tests/test_cluster_attribution.py`. The paper's run is on the own-elbow segments: `output/endpoint_cluster_chemical_k_own_elbow/{chemical_separation_by_k.csv, chemical_k_peaks.csv, chemical_k_murata_nmi_by_k.csv, chemical_k_selected.csv}`. The older `output/endpoint_cluster_chemical_k/` is the published-penalty run and is superseded.
 
-**Gate (not a k picker):** per cohort, per k in 2–10, `chemical_separation` is true when the top-ranked site pairs mark ≥2 usable clusters (size ≥ 5) with distinct contacts or mixed open/closed Cohen's *d* signs. Silhouette is geometric only. `first_chemical_k` = smallest passing k. `best_chemical_k` = passing k with the most marked clusters (ties → smaller k). That last rule inflates with k and is **not** the automatic pick.
+**Gate (not a k picker):** per cohort, per k in 2–15, `chemical_separation` is true when the top-ranked site pairs mark ≥2 usable clusters (size ≥ 5) with distinct contacts or mixed open/closed Cohen's *d* signs. Silhouette is geometric only. `first_chemical_k` = smallest passing k. `best_chemical_k` = passing k with the most marked clusters (ties → smaller k). That last rule inflates with k and is **not** the automatic pick.
 
 **Automatic k (chemical information):** silhouette is never in the argmax.
 
 1. Keep only k with `chemical_separation=True` (kills the k=2 silhouette trap).
-2. Among those, maximize NMI between frame-level apo `cluster_label` and independent Murata A/B/C1/C2/other (`label_motif_metastructures` on motif CSVs; those labels were not used to build the clusters).
-3. Ties: more `n_marked_clusters`, then smaller k.
+2. Among those, find the k with the highest NMI between frame-level apo `cluster_label` and independent Murata A/B/C1/C2/other (`label_motif_metastructures` on motif CSVs; those labels were not used to build the clusters).
+3. **One-SE rule (decided Oct 13):** pick the smallest gated k whose NMI is within one standard error of that maximum. The SE is the spread of NMI at the max-NMI k over 500 replica bootstrap resamples (trajectories drawn with replacement, the same draws at every k; `score_murata_nmi_by_k(n_bootstrap=500)`). Without an SE column the picker falls back to the plain maximum.
 4. AMI (chance-corrected) is reported; with ~1.3–2.3×10⁵ apo frames it agrees with NMI on every cube. Cramér's V is reported but not used to pick (it peaks at k=2, which fails the chemical gate).
 
-Scripts: `python scripts/compare_endpoint_cluster_k.py --own-elbow --chemical-scan --out-dir output/endpoint_cluster_chemical_k_own_elbow`, then `python scripts/select_chemical_k.py --own-elbow --chem-dir output/endpoint_cluster_chemical_k_own_elbow`. Plot: `output/endpoint_cluster_chemical_k_own_elbow/plots/murata_nmi_vs_k.png`.
+Scripts: `python scripts/cluster_changepoint_segments.py ... --silhouette-k-max 15 --all-k-max 15` per cube (the "Done" note below), `python scripts/compare_endpoint_cluster_k.py --own-elbow --chemical-scan --chemical-k-max 15 --out-dir output/endpoint_cluster_chemical_k_own_elbow`, then `python scripts/select_chemical_k.py --own-elbow --chem-dir output/endpoint_cluster_chemical_k_own_elbow` (k range read from the scan; `--n-bootstrap 500` default). Plot with SE bars and the selected k starred: `output/endpoint_cluster_chemical_k_own_elbow/plots/murata_nmi_vs_k.png`.
 
 **Roles — clustering vs the site-pair gate vs NMI/AMI (do not invert causality).**
 
@@ -312,41 +318,49 @@ The gate does **not** separate segments. Clustering does. Order:
 
 Without clustering there are no groups for the gate to inspect. We still cluster even though Murata already has A/B/C1/C2/other: those are **hand geometric criteria on frames** (π(pole) ≥ 6.5 Å, d1 ≥ 7.0 Å). The clusters are **unsupervised segment states** from the changepoint pipeline (aggregates, not Murata's thresholds). The claim is whether those data-driven dwells recover chemically distinct contacts and, secondarily, Murata's table — not to re-implement Murata as a classifier. Using Murata labels or the site-pair gate to *define* groups would make later NMI and η² circular.
 
-**NMI vs AMI.** Both measure shared information between `cluster_label` and Murata A/B/C1/C2/other. They are not the chemical gate and not percent-correct. NMI is shared entropy on `[0, 1]` (`0` = independent, `1` = one label is a function of the other). BHHpH selected NMI **0.22** is weak-to-moderate overlap; BMMpH **0.74** is tight coupling (A-heavy cube). AMI is the same mutual information minus chance agreement at that k — the check that extra clusters are not inflating NMI. Here AMI ≈ NMI to ~10⁻⁴ and `ami_among_chemical_k` equals `selected_k` on every cube, so chance-correction does not change k = 9, 4, 4, 10, 3, 4. The picker still maximizes **NMI among gated k**; AMI is the diagnostic.
+**NMI vs AMI.** Both measure shared information between `cluster_label` and Murata A/B/C1/C2/other. They are not the chemical gate and not percent-correct. NMI is shared entropy on `[0, 1]` (`0` = independent, `1` = one label is a function of the other). BHHpH selected NMI **0.21** is weak-to-moderate overlap; BMMpH **0.74** is tight coupling (A-heavy cube). AMI is the same mutual information minus chance agreement at that k — the check that extra clusters are not inflating NMI by chance. Here AMI ≈ NMI to under 10⁻⁴ at every k, and the AMI maximum (`ami_among_chemical_k`) falls at the max-NMI k in every cube, so chance correction changes nothing. What it cannot catch is a finer cut that carries genuinely more, but statistically indistinguishable, label information; that is what the one-SE rule handles. AMI is the diagnostic.
 
-**Per-cohort results on the own-elbow segments (Oct 13):**
+**Per-cohort results on the own-elbow segments, k=2–15 (Oct 13):**
 
-| Cohort | Silhouette-max k | Chem at sil-max? | first_chem | best_chem | **selected_k (NMI)** | NMI | Chem at k=5? |
-|---|---|---|---|---|---|---:|---|
-| BHHpH | 2 | No | 3 | 8 | **9** | 0.220 | Yes |
-| BHHpM | 8 | Yes | 4 | 8 | **4** | 0.250 | **No** (one marked cluster) |
-| BMHpH | 2 (one-replica split) | No | 4 | 4 | **4** | 0.496 | **No** (one marked cluster) |
-| BMHpM | 7 | Yes | 5 | 10 | **10** (scan edge) | 0.404 | Yes |
-| BMMpH | 7 | Yes | 3 | 3 | **3** | 0.744 | Yes |
-| BMMpM | 10 (rising) | No | 4 | 4 | **4** | 0.593 | **No** (only k=4 passes) |
+| Cohort | Silhouette-max k | Chem at sil-max? | first_chem | best_chem | Max-NMI k (NMI, SE) | **selected_k (one-SE)** | NMI | Chem at k=5? |
+|---|---|---|---|---|---|---|---:|---|
+| BHHpH | 2 | No | 3 | 8 | 15 (0.233, 0.024; scan edge) | **7** | 0.214 | Yes |
+| BHHpM | 8 | Yes | 4 | 8 | 14 (0.253, 0.018) | **4** | 0.250 | **No** (one marked cluster) |
+| BMHpH | 2 (one-replica split) | No | 4 | 4 | 4 (0.496, 0.028) | **4** | 0.496 | **No** (one marked cluster) |
+| BMHpM | 12 | Yes | 5 | 10 | 15 (0.431, 0.016; scan edge) | **12** | 0.428 | Yes |
+| BMMpH | 7 | Yes | 3 | 3 | 3 (0.744, 0.024) | **3** | 0.744 | Yes |
+| BMMpM | 13 | No | 4 | 4 | 4 (0.593, 0.031) | **4** | 0.593 | **No** (only k=4 passes) |
 
-The published-penalty run selected 4, 3, 7, 5, 3, 9 and passed at k=5 in all six cubes. Do not quote it: those are different segments, and its NMI also counted the stale-CSV "other" frames (G5 item 1).
+The k ≤ 10 scan had picked 9, 4, 4, 10, 3, 4 by plain max NMI; do not quote those. The published-penalty run selected 4, 3, 7, 5, 3, 9 (max NMI, k ≤ 10) and passed at k=5 in all six cubes. Do not quote it either: those are different segments, and its NMI also counted the stale-CSV "other" frames (G5 item 1).
 
 What to state plainly:
 
 1. **k=5 is no longer chemical in every cube.** On the own-elbow segments it fails the gate in BHHpM, BMHpH and BMMpM, where the top site pairs mark only one cluster. So k=5 is a comparability cut only. G5 now also cross-tabulates at each cube's selected k (`output/murata_g5_own_elbow_selected_k/`).
-2. **Silhouette-max k=2 still never passes** (BHHpH, BMHpH). The k=7–8 silhouette peaks in BHHpM, BMHpM and BMMpH do pass, but NMI prefers a different k in each. BMMpM's silhouette rises to k=10, which fails the gate.
+2. **Silhouette-max k=2 still never passes** (BHHpH, BMHpH). The silhouette peaks of BHHpM (k=8), BMHpM (k=12) and BMMpH (k=7) do pass; only BMHpM's coincides with the selected k. BMMpM's silhouette peaks at k=13 (0.415), which fails the gate.
 3. **Two small clusters are single replicas loosening late in the run.** BHHpH k=5 cluster 3 is `907683` from frame 3650 to the end (5 segments). BMHpH k=5 cluster 0 is `157923` from frame 2400 to the end (7 segments); it is also BMHpH's whole k=2 split (silhouette 0.53).
    - After the dissociated `563849`, these two have the largest assembly Rg maxima among all 302 replicas: 12.2 Å (`157923`) and 11.9 Å (`907683`), against a median of 10.9 Å.
    - Mean Rg in the clustered window is about 0.7 Å above the same replica's earlier frames, and the window contains the replica's Rg maximum. In `157923`, monomer 0's endpoints sit 2.5–5.4 Å farther from monomers 1–3 than in any other BMHpH cluster (segment-mean endpoint distances).
    - All six monomers stay connected, so the QC rule (Rg > 15 Å or a component below 6) keeps them. They are loosened but intact cages, not dissociation. Both trajectories end while still expanded, so whether they would recover is unknown.
    - Check: in the published BMHpH clustering the two singleton clusters were `563849`'s last two segments (frames 4775–4995), its dissociation window, which the QC rule now removes.
-4. **Two picks are weakly determined.** BMHpM's NMI is still rising at the scan edge (0.339 at k=5, 0.404 at k=10), so its k=10 is set by `k_max`, not by a peak. BHHpH's NMI is flat from k=7 to k=10 (0.214–0.220). The picks for BHHpM (0.250 at k=4, at most 0.242 elsewhere), BMHpH and BMMpH are clear, and for BMMpM only k=4 passes.
+   - Ward cuts are nested, so both clusters survive unchanged at the selected k: BHHpH k=7 cluster 4 and BMHpH k=4 cluster 0. The BMHpH one dominates that cube's site-pair ranking (G4).
+4. **Why the one-SE rule.** The scan was extended to k=15 to see whether BMHpM's NMI peaks. It does not: it falls from k=2 to k=7, then climbs to a plateau of 0.423–0.431 from k=12 to 15. The extension also moved two other maxima by less than the noise. BHHpH's NMI is flat at 0.210–0.222 from k=7 to 14 and reaches 0.233 at k=15. BHHpM's k=4 value (0.250) sits 0.003 below its k=14 maximum. The replica-bootstrap SEs at the six maxima are 0.016–0.031, so plain max NMI was rewarding finer cuts for gains it cannot resolve. The one-SE picks:
+   - BHHpH: k=7, the start of the flat stretch.
+   - BHHpM: k=4.
+   - BMHpM: k=12, the start of the plateau.
+   - BMHpH, BMMpH and BMMpM: unchanged, and each is also its max-NMI k.
 
-**Correction to an earlier draft of this section:** it speculated BMMpM might show "no chemical separation at any k" as a "clean negative case." That is wrong. On the own-elbow segments BMMpM passes `chemical_separation` at k=4 only (on the published segments: k=4, 5, 6, 9), while its silhouette rises across the whole range (0.280 → 0.396). The geometric-compactness score and the chemical-separation flag track different things. Do not describe BMMpM as chemically featureless; describe it as having one chemical cut while silhouette climbs steadily. `docs/endpoint_cluster_discrimination.md` §13 has the own-elbow table.
+   Run over k ≤ 10, the same rule gives 7, 4, 4, 10, 3, 4, so only BMHpM's pick depends on the scan range, and at k=15 it sits on the plateau. BHHpH's maximum is still at the new scan edge, but its one-SE pick has not moved between the two ranges. The library NMI matches sklearn's (`tests/test_cluster_attribution.py`). A separate bootstrap script (`output/_explore_nmi_bootstrap.py`, gitignored) reproduced the stored NMI to 10⁻⁶ and gave the same picks. Decided Oct 13 (user's call) over keeping max NMI at k ≤ 10 or at k ≤ 15.
+
+**Correction to an earlier draft of this section:** it speculated BMMpM might show "no chemical separation at any k" as a "clean negative case." That is wrong. On the own-elbow segments BMMpM passes `chemical_separation` at k=4 only, over k=2–15 (on the published segments: k=4, 5, 6, 9, over k=2–10), while its silhouette climbs from 0.280 at k=2 to 0.415 at k=13. The geometric-compactness score and the chemical-separation flag track different things. Do not describe BMMpM as chemically featureless; describe it as having one chemical cut while silhouette climbs steadily. `docs/endpoint_cluster_discrimination.md` §13 has the own-elbow table.
 
 **One interpretive caveat worth carrying into the manuscript:** `n_significant_fdr` runs about 630–960 out of 960 candidate columns at every k, and 830–960 once k ≥ 3. That is expected given the known redundancy among raw site-pair columns (~26 PCs explain 80% of their variance, per `docs/endpoint_cluster_discrimination.md` §4) and should not be read as 900 independent discoveries — report it as "most of a highly correlated feature set clears the FDR bar," not as a large number of separate findings.
 
 **Done (Oct 13): the paper clusters the final own-elbow segments**, for consistency with section 3. The folders are `output/endpoint_changepoints_matched_{BHHpH,BHHpM,BMHpM,BMMpH}`, `output/endpoint_changepoints_g1a_BMHpH` and `output/endpoint_changepoints_g1b_BMMpM` (`OWN_ELBOW_ENDPOINT_DIRS` in `src/ChangepointAnalysis/reporting.py`). They hold no `endpoint_features/` of their own; `resolve_endpoint_features_dir` points them at the published folder's. Steps, logs in `output/own_elbow_recluster_logs/`:
-1. `scripts/cluster_changepoint_segments.py --changepoints-dir <own-elbow dir> --groups endpoint --qc-gsa-dir output/gsa_features_by_cube/{CUBE}` per cube (Ward, k=5 stored, k=2–10 under `by_k/`). `--groups endpoint` used to be rejected by the argument parser; fixed.
-2. `scripts/summarize_changepoint_results.py` per cube (populates the G4 columns).
+1. `scripts/cluster_changepoint_segments.py --changepoints-dir <own-elbow dir> --groups endpoint --qc-gsa-dir output/gsa_features_by_cube/{CUBE} --silhouette-k-max 15 --all-k-max 15` per cube (Ward, k=5 stored, k=2–15 under `by_k/`). First run with k ≤ 10; re-run to k=15 the same day, and the stored k=5 tables came out identical in all six cubes (Ward is deterministic). `--groups endpoint` used to be rejected by the argument parser; fixed.
+2. `scripts/summarize_changepoint_results.py` per cube (populates the G4 columns at k=5).
 3. The G3 scan and selection (commands above), with `--own-elbow`.
-4. The G5 cross-tabs (G5, "How the numbers were generated").
+4. `scripts/rank_endpoint_pairs_at_k.py --own-elbow --k-selected output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv` (G4 at the selected k).
+5. The G5 cross-tabs (G5, "How the numbers were generated").
 
 | Cube | Trajectories clustered | Segments | Silhouette at k=5 | k=5 cluster sizes (segments) |
 |---|---:|---:|---:|---|
@@ -370,7 +384,22 @@ BMHpH's 50 is 51 minus the QC-excluded `563849` original. `k_diagnostics_summary
 
 Ran the full existing test suite after this refactor (`rank_cluster_discriminating_endpoint_features` was split into `collect_endpoint_segment_means` + `score_cluster_discriminating_features` to support G3's per-k reuse) — all 36 pre-existing tests plus the 6 new G3/G4 tests pass, no regressions.
 
-**Done (Oct 13) on the own-elbow segments.** Each of the six own-elbow folders has `endpoint_pair_cluster_correlation.csv` with the p/q columns (999 permutations, k=5 labels), from `scripts/summarize_changepoint_results.py`. 923–958 of the 960 site-pair columns clear FDR in each cube (see the G3 caveat on redundancy). Top pairs by η²: BHHpH M2S3–M5S3 0.79, BHHpM M0S2–M1S3 0.85, BMHpH M4S5–M5S1 0.84, BMHpM M1S7–M3S2 0.86, BMMpH M1S2–M5S6 0.96, BMMpM M0S6–M4S7 0.97. The published-penalty files were left unpopulated on purpose. In BHHpM, BMHpH and BMMpM the k=5 labels fail the G3 gate, so their k=5 rankings mark only one cluster; rank at the selected k before writing the attribution Results.
+**Done (Oct 13) on the own-elbow segments.** Each of the six own-elbow folders has `endpoint_pair_cluster_correlation.csv` with the p/q columns (999 permutations, k=5 labels), from `scripts/summarize_changepoint_results.py`. 923–958 of the 960 site-pair columns clear FDR in each cube (see the G3 caveat on redundancy). Top pairs by η²: BHHpH M2S3–M5S3 0.79, BHHpM M0S2–M1S3 0.85, BMHpH M4S5–M5S1 0.84, BMHpM M1S7–M3S2 0.86, BMMpH M1S2–M5S6 0.96, BMMpM M0S6–M4S7 0.97. The published-penalty files were left unpopulated on purpose. In BHHpM, BMHpH and BMMpM the k=5 labels fail the G3 gate, so their k=5 rankings mark only one cluster.
+
+**Done (Oct 13): ranked at each cube's selected k**, with the same 999-shuffle null and BH-FDR (`scripts/rank_endpoint_pairs_at_k.py`). These are the rankings for the attribution Results. The full ranking per cube is `clusters/endpoint/by_k/k_XX/endpoint_pair_cluster_correlation.csv` in its own-elbow folder; summaries are in `output/endpoint_pair_ranking_selected_k/` (`top_pairs.csv`, `fdr_summary.csv`).
+
+| Cube | k | Pairs clearing FDR (of 960) | Top pair (η²) | Clusters marked by the top 10 (segments) |
+|---|---:|---:|---|---|
+| BHHpH | 7 | 957 | M2S3–M5S3 (0.79) | 97-segment cluster (6), 116 (4) |
+| BHHpM | 4 | 955 | M2S3–M5S3 (0.78) | all three belt-broken clusters: 168 (5), 122 (3), 66 (2) |
+| BMHpH | 4 | 935 | M2S3–M4S3 (0.76) | **7-segment cluster (6)**, 55 (4) |
+| BMHpM | 12 | 960 | M0S2–M4S7 (0.92) | four clusters of 18–28 segments |
+| BMMpH | 3 | 848 | M0S6–M3S7 (0.60) | 24-segment cluster (9), 166 (1) |
+| BMMpM | 4 | 901 | M2S2–M4S2 (0.84) | 38-segment cluster (8), 27 (2) |
+
+Two cautions for the Results:
+- **η² grows with k.** More groups explain more variance (BMHpM's 0.92 at k=12 against BMMpH's 0.60 at k=3), so compare pairs within a cube, not η² values across cubes.
+- **BMHpH's ranking is mostly one replica.** Its 7-segment cluster is `157923` from frame 2400 to the end, the loosened cage of G3 item 3. Six of its top 10 pairs mark that cluster, so its population-level contacts are the ones marking the 55-segment cluster. BHHpH's single-replica cluster (`907683`, 5 segments) marks none of its top 10.
 
 **Code:** `src/ChangepointAnalysis/reporting.py` — `_eta_squared_columns`, `benjamini_hochberg_qvalues`, `permutation_eta_squared_pvalues`, `score_cluster_discriminating_features`, `rank_cluster_discriminating_endpoint_features` (now a thin wrapper). Tests: `tests/test_cluster_attribution.py`.
 
@@ -396,11 +425,24 @@ G0 no longer blocks this. Occupancy is from motif frames labeled A/B/C1/C2/other
 
 **2. Transition-frequency comparison `[x]`.** Section 3.3's own-elbow ratio per 5 ns (1 : 3.11 : 4.60 vs Murata 1 : 2.67 : 3.67) is the number to quote. G1b is decided.
 
-**3. Resolving "other" `[~]`.** The 3₆ C2/other reading is drafted below. Still open: which contacts distinguish the three belt-broken BHHpM clusters (their Murata make-up is nearly the same, so the answer has to come from the G4 site-pair ranking), and 2₆′ "other" (9.0%), which has no cohort.
+**3. Resolving "other" `[~]`.** The 3₆ C2/other reading is drafted below, and the three belt-broken BHHpM clusters are now named (next paragraph). Still open: 2₆′ "other" (9.0%), which has no cohort.
+
+**What distinguishes the three belt-broken BHHpM clusters (Oct 13).** They are one deformation in three symmetry-related orientations, not three different states. Each stretches the cage along one pair of opposite monomers. Their site pairs change by these amounts relative to the intact-belt cluster (mean over each monomer pair's 64 site pairs; for scale, site pairs within the intact-belt cluster have a mean SD of 1.1 Å):
+
+| Cluster (segments) | Stretched axis | Compressed axis | Pole contacts that open | Pole contacts that stay closed (< 4% open) | Elongated d1 (frames with one elongated) |
+|---|---|---|---|---|---|
+| 0 (168) | M0–M3, +2.03 Å | M1–M4, −0.98 Å | M0–M1 74%, M2–M0 60%, M5–M3 61%, M3–M4 32% | M1–M2, M4–M5 | M5–M0 70%, M2–M3 25% |
+| 1 (122) | M1–M4, +2.09 Å | M2–M5, −1.20 Å | M0–M1 65%, M1–M2 34%, M3–M4 56%, M4–M5 74% | M2–M0, M5–M3 | M0–M4 72%, M3–M1 28% |
+| 3 (66) | M2–M5, +2.05 Å | M0–M3, −1.08 Å | M1–M2 54%, M2–M0 60%, M4–M5 75%, M5–M3 52% | M0–M1, M3–M4 | M1–M5 45%, M4–M2 53% |
+
+- Stretching an axis pulls its two monomers away from their pole neighbours. Those four same-pole site-pair sets lengthen by 0.68–1.60 Å, and they are exactly the pole cation–π contacts that open. The elongated d1 is the one in which an axis monomer is the r3 end (each monomer is the r3 end of exactly one d1). The pole pair that involves neither axis monomer shortens by 0.79–1.05 Å and stays closed. Equatorial pairs move by at most 0.68 Å, so the belt break is local, not a gross separation.
+- The monomer relabellings that preserve both directed contact graphs (pole and d1; found by brute force over all 720) are the six powers of one rotation along the d1 belt, `(0 4 2 3 1 5)`. That rotation maps the M0–M3 axis to M1–M4, and its fourth power, `(0 1 2)(3 4 5)`, maps M1–M4 to M2–M5. Correlating deformation profiles over all 960 site pairs: as labelled, the three clusters are unrelated (r = −0.03 to −0.12); after the best relabelling they match (r = 0.98 for clusters 0 and 1, 0.93 for 0 and 3, 0.96 for 1 and 3).
+- So the contacts that tell them apart are simply the stretched and compressed axes: the opposite-monomer pairs (M0–M3, M1–M4, M2–M5) and the same-pole pairs of the axis monomers. The G4 ranking at k=4 picks exactly these. Seven of its top 10 pairs join opposite monomers (five M2–M5, one M0–M3, one M1–M4) and three join same-pole neighbours; between them they mark all three belt-broken clusters. Ward splits the deformation by orientation because endpoint distances carry monomer identities; Murata's labels count contacts and cannot see orientation. This is also why C2 and "other" spread over the three clusters in similar proportions.
+- Sources: `scripts/describe_endpoint_clusters.py --own-elbow --cube BHHpM --k 4`, writing `output/endpoint_cluster_profiles/BHHpM_k04/` (`cluster_motif_profile.csv`, `single_elongated_edge.csv`, `pair_deformation.csv`, `symmetry_profile_correlation.csv`, `subset_pair_ranking.csv`).
 
 **Draft paragraph (3₆ C2 vs other):**
 
-> For 1₆ and 2₆ our frame labels reproduce Murata's Table 1 to within 0.6 percentage points in every class, and for 3₆ they reproduce A, B and C1 to within 0.7 points. The one disagreement is how 3₆'s opened frames divide between C2 and "other": we find 40.5% C2 and 30.7% other, against Murata's 26.3% and 46.1%, while the two together agree (71.2% vs 72.4%). The gap lies outside our trajectory-bootstrap 95% intervals, so it is not sampling noise in our ensemble; it reflects how close 3₆ sits to the boundary between the two classes. A C2 frame has exactly two of the six pole cation–π contacts open (π(pole) ≥ 6.5 Å) and one elongated equatorial d1 (≥ 7.0 Å), and a third opening makes it "other". In 1₆ and 2₆ the third-widest π(pole) of a C2 frame stays closed (median 4.1 Å). In 3₆ it is often half open (median 5.0 Å), and 14% of C2 frames lie within 0.5 Å of the cutoff, against under 1% in 1₆ and 2₆. The number of open contacts in 3₆ accordingly switches between two and three or more 47 times per nanosecond, against 0.5 times in 1₆ and 2₆, and about two-thirds of the three-open episodes last 2 ps or less. Our endpoint clusters, built without reference to Murata's criteria, do not separate the two classes either; they separate frames by whether the equatorial belt is intact. At the automatically selected cut for 3₆ (k = 4), one cluster holds 86% of the frames with no elongated d1 and 99% of the A frames, while C2 and "other" frames fall into the three belt-broken clusters in similar proportions (41.7, 36.2 and 20.5% of C2; 48.5, 30.9 and 18.3% of other). We therefore read 3₆'s C2 and "other" as one family of belt-broken structures in which a third contact opens and closes on a picosecond timescale, and treat their sum as the robust quantity. Because only 3₆ has a large population near the cutoff, a small systematic difference between our π(pole) measurement and Murata's would act almost entirely on this split. Moving our cutoff alone does not reconcile it, however: at 6.0 Å, 3₆ shifts only to 36.3% C2 and 37.7% other, while its B occupancy falls from 15.8 to 12.8% (Murata 15.8%) and 2₆'s A from 44.7 to 43.1% (Murata 45.3%).
+> For 1₆ and 2₆ our frame labels reproduce Murata's Table 1 to within 0.6 percentage points in every class, and for 3₆ they reproduce A, B and C1 to within 0.7 points. The one disagreement is how 3₆'s opened frames divide between C2 and "other": we find 40.5% C2 and 30.7% other, against Murata's 26.3% and 46.1%, while the two together agree (71.2% vs 72.4%). The gap lies outside our trajectory-bootstrap 95% intervals, so it is not sampling noise in our ensemble; it reflects how close 3₆ sits to the boundary between the two classes. A C2 frame has exactly two of the six pole cation–π contacts open (π(pole) ≥ 6.5 Å) and one elongated equatorial d1 (≥ 7.0 Å), and a third opening makes it "other". In 1₆ and 2₆ the third-widest π(pole) of a C2 frame stays closed (median 4.1 Å). In 3₆ it is often half open (median 5.0 Å), and 14% of C2 frames lie within 0.5 Å of the cutoff, against under 1% in 1₆ and 2₆. The number of open contacts in 3₆ accordingly switches between two and three or more 47 times per nanosecond, against 0.5 times in 1₆ and 2₆, and about two-thirds of the three-open episodes last 2 ps or less. Our endpoint clusters, built without reference to Murata's criteria, do not separate the two classes either; they separate frames by whether the equatorial belt is intact. At the automatically selected cut for 3₆ (k = 4), one cluster holds 86% of the frames with no elongated d1 and 99% of the A frames, while C2 and "other" frames fall into the three belt-broken clusters in similar proportions (41.7, 36.2 and 20.5% of C2; 48.5, 30.9 and 18.3% of other). Those three clusters are one deformation in three orientations: in each, the cage is stretched by about 2 Å along a different pair of opposite monomers, and their distance profiles coincide once the monomers are relabelled by the cage's symmetry. What the clustering resolves is orientation, not C2 versus "other". We therefore read 3₆'s C2 and "other" as one family of belt-broken structures in which a third contact opens and closes on a picosecond timescale, and treat their sum as the robust quantity. Because only 3₆ has a large population near the cutoff, a small systematic difference between our π(pole) measurement and Murata's would act almost entirely on this split. Moving our cutoff alone does not reconcile it, however: at 6.0 Å, 3₆ shifts only to 36.3% C2 and 37.7% other, while its B occupancy falls from 15.8 to 12.8% (Murata 15.8%) and 2₆'s A from 44.7 to 43.1% (Murata 45.3%).
 
 **Evidence behind the paragraph** (apo frames unless noted; files under `output/murata_g5/label_diagnostics/` from `scripts/murata_label_diagnostics.py` unless noted):
 - Intervals: `occupancy_bootstrap.csv` (2000 trajectory resamples).
@@ -430,7 +472,7 @@ Two file families are joined, only for the three mapped cubes (BHHpM / BMHpM / B
 
 Join key: cube prefix stripped from `traj_id` (`BHHpM_109345_mdcrd_v` → `109345_mdcrd_v`), then motif `frame` inside the segment interval `[start_frame, end_frame]`. Frames with no matching segment are dropped; these are the 1 ps frames that fall between consecutive stride-5 segments or after the last one, about 1% (BHHpM: 56,484 of 57,024 apo "other" frames joined).
 
-Outputs, in `output/murata_g5_own_elbow/` (k=5) and `output/murata_g5_own_elbow_selected_k/` (k = 4 for BHHpM, 10 for BMHpM, 4 for BMMpM):
+Outputs, in `output/murata_g5_own_elbow/` (k=5) and `output/murata_g5_own_elbow_selected_k/` (k = 4 for BHHpM, 12 for BMHpM, 4 for BMMpM; regenerated Oct 13 after the one-SE rule moved BMHpM from 10 to 12):
 
 - `murata_table1_occupancy.csv` — our % vs Table 1 (item 1; the same in every folder).
 - `murata_vs_endpoint_cluster.csv` — row-normalized % of each Murata label in each endpoint cluster, with the k used.
@@ -483,8 +525,12 @@ No free-energy surface, no rate constants, attribution is correlational, cluster
 
 ## 7. Release hygiene
 
-- **R1 `[~]`** `scripts/recompute_matched_penalties.py` is committed. It reproduces the `matched_*` runs, and its BMHpH and BMMpM outputs are the superseded wrong-grid ones. The final `g1a_BMHpH` / `g1b_BMMpM` detections and timing runs still have no script in `scripts/`. The own-elbow re-cluster, G3 and G5 steps are scripted (G3 note).
-- **R2 `[ ]`** Tag a release and mint a Zenodo DOI. The own-elbow re-cluster, G3 scan and G4 ranking it was waiting on are done; what remains is deciding which k the attribution Results and G5 cluster tables quote (G3 item 1). No tags exist yet.
+- **R1 `[x]`** Every reported detection has a script.
+  - `scripts/recompute_matched_penalties.py` reproduces the `matched_*` runs; its BMHpH and BMMpM outputs are the superseded wrong-grid ones.
+  - `scripts/recompute_own_elbow_g1.py` reproduces the final `g1a_BMHpH` / `g1b_BMMpM` detections and their timing runs. With `--sweep` it first redoes the median-length penalty sweep. The original detections' parameters are in their run manifests, `output/711c6c3ecd81/manifest.json` (BMHpH, Sep 10) and `output/7dd823f0fd4a/manifest.json` (BMMpM, Sep 11).
+  - Verified Oct 13 with a from-scratch run (`--sweep --output-root output/_g1_check`, a scratch folder deleted after the comparison). All 212 detection and timing files came out byte-for-byte identical: per-trajectory and pooled breakpoints and segment stats, and both timing tables. The 8 sweep tables differ only in the penalty values, by under 10⁻⁶ relative, because the original sweep was given six-digit grid bounds. The recommended penalties, as passed to detection, are the same: 4.36145 and 5.48888.
+  - The own-elbow re-cluster, G3, the G4 re-rank and G5 steps are scripted (G3 "Done" note).
+- **R2 `[ ]`** Tag a release and mint a Zenodo DOI. The analysis it was waiting on is done, and the quoted k is decided (G3, one-SE rule). No tags exist yet.
 - **R3 `[ ]`** Data availability. Feature CSVs are small enough to deposit in full.
 - **R4 `[x]`** Tests for the G0 criteria, the G4 permutation null and the G2 QC rule. G4: `tests/test_cluster_attribution.py`. G0: `tests/test_gsa_site_map.py` (CPy para to phenylene linker), `tests/test_murata_criteria.py` (A/B/C1/C2 labels, occupancy vs Table 1 mapping), `tests/test_murata_rmsd.py` (unit columns, distance plots, metastructure labels from elongated d1). G2 QC: `tests/test_assembly_qc.py`. The `paper_d1_n_compact` rename and the legacy-name reader are covered in `tests/test_changepoint_pipeline.py`.
 
@@ -496,12 +542,12 @@ No free-energy surface, no rate constants, attribution is correlational, cluster
 G0 ✓ done ──► G5 `[~]` occupancy final; 3₆ C2/other paragraph drafted
 G1 ─► G1a ─► G1b ✓ done ─► §3.3 final ─► G5
 G2 QC ✓ ─► cohort definition ✓ decided ─► own-elbow re-cluster ✓ done
-own-elbow re-cluster ─► G3 ✓ + G4 ✓ re-run ─► pick the quoted k ─► Results (attribution) + BHHpM belt-broken cluster reading
+own-elbow re-cluster ─► G3 ✓ + G4 ✓ re-run ─► quoted k ✓ (one-SE) ─► G4 at that k ✓ + BHHpM belt-broken reading ✓ ─► Results (attribution)
 C1 ──► Methods (done; provenance questions open)
 own-elbow re-cluster ──► R2 ──► R3
 ```
 
-**Critical path:** decide which k the attribution Results and G5 cluster tables quote (each cube's selected k, or k=5 where it passes the gate; G3 item 1), rank site pairs at that k, then write the attribution Results and the reading of the three belt-broken BHHpM clusters. G0, G1b, G2, O1, O2, the re-cluster and the G3/G4 runs are closed, and the 3₆ C2/other paragraph is drafted.
+**Critical path:** write the attribution Results from the selected-k rankings (G4; treat BMHpH's as mostly one replica), with the BHHpM orientation reading (G5 item 3) for 3₆, then C2 (Figure 1) and C3 (Limitations). G0, G1b, G2, O1, O2, R1, the re-cluster, the k choice, the G3/G4 runs and the BHHpM cluster reading are closed, and the 3₆ C2/other paragraph is drafted.
 
 ---
 
@@ -511,8 +557,8 @@ own-elbow re-cluster ──► R2 ──► R3
 |---|---|---|
 | 1 | ~~Correct `docs/penalty_sweep_B_cohorts.md`~~ done | Docs match code |
 | 2 | ~~G0 implementation~~ done | S11-style d1 vs open π; CPy = para to phenylene linker |
-| 3 | G5 three-way comparison | Table 1 occupancy final (1₆/2₆ within 0.6 pp; 3₆ C2 vs other read in G5 item 3). Remaining: contacts that distinguish the BHHpM belt-broken clusters |
-| 4 | ~~Re-cluster on own-elbow segments with the QC rule, re-run G3/G4~~ done | ~~New cluster tables~~ done; pick the quoted k |
+| 3 | G5 three-way comparison | Table 1 occupancy final (1₆/2₆ within 0.6 pp; 3₆ C2 vs other read in G5 item 3). BHHpM belt-broken clusters named (one deformation, three orientations) |
+| 4 | ~~Re-cluster on own-elbow segments with the QC rule, re-run G3/G4~~ done | ~~New cluster tables; pick the quoted k~~ done (one-SE rule, k=2–15) |
 | 5 | C2, C3, draft | Full draft |
 | 6 | R1–R4, submit | Release tagged |
 
@@ -535,11 +581,12 @@ own-elbow re-cluster ──► R2 ──► R3
 | Table 1 occupancy (apo frames) | **corrected Oct 13, verified** | BMMpM 78.3/8.8/2.3/10.4/0.2 vs 78.4/8.7/2.3/10.4/0.2; BMHpM 44.7/13.9/1.7/39.1/0.5 vs 45.3/13.8/1.7/38.6/0.5; BHHpM 7.5/15.8/5.4/40.5/30.7 vs 7.2/15.8/4.7/26.3/46.1. Quote apo frames. The earlier 2.4% / 2.2% "other" for BMMpM / BMHpM came from stale motif CSVs (G5 item 1). 3₆ residual is C2 vs other |
 | 3₆ C2 vs other split | **explained, not reconciled** | Outside our bootstrap 95% intervals; C2 + other agrees (71.2 vs 72.4). Third π(pole) near the cutoff in 14% of 3₆ C2 frames, and switching at 47 per ns; clusters split by belt state, not C2 vs other. No cutoff in the grid fixes it. Draft paragraph in G5 item 3 |
 | Remapped equatorial d1 (old hull remap) | **superseded for G5** | `output/murata_d1/` was the hull-column remap. G5 uses motif-CSV ipso d1 (`output/B*_motif_rmsd/`) |
-| Top site-pair η² | partly circular, now calibrated | 0.79–0.97 at k=5 on the own-elbow segments, with permutation p and BH-FDR q populated (G4). The 0.81–0.84 quoted earlier was the published-penalty BHHpM / BMMpM files. At k=5 three cubes fail the G3 gate, so re-rank at the quoted k before using these |
+| Top site-pair η² | partly circular, now calibrated | At the selected k: 0.60–0.92 (BHHpH M2S3–M5S3 0.79, BHHpM M2S3–M5S3 0.78, BMHpH M2S3–M4S3 0.76, BMHpM M0S2–M4S7 0.92, BMMpH M0S6–M3S7 0.60, BMMpM M2S2–M4S2 0.84), with 848–960 of 960 pairs clearing FDR (G4). η² grows with k, so do not compare it across cubes. BMHpH's top pairs mostly mark the single replica `157923`. The k=5 values (0.79–0.97) and the published-penalty 0.81–0.84 are superseded |
+| BHHpM belt-broken clusters | **resolved Oct 13** | One deformation in three orientations, each stretching a different opposite-monomer axis by about 2 Å. Deformation profiles: r = −0.03 to −0.12 as labelled, 0.93–0.98 after the best symmetry relabelling (G5 item 3) |
 | BMMpM 37% static at true own elbow | **holds, final** | 19/51 have zero breakpoints at 5.489. The earlier 41% (21/51) used the wrong-grid elbow (5.256) and is superseded. Leaving out the three truncated originals: 17/48 = 35%. Corroborates Murata's 78.4% A for 1₆ |
-| k=5 is chemically meaningful | **revised Oct 13** | On the own-elbow segments k=5 passes the gate only in BHHpH, BMHpM and BMMpH. Silhouette-max k=2 still never passes. Automatic k (NMI among chemical k, `output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv`): 9, 4, 4, 10, 3, 4 for BHHpH→BMMpM; BMHpM's 10 is the scan edge. The published-segment result (all six pass; 4, 3, 7, 5, 3, 9) is superseded |
-| "BMMpM shows no chemical separation at any k" | **withdrawn** | Was speculation, not yet checked. Own-elbow scan: passes at k=4 only (published segments: k=4, 5, 6, 9), while silhouette rises steadily. See G3 |
+| k=5 is chemically meaningful | **revised Oct 13** | On the own-elbow segments k=5 passes the gate only in BHHpH, BMHpM and BMMpH. Silhouette-max k=2 still never passes. Automatic k (chemical gate, then one-SE rule on Murata NMI over k=2–15; `output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv`): **7, 4, 4, 12, 3, 4** for BHHpH→BMMpM. Superseded: 9, 4, 4, 10, 3, 4 (plain max NMI, k ≤ 10) and the published-segment result (all six pass; 4, 3, 7, 5, 3, 9) |
+| "BMMpM shows no chemical separation at any k" | **withdrawn** | Was speculation, not yet checked. Own-elbow scan: passes at k=4 only over k=2–15 (published segments: k=4, 5, 6, 9), while silhouette climbs to 0.415 at k=13. See G3 |
 
 ---
 
-*Repository state: branch `MDchat`. G0 from `output/B*_motif_rmsd/` and `output/murata_motif_rmsd/plots/`. G5 occupancy from `output/murata_g5/`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run) + `output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow` (timed against the GSA own-elbow detections; supersedes `output/endpoint_vs_gsa_timing_g1b_BMMpM`). G2 QC from `src/ChangepointAnalysis/assembly_qc.py` over `output/gsa_features_by_cube/`. Own-elbow re-cluster in the six `OWN_ELBOW_ENDPOINT_DIRS` folders (logs in `output/own_elbow_recluster_logs/`); G3 from `output/endpoint_cluster_chemical_k_own_elbow/`; G5 cluster tables from `output/murata_g5_own_elbow/` and `output/murata_g5_own_elbow_selected_k/`; G5 label diagnostics from `output/murata_g5/label_diagnostics/`.*
+*Repository state: branch `MDchat`. G0 from `output/B*_motif_rmsd/` and `output/murata_motif_rmsd/plots/`. G5 occupancy from `output/murata_g5/`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run) + `output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow` (timed against the GSA own-elbow detections; supersedes `output/endpoint_vs_gsa_timing_g1b_BMMpM`); both regenerate with `scripts/recompute_own_elbow_g1.py`. G2 QC from `src/ChangepointAnalysis/assembly_qc.py` over `output/gsa_features_by_cube/`. Own-elbow re-cluster in the six `OWN_ELBOW_ENDPOINT_DIRS` folders (logs in `output/own_elbow_recluster_logs/`); G3 from `output/endpoint_cluster_chemical_k_own_elbow/` (one-SE selection, k=2–15); G4 at the selected k from `output/endpoint_pair_ranking_selected_k/`; G5 cluster tables from `output/murata_g5_own_elbow/` and `output/murata_g5_own_elbow_selected_k/`; BHHpM belt-broken cluster reading from `output/endpoint_cluster_profiles/BHHpM_k04/`; G5 label diagnostics from `output/murata_g5/label_diagnostics/`.*
