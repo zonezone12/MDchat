@@ -3,7 +3,9 @@
 Labels every motif frame A/B/C1/C2/other from pole π ≥ 6.5 Å and elongated
 d1 ≥ 7.0 Å, then compares the three mapped cohorts (BMMpM=1₆, BMHpM=2₆,
 BHHpM=3₆). 2₆′ has no cohort here. Optionally cross-tabulates Murata labels
-against stored endpoint cluster labels.
+against stored endpoint cluster labels. Replicas failing the assembly QC rule
+(Rg > 15 Å or a lost monomer, from ``--qc-gsa-root/{CUBE}``) are dropped first
+unless ``--no-assembly-qc`` is given.
 
 Example
 -------
@@ -23,6 +25,11 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 
+from src.ChangepointAnalysis.assembly_qc import (
+    assembly_qc_failures,
+    drop_trajectories,
+    scan_assembly_qc_dir,
+)
 from src.ChangepointAnalysis.gsa_cohort_run import KNOWN_CUBES
 from src.ChangepointAnalysis.murata_criteria import (
     COHORT_TO_MURATA_SYSTEM,
@@ -46,6 +53,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", type=Path, default=ROOT / "output")
     p.add_argument("--out-dir", type=Path, default=ROOT / "output" / "murata_g5")
     p.add_argument("--cubes", nargs="*", default=list(KNOWN_CUBES))
+    p.add_argument(
+        "--qc-gsa-root",
+        type=Path,
+        default=ROOT / "output" / "gsa_features_by_cube",
+        help="Root of per-cube *_gsa_features.csv folders used by the assembly QC rule",
+    )
+    p.add_argument(
+        "--no-assembly-qc",
+        action="store_true",
+        help="Keep replicas that fail the assembly QC rule",
+    )
     return p.parse_args()
 
 
@@ -119,10 +137,23 @@ def main() -> int:
     occupancy_rows: list[pd.DataFrame] = []
     xtab_rows: list[pd.DataFrame] = []
     other_rows: list[pd.DataFrame] = []
+    qc_rows: list[pd.DataFrame] = []
 
     for cube, paths in by_cube.items():
         print(f"labeling {cube}: {len(paths)} CSVs …", flush=True)
-        df = label_motif_metastructures(load_motif_rmsd_csvs(paths))
+        df = load_motif_rmsd_csvs(paths)
+        if not args.no_assembly_qc:
+            gsa_dir = args.qc_gsa_root / cube
+            if gsa_dir.is_dir():
+                qc = scan_assembly_qc_dir(gsa_dir)
+                qc_rows.append(qc)
+                failed = assembly_qc_failures(qc)
+                if failed:
+                    print(f"  assembly QC excludes {', '.join(failed)}", flush=True)
+                    df = drop_trajectories(df, failed)
+            else:
+                print(f"  assembly QC skipped: {gsa_dir} not found", flush=True)
+        df = label_motif_metastructures(df)
         filters = [("all", "all")]
         if "n_guest_inside_cavity" in df.columns:
             filters.extend([("frames", "frames"), ("never", "never")])
@@ -178,6 +209,10 @@ def main() -> int:
     occ_path = args.out_dir / "murata_table1_occupancy.csv"
     occ.to_csv(occ_path, index=False)
     print(f"wrote {occ_path}", flush=True)
+    if qc_rows:
+        qc_path = args.out_dir / "assembly_qc.csv"
+        pd.concat(qc_rows, ignore_index=True).to_csv(qc_path, index=False)
+        print(f"wrote {qc_path}", flush=True)
     mapped = occ[(occ["guest_filter"] == "frames") & (occ["murata_system"].astype(str) != "")]
     if not mapped.empty:
         show = mapped.pivot_table(

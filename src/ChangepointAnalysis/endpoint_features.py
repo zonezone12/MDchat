@@ -64,6 +64,22 @@ def _default_n_jobs() -> int:
 
 PAPER_D1_COL_PREFIX = "paper_d1_"
 
+# Feature and segment-state CSVs written before the rename still carry these names.
+_LEGACY_PAPER_D1_COLUMNS = {
+    "paper_d1_n_open": "paper_d1_n_compact",
+    "paper_d1_n_open_mean": "paper_d1_n_compact_mean",
+}
+
+
+def rename_legacy_paper_d1_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Read pre-rename ``paper_d1_n_open*`` columns as ``paper_d1_n_compact*``."""
+    renames = {
+        old: new
+        for old, new in _LEGACY_PAPER_D1_COLUMNS.items()
+        if old in df.columns and new not in df.columns
+    }
+    return df.rename(columns=renames) if renames else df
+
 
 def _d1_site_keys(
     d1_atoms_df: pd.DataFrame,
@@ -206,7 +222,7 @@ class PaperD1FrameObserver:
             data[col] = dists[:, k]
         with np.errstate(all="ignore"):
             data["paper_d1_min"] = np.nanmin(dists, axis=1)
-            data["paper_d1_n_open"] = np.sum(
+            data["paper_d1_n_compact"] = np.sum(
                 (dists >= self.open_lo) & (dists <= self.open_hi), axis=1
             ).astype(int)
             data["paper_d1_n_closed"] = np.sum(dists < self.open_lo, axis=1).astype(int)
@@ -838,7 +854,13 @@ def list_paper_d1_columns(columns: Sequence[str]) -> list[str]:
     for c in columns:
         if not str(c).startswith(PAPER_D1_COL_PREFIX):
             continue
-        if c in ("paper_d1_min", "paper_d1_n_open", "paper_d1_n_closed", "paper_d1_n_elongated"):
+        if c in (
+            "paper_d1_min",
+            "paper_d1_n_compact",
+            "paper_d1_n_open",
+            "paper_d1_n_closed",
+            "paper_d1_n_elongated",
+        ):
             continue
         if "_m" in c[len(PAPER_D1_COL_PREFIX) :]:
             out.append(str(c))
@@ -920,7 +942,7 @@ def compute_paper_d1_distances(
         for k, (col, _, _) in enumerate(pair_specs):
             row[col] = float(frame_d[k])
         row["paper_d1_min"] = float(np.min(frame_d)) if frame_d.size else np.nan
-        row["paper_d1_n_open"] = int(np.sum((frame_d >= open_lo) & (frame_d <= open_hi)))
+        row["paper_d1_n_compact"] = int(np.sum((frame_d >= open_lo) & (frame_d <= open_hi)))
         row["paper_d1_n_closed"] = int(np.sum(frame_d < open_lo))
         row["paper_d1_n_elongated"] = int(np.sum(frame_d > open_hi))
         rows.append(row)
@@ -936,6 +958,7 @@ def summarize_paper_d1_by_segments(
     group: str = "endpoint",
 ) -> pd.DataFrame:
     """Per-segment mean d1 for each directional pair + open-window counts."""
+    features_df = rename_legacy_paper_d1_columns(features_df)
     d1_cols = list_paper_d1_columns(features_df.columns)
     if not d1_cols or "frame" not in features_df.columns:
         return pd.DataFrame()
@@ -972,8 +995,8 @@ def summarize_paper_d1_by_segments(
         # Assembly summaries
         if "paper_d1_min" in sub.columns:
             base["paper_d1_min_mean"] = float(sub["paper_d1_min"].mean())
-        if "paper_d1_n_open" in sub.columns:
-            base["paper_d1_n_open_mean"] = float(sub["paper_d1_n_open"].mean())
+        if "paper_d1_n_compact" in sub.columns:
+            base["paper_d1_n_compact_mean"] = float(sub["paper_d1_n_compact"].mean())
 
         open_pairs: list[str] = []
         closed_pairs: list[str] = []

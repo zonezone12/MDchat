@@ -4,6 +4,8 @@
 **Companion:** [Manuscript planning brief (artifact)](https://claude.ai/code/artifact/a7594487-ffa7-4190-8ed5-5c7eb65257a0)
 **Revised:** G0 is implemented and G5 Table 1 occupancy is computed. Motif-level π(pole)/π(eq)/d1/d2 histograms reproduce Murata Fig. S11 (`output/murata_motif_rmsd/plots/`). Apo-frame A/B/C1/C2/other % for BMMpM and BMHpM match Table 1; BHHpM (3₆) matches A/B/C1 but splits C2 vs other differently (`output/murata_g5/`). G1b still stands: each cube keeps its own elbow; §3.3 ratio **1 : 3.18 : 4.70**. G3 now has an automatic k rule (chemical_separation gate, then max Murata-label NMI; silhouette is not used) at `output/endpoint_cluster_chemical_k/chemical_k_selected.csv`. G4 remains done. k=5 is still the published comparability cut used in G5 cluster tables.
 
+**Update (Oct 13):** decided to re-cluster on the final own-elbow segments (G3 note); not yet run. The G2 assembly QC rule is implemented, and its only hit is still `BMHpH_563849_mdcrd_v`. `paper_d1_n_open` is now `paper_d1_n_compact`, `docs/references.md` exists, and the recompute script is in `scripts/`. Two §3.5 rows were corrected: BMHpH carried values from the rejected wrong-grid run, and BMMpM had been timed against the published-penalty GSA detections. New in G2: four trajectories are truncated, and the 51-trajectory cohorts each contain one seed twice (an original plus an `_re_` re-run). The cohort definition needs a decision before re-clustering.
+
 ---
 
 ## 0. What the two reference papers actually are
@@ -18,11 +20,11 @@ These are **two different papers on two different problems**. Earlier drafts of 
 | Sampling | REMD, 12 replicas, 2 µs each | 50 independent 5 ns NVT runs per system |
 | Question | How do six dispersed monomers *assemble* into a cube? | How does an *already-assembled* cube deform? |
 | States | 22 Ward macrostates from 1500 k-means microstates, 2 ns lag | Four metastructures A, B, C1, C2 from hand-built geometric criteria |
-| Relation to us | Reproduced by `src/utils/imamura_msm.py`; a **methodological** precedent for clustering trajectories | **Our trajectory source.** The system, force field, and states we compare against |
+| Relation to us | Reproduced by `src/utils/imamura_msm.py`; a **methodological** precedent for clustering trajectories | **Our comparison reference.** The systems, force field, and states we compare against. Whether our trajectories are Murata's production runs or an independent re-run is open (C1); our starting cage differs from theirs (O2) |
 
 **Consequence:** Imamura is background and method precedent, cited in the Introduction. Murata is the paper our results are compared against. Do not describe A/B/C1/C2 as coming from Imamura.
 
-Record both in `docs/references.md`. **D1 is closed.**
+Both are recorded in `docs/references.md`, together with Murata 2023 (their ref. 19). **D1 is closed.**
 
 ---
 
@@ -81,7 +83,7 @@ Murata RMSD is **local heavy atoms of the opening motif**, not Kabsch of the who
 ### What was wrong (withdrawn)
 
 1. Cation–π was missing, then later CPy was taken as para-to-N. **Fixed:** CPy is para to the Py⁺–benzene linker.
-2. `paper_d1_n_open` counted the compact 4.5–5.5 Å window as "open." Labels now use elongated d1 ≥ 7.0 Å. The old column name is leftover hygiene (item 7 below).
+2. `paper_d1_n_open` counted the compact 4.5–5.5 Å window as "open." Labels now use elongated d1 ≥ 7.0 Å. The column is now `paper_d1_n_compact` (item 7 below).
 3. Hull `s3`/`s7` was not R2/R3. Canonical roles: `src/EndpointAnalyzer/gsa_site_map.py`.
 4. Whole-cube `assembly_rmsd_to_ref` is unimodal and does not show Murata's 1.0 / 1.5 / 2.7 Å peaks. Motif RMSD is the right coordinate.
 
@@ -95,7 +97,7 @@ The earlier claim that **BMMpH and BMMpM show 0% open cation–π** is an artifa
 4. `[x]` d2 = CPy–C3 (CPy para to the phenylene linker).
 5. `[x]` Per-frame A / B / C1 / C2 / other (`label_motif_metastructures`).
 6. `[x]` Motif RMSD vs frame 0. Whole-cube RMSD is kept only as a negative control.
-7. `[ ]` Rename leftover `paper_d1_n_open` to `d1_n_compact` (or remove). Does not affect G5 labels.
+7. `[x]` Renamed `paper_d1_n_open` to `paper_d1_n_compact`, keeping the `paper_d1_` prefix of its sibling columns. Older CSVs on disk are read through `rename_legacy_paper_d1_columns`. The per-pair `open_pairs` / `n_open_pairs` columns and `classify_paper_d1_state` still call the 4.5–5.5 Å window "open". Does not affect G5 labels.
 
 **Code:** `src/EndpointAnalyzer/gsa_site_map.py`, `src/ChangepointAnalysis/murata_criteria.py`, `src/ChangepointAnalysis/murata_rmsd.py`. Batch: `scripts/compute_murata_motif_rmsd.py`. Plots: `scripts/plot_murata_motif_rmsd_timeseries.py`. Frames: `output/B*_motif_rmsd/`. Combined plots: `output/murata_motif_rmsd/plots/` (`dist_pole_eq_d1_d2.png`, `dist_d1_d2_by_open_cation_pi.png`, plus `_apo` and per-metric overlays).
 
@@ -122,9 +124,11 @@ Relative values computed against the true endpoint signal length, log(1000) = 6.
 
 **BMHpH: `docs/penalty_sweep_B_cohorts.md` §7 item 5 grid bug, fixed in G1a.** Its sweep grid was built from the first CSV length rather than the cohort median. Re-swept on the correct n = 1000 grid (1.38–34.54, 15 steps), the true elbow is 4.361 (0.631×) — not the wrong-grid value of 2.801 (0.405×). This happens to land on the same relative step as BHHpH and BHHpM; that is a coincidence of the data, not a forced match. Confirmed with a full 51-trajectory detection at `output/endpoint_changepoints_g1a_BMHpH` (233 breakpoints, rate 4.569/traj).
 
-**BMMpM: same grid bug, fixed, and its true elbow does not land near the others.** Re-swept on the correct grid, BMMpM's genuine elbow is **5.489 (0.795×)** — even higher than the wrong-grid value of 5.256 (0.761×). The grid bug was not what put BMMpM at a high relative penalty; its count-vs-penalty curve simply kinks later than the other five cohorts. **Confirmed with a full, from-scratch 51-trajectory detection** at `output/endpoint_changepoints_g1b_BMMpM` (penalty 5.48888): **106 breakpoints, rate 2.078/traj, 19/51 trajectories silent (37%)** — exactly matching the earlier sweep-only estimate, so no residual denominator issue. Timing recomputed at `output/endpoint_vs_gsa_timing_g1b_BMMpM`.
+**BMMpM: same grid bug, fixed, and its true elbow does not land near the others.** Re-swept on the correct grid, BMMpM's genuine elbow is **5.489 (0.795×)** — even higher than the wrong-grid value of 5.256 (0.761×). The grid bug was not what put BMMpM at a high relative penalty; its count-vs-penalty curve simply kinks later than the other five cohorts. **Confirmed with a full, from-scratch 51-trajectory detection** at `output/endpoint_changepoints_g1b_BMMpM` (penalty 5.48888): **106 breakpoints, rate 2.078/traj, 19/51 trajectories silent (37%)** — exactly matching the earlier sweep-only estimate, so no residual denominator issue. Timing recomputed at `output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow` (§3.5 explains why the earlier `output/endpoint_vs_gsa_timing_g1b_BMMpM` is superseded).
 
-Outputs: `output/endpoint_changepoints_g1a_BMHpH/`, `output/endpoint_changepoints_g1b_BMMpM/`, `output/endpoint_vs_gsa_timing_g1b_BMMpM/`, `output/g1a_relative_penalty_correction.csv` (sweep-comparison record only — its own-elbow row for BMMpM is now independently confirmed by the full run above), `output/endpoint_changepoints_{CUBE}/penalty_sweep_median_n/`.
+**Root cause of the grid bug, now confirmed:** in both BMHpH and BMMpM the alphabetically first endpoint CSV is the truncated `109345_mdcrd_v` (266 rows in BMHpH, 746 in BMMpM, against a median of 1000; see G2). The wrong-grid elbows match 0.502 × log(266) = 2.80 and 0.795 × log(746) = 5.26.
+
+Outputs: `output/endpoint_changepoints_g1a_BMHpH/`, `output/endpoint_changepoints_g1b_BMMpM/`, `output/endpoint_vs_gsa_timing_g1a_BMHpH/`, `output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow/`, `output/g1a_relative_penalty_correction.csv` (sweep-comparison record only — its own-elbow row for BMMpM is now independently confirmed by the full run above), `output/endpoint_changepoints_{CUBE}/penalty_sweep_median_n/`.
 
 **The rejected matched-relative run** (`output/endpoint_changepoints_g1a_BMMpM`, `output/endpoint_vs_gsa_timing_g1a_BMMpM`, penalty 4.361) still exists on disk as a sensitivity check but is not the reported result. Do not quote its 2.882/traj or 0.111 Jaccard figures as the pipeline's output.
 
@@ -162,9 +166,11 @@ Murata's pole-methyl series against our `pM` cohorts, own elbow throughout:
 
 The `pH` series, own elbow throughout: **1 : 1.46 : 3.22** (BMMpH 3.12, BMHpH 4.57, BHHpH 10.06) — unaffected by this decision, since BMHpH's own elbow was never in dispute. The equatorial-methyl gradient is weaker at the pole-H end (3.22× top, 1.46× middle) than at the pole-CH3 end (4.70× top, 3.18× middle). That interaction between pole and equatorial substitution is itself a result, not a confound, and it is not something Murata's design (equatorial substitution only) could have shown.
 
+**Truncation sensitivity (new, Oct 13).** Four trajectories are shorter than 5 ns (G2): one in BMHpH and three in BMMpM. Dividing by simulated time instead of by trajectory count moves BMMpM from 2.078 to **2.125** events per 5 ns and BMHpH from 4.57 to **4.64**; the other four cubes have only full-length runs and do not change. The `pM` ratio becomes **1 : 3.11 : 4.60** and the `pH` ratio 1 : 1.49 : 3.22. Per-ns is the more defensible normalization when lengths differ; pick one before quoting.
+
 ### 3.4 Two controls that strengthen the result
 
-**Cage geometry shows the same trend but much weaker.** GSA cage events per trajectory across the `pM` series: BHHpM 60.8, BMHpM 43.1, BMMpM 29.2, giving **1 : 1.48 : 2.08**. Against Murata's **3.67x**, the own-elbow endpoint coordinate gives **4.70x** (§3.3) while whole-cage geometry gives **2.08x**.
+**Cage geometry shows the same trend but much weaker.** GSA cage events per trajectory across the `pM` series: BHHpM 60.8, BMHpM 43.1, BMMpM 29.2, giving **1 : 1.48 : 2.08**. Against Murata's **3.67x**, the own-elbow endpoint coordinate gives **4.70x** (§3.3) while whole-cage geometry gives **2.08x**. Normalized per ns instead of per trajectory (§3.3 truncation note), these are 4.60x and 2.04x; the comparison is unchanged.
 
 **Endpoint still tracks Murata's methyl dependence more closely than cage geometry, on a relative-error basis, though both now sit on the same automatic footing.** Relative to Murata's 3.67x: endpoint overshoots by 28% (4.70 vs 3.67), cage geometry undershoots by 43% (2.08 vs 3.67). Endpoint is still the closer match, but the comparison is now "smaller error on the same side of no forced alignment" rather than the near-exact 8% agreement reported under the (now-rejected) matched-penalty run. That earlier close match depended on picking BMMpM's penalty to align with BHHpM's; it is not a property of the automatic pipeline itself.
 
@@ -180,19 +186,21 @@ Median per-trajectory Jaccard, ±50 frame tolerance, offsets in ps. Every row is
 |---|---:|---:|---:|---:|---:|---:|
 | BHHpH | 0.202 | 12.9 | 50 | 0.168 | 0.516 | 19.6 |
 | BHHpM | 0.157 | 13.3 | 50 | 0.140 | 0.557 | 17.0 |
-| BMHpH | 0.093 | 11.7 | 51 | 0.125 | 0.471 | 19.0 |
+| BMHpH | 0.093 | 11.7 | **50** | **0.068** | 0.471 | 19.0 |
 | BMHpM | 0.161 | 11.8 | 50 | 0.099 | 0.470 | 18.9 |
 | BMMpH | 0.091 | 9.4 | 44 | 0.058 | 0.430 | 19.9 |
-| BMMpM | **0.125** | **15.0** | **32** | 0.049 | 0.404 | 19.7 |
+| BMMpM | **0.087** | **13.3** | **32** | **0.047** | 0.404 | 19.7 |
 
-BMMpM's `n traj` column drops to 32 because it is the only cohort with a large silent fraction (19/51, 37%, at its own elbow) — trajectories with zero endpoint breakpoints cannot contribute a Jaccard score against `gsa`, so the pairwise statistic is computed only over the 32 trajectories that have at least one endpoint event. The `iodine` and `gsa`–`iodine` columns are unaffected by G1b, since GSA was already own-elbow throughout.
+BMMpM's `n traj` column drops to 32 because it is the only cohort with a large silent fraction (19/51, 37%, at its own elbow) — trajectories with zero endpoint breakpoints cannot contribute a Jaccard score against `gsa`, so the pairwise statistic is computed only over the 32 trajectories that have at least one endpoint event (BMHpH has one silent trajectory at its own elbow, hence 50). The `gsa`–`iodine` column does not depend on the endpoint penalty; the endpoint–iodine column does.
+
+**Corrected in this revision (Oct 13).** The BMHpH row had carried the wrong-grid run's `n traj` (51) and endpoint–iodine (0.125); its own-elbow values are 50 and 0.068 (`output/endpoint_vs_gsa_timing_g1a_BMHpH`). The BMMpM row had come from `output/endpoint_vs_gsa_timing_g1b_BMMpM`, which compared the own-elbow endpoint run against the *published* log(n) GSA detections (giving 0.125 at 15.0 ps). Against the GSA own-elbow detections used for the other five cubes it is 0.087 at 13.3 ps (`output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow`).
 
 Three things to take from this:
 
 1. **Endpoint and cage geometry remain only weakly co-timed.** The range is 0.09–0.20 across all six cohorts, superseding the earlier single figure of 0.18.
-   **The overlap does not fall monotonically with methylation.** The `pH` series does fall cleanly (0.202, 0.093, 0.091 for 0, 6, 12 equatorial methyls) but the `pM` series does not (0.157, 0.161, 0.125). The honest statement is that the unmethylated cohorts sit highest and the fully methylated sit lowest, without a clean gradient in between.
+   **The overlap does not fall monotonically with methylation.** The `pH` series falls (0.202, 0.093, 0.091 for 0, 6, 12 equatorial methyls); the `pM` series is flat from 0 to 6 and then drops (0.157, 0.161, 0.087). The honest statement is that the fully methylated cohorts sit lowest in both series, without a clean gradient in between.
    **This statistic is penalty-sensitive and denominator-sensitive.** BMHpH's value depends on its own-elbow penalty (0.093 at 4.361, would have been 0.160 on the wrong grid). BMMpM's value is computed over a smaller, non-silent subset of trajectories (32 of 51), not the full cohort — always report the `n traj` alongside the Jaccard for this cohort specifically.
-2. **Matched offsets are tight, 9–15 ps**, so the events that *do* correspond are genuinely simultaneous, not loosely associated. BMMpM's 15.0 ps offset is the widest of the six but still well inside a single Pelt tolerance window.
+2. **Matched offsets are tight, 9–13 ps**, so the events that *do* correspond are genuinely simultaneous, not loosely associated. The widest (13.3 ps, BHHpM and BMMpM) is still well inside a single Pelt tolerance window.
 3. **`gsa`–`iodine` at 0.40–0.56 is a legitimate independent pair** — the two column sets are disjoint, unlike `combined` which contains the gsa columns. Cage-geometry and guest events coincide about half the time. **This directly corroborates Murata's stated reason for avoiding Markov modeling**, that "structural deformation and guest encapsulation proceed on comparable time scales." We can now put a number on that claim, which Murata could not.
 
 ---
@@ -206,7 +214,7 @@ Three things to take from this:
 | "**other**" reaches **46.1%** for 3₆ and 9.0% for 2₆′ | Clustering assigns every segment; nothing falls outside the scheme |
 | "More systematic identification of metastructures... **for example by machine-learning-based clustering approaches, represent an important direction for future studies**" | This is precisely what the pipeline does |
 
-**Thesis:** Murata named unsupervised clustering of nanocube deformation as the needed next step. We built it, applied it to the same trajectories, recovered their structure–property relationship without their criteria, quantified the timescale coupling they could only assert, resolved the conformations their scheme left as "other", and extended the analysis to pole-substituted variants they did not simulate.
+**Thesis:** Murata named unsupervised clustering of nanocube deformation as the needed next step. We built it, applied it to the same nanocube systems, recovered their structure–property relationship without their criteria, quantified the timescale coupling they could only assert, resolved the conformations their scheme left as "other", and extended the analysis to pole-substituted variants they did not simulate.
 
 ---
 
@@ -216,7 +224,7 @@ Three things to take from this:
 
 Executed. Six cohorts re-detected for endpoint and for `gsa` + `iodine`, timing recomputed, summary written to `output/matched_penalty_recompute_summary.csv`. Published tables were left untouched, as intended.
 
-The elbow discrepancy is resolved in favour of the `penalty_recommendation.txt` files; the values in `docs/penalty_sweep_B_cohorts.md` section 3 are stale for BMHpH, BMMpH and BMMpM and **that document still needs correcting**.
+The elbow discrepancy is resolved in favour of the `penalty_recommendation.txt` files, and `docs/penalty_sweep_B_cohorts.md` has since been corrected to match (§9, stage 1).
 
 **G1a `[x]` Re-run BMHpH and BMMpM on a corrected log(n) reference.** Median-n re-sweep found BMHpH's true elbow at **4.361** (0.631×, up from the wrong-grid 2.801) and BMMpM's true elbow at **5.489** (0.795×, up from the wrong-grid 5.256). Both confirmed with full, from-scratch 51-trajectory detections, not just the sweep search. Clustering was not re-run (G3).
 
@@ -235,9 +243,11 @@ The elbow discrepancy is resolved in favour of the `penalty_recommendation.txt` 
 | BMMpH | 50 | 6 |
 | BMMpM | 51 | 21 (41%) at the wrong-grid elbow; **19 (37%) at the true own elbow (G1b, final)** |
 
-**Every cohort is 50 or 51 trajectories**, matching Murata's design exactly. The encapsulation-filtering hypothesis is no longer needed to explain the counts.
+**Every cohort is 50 or 51 trajectories, and every cohort has exactly 50 unique seeds**, matching Murata's design. The encapsulation-filtering hypothesis is no longer needed to explain the counts. The 51s count one seed twice: BMHpH and BMMpM each hold an original plus an `_re_` re-run (`563849` and `257803`). BMMpH has the re-run `203945_re` but no original, so it is 49 originals plus one re-run. All three re-runs are full length and pass the QC rule below.
 
-**This is itself a result.** At the final own-elbow penalty, 37% of BMMpM replicas show no regime change at all across 5 ns, against 0% for four of the six cohorts. That independently corroborates Murata's 78.4% metastructure A and 0.2% "other" for 1₆. Report it as a per-cohort static fraction, using the 37% figure, not the earlier wrong-grid 41%.
+**Truncated trajectories (new, Oct 13).** Four runs are shorter than 5000 frames: BMHpH `109345` (1326), BMMpM `109345` (3728), BMMpM `257803` (4469; it has a re-run) and BMMpM `587901` (1460). The other 298 are full length. These caused the G1a grid bug (§3.1) and slightly bias per-trajectory rates (§3.3 truncation note).
+
+**This is itself a result.** At the final own-elbow penalty, 37% of BMMpM replicas show no regime change at all across 5 ns, against 0% for three of the six cohorts (BMHpH 1/51, BMMpH 6/50). That independently corroborates Murata's 78.4% metastructure A and 0.2% "other" for 1₆. Report it as a per-cohort static fraction, using the 37% figure, not the earlier wrong-grid 41%. Two of the 19 silent BMMpM runs are truncated (`109345`, `587901`); leaving out the three truncated BMMpM originals gives 17/48 = 35%, so the conclusion holds.
 
 **Guest starting state, verified directly:** checked `n_guest_inside_cavity` / `n_guest_bulk` at frame 0 for every replica in all six cohorts (`output/gsa_features_step1/*_gsa_features.csv`). Result is uniform: **all 24 iodide start in bulk, zero inside the cavity, at t=0, in every cohort with no exceptions.** This matches Murata's stated protocol (extra iodide added specifically to *enhance the chance of* encapsulation during the run) and contradicts a literal reading of "trajectories start from encapsulation states." **O2 is closed** (apo-optimized cage).
 
@@ -252,11 +262,15 @@ Guest entry *during* the run (`n_guest_inside_cavity > 0` at any frame) does var
 | BMMpH | 12/49 | 24% |
 | BMMpM | 14/50 | 28% |
 
+Re-verified Oct 13 from `output/gsa_features_by_cube/`. The table counts originals only: the three `_re_` re-runs are left out, which is why BMHpH, BMMpH and BMMpM show 50, 49 and 50. With re-runs included: BMHpH 42/51, BMMpH 12/50, BMMpM 14/51. All 302 trajectories have zero guests inside the cavity at frame 0.
+
 This is a looser criterion than Murata's "encapsulation" (any visit, not permanent capture), so it is not directly comparable to their 11/20/27/22-of-50 counts, but the ranking — high-methyl cohorts resist entry, low-methyl cohorts don't — points the same direction as their result.
 
-**`BMHpH_563849_mdcrd_v` resolved — real dissociation event, not an artifact and not encapsulation-driven.** Traced precisely: `assembly_rg` first exceeds 15 Å at **frame 4778 of 5000** (last 4.4% of the trajectory), where `largest_connected_component_size` drops from 6 to 5 — one monomer detaches from the assembly. `n_guest_inside_cavity = 0` at that exact frame, so the break is not coincident with a guest forcing its way through. The guest *did* visit the cavity earlier in the same trajectory (1168/5000 frames, 23%), which had no destabilizing effect until the unrelated dissociation four-fifths of a nanosecond later. Checked `assembly_rg_max > 15 Å` across all ~299 non-`_re_` trajectories in `gsa_features_step1`: **exactly one hit**, this replica. It is genuinely rare, not a systematic issue with the BMHpH cohort or the pole-H design.
+**`BMHpH_563849_mdcrd_v` resolved — real dissociation event, not an artifact and not encapsulation-driven.** Traced precisely: `assembly_rg` first exceeds 15 Å at **frame 4778 of 5000** (last 4.4% of the trajectory), where `largest_connected_component_size` drops from 6 to 5 — one monomer detaches from the assembly. It later drops to 4, and Rg peaks at 34.9 Å; the same 123 frames fail on both criteria. `n_guest_inside_cavity = 0` at that exact frame, so the break is not coincident with a guest forcing its way through. The guest *did* visit the cavity earlier in the same trajectory (1168/5000 frames, 23%), which had no destabilizing effect until the unrelated dissociation four-fifths of a nanosecond later. Re-checked with the implemented rule across all 302 trajectories in `output/gsa_features_by_cube/`, re-runs included: **exactly one hit**, this replica. The next-highest Rg anywhere is 12.2 Å (`BMHpH_157923`), and its re-run `BMHpH_563849_re_mdcrd_v` passes. It is genuinely rare, not a systematic issue with the BMHpH cohort or the pole-H design.
 
-**Recommendation:** adopt `assembly_rg_max > 15 Å` (or equivalently, any frame where `largest_connected_component_size < 6`) as the pre-registered QC threshold, applied identically to all six cohorts before clustering. Exclude `BMHpH_563849_mdcrd_v` from the cluster/metastructure comparison under that rule, and report the dissociation itself as a separate one-line finding — a rare, late-trajectory monomer-loss event in the least-stabilized pole-H, low-equatorial-methyl system — rather than a silent drop. Since the threshold catches nothing else across ~299 trajectories, this changes no other result in the plan.
+**QC rule: adopted and implemented (Oct 13).** A trajectory fails if any frame has `assembly_rg > 15 Å` or `largest_connected_component_size < 6`, applied identically to all six cohorts before clustering. Code: `src/ChangepointAnalysis/assembly_qc.py` (`scan_assembly_qc_dir`, `assembly_qc_failures`, `drop_trajectories`); `SegmentClusteringConfig.exclude_traj_ids` drops failures before clustering. `scripts/cluster_changepoint_segments.py --qc-gsa-dir output/gsa_features_by_cube/{CUBE}` scans one cube and writes `assembly_qc.csv`; `scripts/compare_to_murata_metastructures.py` applies the rule by default (`--no-assembly-qc` turns it off). Tests: `tests/test_assembly_qc.py`. Detection-level rates in §3 still include the replica. The G5 numbers below predate the rule; re-running changes only the BMHpH `pH`-series row. Report the dissociation itself as a separate one-line finding — a rare, late-trajectory monomer-loss event in the least-stabilized pole-H, low-equatorial-methyl system — rather than a silent drop.
+
+**Open: cohort definition (decide before re-clustering).** Does a re-run replace its original? If yes, every cohort is exactly 50 seeds; the dissociated `563849` original and the truncated `257803` original drop out as superseded, and the QC rule has nothing left to catch. If no, BMHpH and BMMpM count one seed twice. Separately, decide whether the other three truncated runs (BMHpH `109345`, BMMpM `109345`, BMMpM `587901`) stay in; the QC rule does not catch them.
 
 ### O2 `[x]` — resolved: apo-optimized cage, no encapsulation-derived geometry
 
@@ -316,9 +330,9 @@ BHHpH k=3/4/5 is a plateau (NMI 0.273 / 0.280 / 0.270). BMMpM k=9 beats k=4 (0.6
 
 **One interpretive caveat worth carrying into the manuscript:** `n_significant_fdr` runs 500–950 out of ~960 candidate columns at almost every k with ≥2 usable clusters. That is expected given the known redundancy among raw site-pair columns (~26 PCs explain 80% of their variance, per `docs/endpoint_cluster_discrimination.md` §4) and should not be read as 900 independent discoveries — report it as "most of a highly correlated feature set clears the FDR bar," not as a large number of separate findings.
 
-**Still open:** the scan used published-penalty `by_k/` labels, not the final own-elbow detections from G1/G1a/G1b. If the paper re-clusters on the final own-elbow segments (see the note below), re-run `scan_chemical_separation_by_k` **and** `select_chemical_k.py` on those — do not port these numbers over.
+**Still open:** the scan used published-penalty `by_k/` labels, not the final own-elbow detections from G1/G1a/G1b. The paper re-clusters on the own-elbow segments (decided; note below), so re-run `scan_chemical_separation_by_k` **and** `select_chemical_k.py` on those — do not port these numbers over.
 
-**Note:** clustering has *not* been re-run on any of the G1/G1a/G1b detections. All existing cluster artifacts (including the `by_k/` sweep above) belong to the published penalties. Decide whether the paper clusters the final own-elbow segments (`output/endpoint_changepoints_matched_*` for four cohorts, `output/endpoint_changepoints_g1a_BMHpH`, `output/endpoint_changepoints_g1b_BMMpM` — preferable, for consistency with section 3) or keeps clustering on the published tables and reports detection-only results at the own-elbow penalties.
+**Decided (Oct 13): the paper clusters the final own-elbow segments** — `output/endpoint_changepoints_matched_{BHHpH,BHHpM,BMHpM,BMMpH}`, `output/endpoint_changepoints_g1a_BMHpH`, `output/endpoint_changepoints_g1b_BMMpM` — for consistency with section 3. Not yet run; none of these folders has cluster outputs. Order: settle the cohort definition (G2); cluster each cube with `scripts/cluster_changepoint_segments.py --changepoints-dir <own-elbow dir> --groups endpoint --qc-gsa-dir output/gsa_features_by_cube/{CUBE}`; run the summarize step (populates the G4 columns); re-run the G3 chemical-k scan and `select_chemical_k.py`; then regenerate the G5 cluster cross-tabs. `compare_to_murata_metastructures.py` still reads clusters from `output/endpoint_changepoints_{CUBE}/clusters/`, so it needs a way to point at the own-elbow folders. All existing cluster artifacts (including the `by_k/` sweep above) belong to the published penalties.
 
 ### G4 `[x]` Fix the attribution statistics framing — **implemented, run, and reviewed**
 
@@ -331,7 +345,7 @@ BHHpH k=3/4/5 is a plateau (NMI 0.273 / 0.280 / 0.270). BMMpM k=9 beats k=4 (0.6
 
 Ran the full existing test suite after this refactor (`rank_cluster_discriminating_endpoint_features` was split into `collect_endpoint_segment_means` + `score_cluster_discriminating_features` to support G3's per-k reuse) — all 36 pre-existing tests plus the 6 new G3/G4 tests pass, no regressions.
 
-**Not yet done:** this has not been re-run on the published `endpoint_pair_cluster_correlation.csv` files — checked `output/endpoint_changepoints_B*/endpoint_pair_cluster_correlation.csv` directly and none carry the new p-value columns yet. The function signature defaults to `n_permutations=999`, so a plain re-run of `summarize_changepoint_results` per cohort will populate them.
+**Not yet done:** re-checked Oct 13 — only BHHpM and BMMpM have an `endpoint_pair_cluster_correlation.csv` at all, and neither has the p/q columns. Since the paper re-clusters on the own-elbow segments (G3 note), populate them there rather than back-filling the published files; `summarize_changepoint_results` defaults to `n_permutations=999`.
 
 **Code:** `src/ChangepointAnalysis/reporting.py` — `_eta_squared_columns`, `benjamini_hochberg_qvalues`, `permutation_eta_squared_pvalues`, `score_cluster_discriminating_features`, `rank_cluster_discriminating_endpoint_features` (now a thin wrapper). Tests: `tests/test_cluster_attribution.py`.
 
@@ -379,7 +393,7 @@ Outputs under `output/murata_g5/`:
 - `murata_vs_endpoint_cluster.csv` — row-normalized % of each Murata label in each endpoint cluster.
 - `murata_other_vs_endpoint_cluster.csv` — among apo frames with label **other**, fraction in each cluster. BHHpM: cluster **1 = 40.5%**, cluster **4 = 31.1%** (n = 56,756 joined other frames; occupancy other n = 57,119, so a few apo-other frames had no segment).
 
-**Cluster integers are arbitrary and per-cohort.** BHHpM cluster 1 is not the same chemical state as BMHpM cluster 1. The script does not match IDs across cubes. The draft still needs a one-paragraph reading of the 3₆ C2/other split and of those BHHpM clusters. 2₆′ other (9.0%) cannot be resolved.
+**Cluster integers are arbitrary and per-cohort.** BHHpM cluster 1 is not the same chemical state as BMHpM cluster 1. The script does not match IDs across cubes. The draft still needs a one-paragraph reading of the 3₆ C2/other split and of those BHHpM clusters. 2₆′ other (9.0%) cannot be resolved. These cross-tabs use the published-penalty clusters; the own-elbow re-cluster (G3 note) will replace and renumber them, so write the BHHpM cluster reading after that run. The 3₆ C2-vs-other reading is frame-level and does not depend on clustering, so it can be written now.
 
 **Code:** `scripts/compare_to_murata_metastructures.py` (`label_motif_metastructures` in `src/ChangepointAnalysis/murata_rmsd.py`; Table 1 constants in `src/ChangepointAnalysis/murata_criteria.py`).
 
@@ -408,7 +422,7 @@ Outputs under `output/murata_g5/`:
 
 **Worth a sentence in Methods or Limitations:** our starting cage carries no shape memory of a bound aromatic guest, unlike Murata's TBM-derived geometry. This is a point of difference, not a problem — if anything it removes a potential confound from their protocol — but it should be stated rather than silently assumed identical. Verified from the frame-0 guest data in G2: all 24 iodide start in bulk with zero inside the cavity, in every cohort, matching this description exactly.
 
-**Still needed from your own records:** whether our trajectories are otherwise Murata's exact production protocol or an independent re-run, and the provenance of the three `pH` cohorts.
+**Still needed from your own records:** whether our trajectories are otherwise Murata's exact production protocol or an independent re-run (this also decides the wording in §1 and §4), the provenance of the three `pH` cohorts, why the three `_re_` re-runs exist, and why four runs are truncated (G2).
 
 ### C2 `[ ]` Figure 1 schematic
 
@@ -422,24 +436,25 @@ No free-energy surface, no rate constants, attribution is correlational, cluster
 
 ## 7. Release hygiene
 
-- **R1 `[ ]`** Clean the working tree. Note `output/_recompute_matched_penalties.py` is a new untracked script — move it into `scripts/` and commit it, since it produced published numbers.
-- **R2 `[ ]`** Tag a release and mint a Zenodo DOI, after the re-cluster decision (published penalties vs final own-elbow segments — G3 note) is made; if re-clustering happens, re-run the G3 chemical-k scan and G4 ranking on the new segments first.
+- **R1 `[~]`** Moved to `scripts/recompute_matched_penalties.py`; still untracked, so commit it. It reproduces the `matched_*` runs, and its BMHpH and BMMpM outputs are the superseded wrong-grid ones. The final `g1a_BMHpH` / `g1b_BMMpM` detections and timing runs have no script in `scripts/`.
+- **R2 `[ ]`** Tag a release and mint a Zenodo DOI after the own-elbow re-cluster (decided, G3 note) and the G3 chemical-k scan and G4 ranking on the new segments. No tags exist yet.
 - **R3 `[ ]`** Data availability. Feature CSVs are small enough to deposit in full.
-- **R4 `[~]`** Tests for the G0 criteria and the G4 permutation null. G4: `tests/test_cluster_attribution.py`. G0: `tests/test_gsa_site_map.py` (CPy para to phenylene linker), `tests/test_murata_criteria.py` (A/B/C1/C2 labels, occupancy vs Table 1 mapping), `tests/test_murata_rmsd.py` (unit columns, distance plots, metastructure labels from elongated d1). Remaining hygiene: rename `paper_d1_n_open` (G0 item 7).
+- **R4 `[x]`** Tests for the G0 criteria, the G4 permutation null and the G2 QC rule. G4: `tests/test_cluster_attribution.py`. G0: `tests/test_gsa_site_map.py` (CPy para to phenylene linker), `tests/test_murata_criteria.py` (A/B/C1/C2 labels, occupancy vs Table 1 mapping), `tests/test_murata_rmsd.py` (unit columns, distance plots, metastructure labels from elongated d1). G2 QC: `tests/test_assembly_qc.py`. The `paper_d1_n_compact` rename and the legacy-name reader are covered in `tests/test_changepoint_pipeline.py`.
 
 ---
 
 ## 8. Dependency order
 
 ```
-G0 ✓ done ──► G5 `[~]` Table 1 occupancy done; 3₆ C2/other + cluster reading still open
+G0 ✓ done ──► G5 `[~]` Table 1 occupancy done; 3₆ C2/other reading can be written now
 G1 ─► G1a ─► G1b ✓ done ─► §3.3 final ─► G5
-G3 ✓ done, G4 ✓ done ──► Results (attribution)
-C1 ──► Methods (done)
-G1b ──► R2 ──► R3
+G2 QC ✓ implemented ─► cohort definition (re-runs, truncated runs) ─► own-elbow re-cluster
+own-elbow re-cluster ─► G3 + G4 re-run ─► Results (attribution) + G5 "other" cluster reading
+C1 ──► Methods (done; provenance questions open)
+own-elbow re-cluster ──► R2 ──► R3
 ```
 
-**Critical path:** G5 remaining work is draft interpretation of the 3₆ C2/other split and of endpoint clusters on Murata "other" frames — not a reimplementation. G0, G1b, O1, G3, and G4 are closed. The G3 re-cluster decision (published penalties vs final own-elbow segments) is a quality choice for R2, not a blocker for the occupancy table or the draft.
+**Critical path:** settle the cohort definition (G2), run the own-elbow re-cluster with the QC rule, re-run G3 and G4 on it, then write the G5 reading of endpoint clusters on Murata "other" frames. The 3₆ C2/other paragraph does not depend on clustering and can be drafted now. G0, G1b, O1, O2 and the G3/G4 code are closed; the re-cluster decision is made.
 
 ---
 
@@ -449,8 +464,8 @@ G1b ──► R2 ──► R3
 |---|---|---|
 | 1 | ~~Correct `docs/penalty_sweep_B_cohorts.md`~~ done | Docs match code |
 | 2 | ~~G0 implementation~~ done | S11-style d1 vs open π; CPy = para to phenylene linker |
-| 3 | G5 three-way comparison | Table 1 occupancy done (1₆/2₆ match; 3₆ C2 vs other). Remaining: interpret 3₆ split + BHHpM "other" clusters |
-| 4 | Re-cluster decision for R2 (published penalties vs final own-elbow segments); re-run G3/G4 on new segments if so | Quality choice, not a blocker |
+| 3 | G5 three-way comparison | Table 1 occupancy done (1₆/2₆ match; 3₆ C2 vs other). Remaining: interpret 3₆ split (now) + BHHpM "other" clusters (after stage 4) |
+| 4 | ~~Re-cluster decision~~ made: own-elbow segments. Settle the cohort definition, re-cluster with the QC rule, re-run G3/G4 | New cluster tables |
 | 5 | C2, C3, draft | Full draft |
 | 6 | R1–R4, submit | Release tagged |
 
@@ -461,21 +476,22 @@ G1b ──► R2 ──► R3
 | Quantity | Status | Note |
 |---|---|---|
 | Endpoint elbows | **resolved, final** | Each cube its own elbow (G1b decision). `docs/penalty_sweep_B_cohorts.md` corrected to match |
-| Cohort sizes | **resolved** | All 50–51. Earlier 44/30 were trajectories with ≥1 breakpoint |
-| endpoint–gsa Jaccard | **0.09–0.20** | Final, own-elbow throughout. Supersedes the single 0.18. BMMpM's value (0.125) is computed over only 32/51 trajectories — always report `n traj` alongside it. Falls with methylation in `pH` only, not `pM` |
+| Cohort sizes | **resolved, with a caveat** | All 50–51, each with exactly 50 unique seeds; the 51s count one seed twice (`_re_` re-runs). Four runs are truncated (G2). Earlier 44/30 were trajectories with ≥1 breakpoint |
+| Guest-entry denominators | **explained** | The G2 table counts originals only. With the three re-runs: BMHpH 42/51, BMMpH 12/50, BMMpM 14/51 |
+| endpoint–gsa Jaccard | **0.09–0.20** | Final, own-elbow throughout. Supersedes the single 0.18. BMMpM is **0.087** (corrected; the earlier 0.125 was timed against published-penalty GSA), computed over only 32/51 trajectories — always report `n traj` alongside it. Lowest in the fully methylated cube of each series; no clean gradient in `pM` |
 | combined–gsa Jaccard 0.63 | **do not quote** | `combined` contains the gsa columns. Use `gsa`–`iodine` (0.40–0.56) as the independent within-GSA pair |
-| Transition-rate ratio | **1 : 3.18 : 4.70 — final** | Own elbow throughout (G1b decided). vs Murata 1 : 2.67 : 3.67 — this overshoots, by design: BMMpM's genuine elbow sits at a higher relative penalty (0.795×) than the rest (0.50–0.63×). Do not quote the intermediate matched-relative figure of 1 : 2.29 : 3.39; that run is rejected |
+| Transition-rate ratio | **1 : 3.18 : 4.70 — final** | Own elbow throughout (G1b decided). vs Murata 1 : 2.67 : 3.67 — this overshoots, by design: BMMpM's genuine elbow sits at a higher relative penalty (0.795×) than the rest (0.50–0.63×). Do not quote the intermediate matched-relative figure of 1 : 2.29 : 3.39; that run is rejected. Per-ns normalization (truncated runs, §3.3): 1 : 3.11 : 4.60 |
 | GSA-vs-endpoint event ratio | 4.9–13.2x | Not "2–3x". Both cover 5 ns, so comparable, but endpoint cannot resolve sub-5 ps events |
 | "0% open cation–π in BMM" | **withdrawn** | Mis-specified criterion; see section 2 |
 | Motif d1 / π(pole) (all B*) | **S11-style, verified** | `output/murata_motif_rmsd/plots/dist_d1_d2_by_open_cation_pi.png`. Compact ~4–5 Å when π closed; elongated ~8–9 Å grows as π opens. C2–C3 ipso, not methyl-carbon proxy |
 | Hull `s3`/`s7` d1 ~9–17 Å | **superseded** | Wrong sites; use locked R2–R3 ipso edges in motif CSVs |
 | Table 1 occupancy (apo frames) | **new, verified** | BMMpM 76.6/8.6/2.2/10.2/2.4 vs 78.4/8.7/2.3/10.4/0.2; BMHpM 44.0/13.7/1.7/38.4/2.2 vs 45.3/13.8/1.7/38.6/0.5; BHHpM 7.5/15.8/5.4/40.4/30.8 vs 7.2/15.8/4.7/26.3/46.1. Quote apo frames. 3₆ residual is C2 vs other |
 | Remapped equatorial d1 (old hull remap) | **superseded for G5** | `output/murata_d1/` was the hull-column remap. G5 uses motif-CSV ipso d1 (`output/B*_motif_rmsd/`) |
-| Top site-pair η² 0.81–0.84 | partly circular, now calibrated | Permutation null + BH-FDR implemented and tested (G4). Not yet re-run on the published `endpoint_pair_cluster_correlation.csv` files — none carry the new p/q columns as of this check |
-| BMMpM 37% static at true own elbow | **holds, final** | 19/51 have zero breakpoints at 5.489. The earlier 41% (21/51) used the wrong-grid elbow (5.256) and is superseded. Corroborates Murata's 78.4% A for 1₆ |
+| Top site-pair η² 0.81–0.84 | partly circular, now calibrated | Permutation null + BH-FDR implemented and tested (G4). Not yet run on real outputs; populate on the own-elbow re-cluster (only BHHpM and BMMpM have the published file at all) |
+| BMMpM 37% static at true own elbow | **holds, final** | 19/51 have zero breakpoints at 5.489. The earlier 41% (21/51) used the wrong-grid elbow (5.256) and is superseded. Leaving out the three truncated originals: 17/48 = 35%. Corroborates Murata's 78.4% A for 1₆ |
 | k=5 is chemically meaningful | **new, verified** | `chemical_separation`=True at k=5 in all six cohorts (G3). Silhouette-max k=2 never passes. Automatic k is NMI among chemical k (`chemical_k_selected.csv`): 4, 3, 7, 5, 3, 9 for BHHpH→BMMpM. k=5 stays the G5 comparability cut |
 | "BMMpM shows no chemical separation at any k" | **withdrawn** | Was speculation, not yet checked. Real scan: passes at k=4,5,6,9 (4/9); silhouette rises monotonically with no correlation to the chemical flag. See G3 |
 
 ---
 
-*Repository state: branch `MDchat`. G0 from `output/B*_motif_rmsd/` and `output/murata_motif_rmsd/plots/`. G5 occupancy from `output/murata_g5/`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` + `output/endpoint_vs_gsa_timing_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run).*
+*Repository state: branch `MDchat`. G0 from `output/B*_motif_rmsd/` and `output/murata_motif_rmsd/plots/`. G5 occupancy from `output/murata_g5/`. G1 from `output/matched_penalty_recompute_summary.csv`. G1a/G1b from `output/g1a_relative_penalty_correction.csv`, `output/endpoint_changepoints_g1a_BMHpH` (own elbow, 4.361, full 51-traj run), and `output/endpoint_changepoints_g1b_BMMpM` (own elbow, 5.48888, full 51-traj run) + `output/endpoint_vs_gsa_timing_g1b_BMMpM_gsa_elbow` (timed against the GSA own-elbow detections; supersedes `output/endpoint_vs_gsa_timing_g1b_BMMpM`). G2 QC from `src/ChangepointAnalysis/assembly_qc.py` over `output/gsa_features_by_cube/`.*

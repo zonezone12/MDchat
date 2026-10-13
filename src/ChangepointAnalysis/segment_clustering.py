@@ -26,6 +26,7 @@ from src.utils.metastable_states import (
 )
 from src.utils.run_log import log_event, step
 
+from .assembly_qc import drop_trajectories
 from .feature_groups import DEFAULT_GROUPS, summary_feature_columns
 
 META_COLS = frozenset({
@@ -50,6 +51,7 @@ class SegmentClusteringConfig:
     k_max: int = 10
     skip_pca: bool = False
     pca_by_k_only: bool = False
+    exclude_traj_ids: tuple[str, ...] = ()
 
 
 def load_segment_stats(changepoints_dir: Path) -> pd.DataFrame:
@@ -376,6 +378,16 @@ def cluster_all_groups(
                     component="cluster_changepoint_segments",
                 )
         return pd.DataFrame()
+
+    if config.exclude_traj_ids:
+        n_before = df["traj_id"].nunique()
+        df = drop_trajectories(df, config.exclude_traj_ids)
+        log_event(
+            "info",
+            f"Excluded {n_before - df['traj_id'].nunique()} trajectory(ies) before "
+            f"clustering: {', '.join(config.exclude_traj_ids)}",
+            component="cluster_changepoint_segments",
+        )
 
     clustered_parts: list[pd.DataFrame] = []
     for group in config.groups:

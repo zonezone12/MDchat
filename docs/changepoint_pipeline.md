@@ -214,7 +214,7 @@ This maps chemically to:
 
 **QC plot (`endpoint_sites.png`).** Blue = ring-system site; orange = atom site. Atom highlights are drawn **on top of** ring highlights, so when R=H the para carbon (orange **R1** / **R2** / **R3** / **Ph-p**) remains visible on its blue ring rather than being covered by **R1-ring** / **Ph**. Labels follow the same order (orange text last). Existing `*_endpoint_features.csv` files are still from the old hull-index run until you re-extract.
 
-We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å). For motif reading, flag a corrected d1 contact as **compact** when its distance sits in **4.5–5.5 Å** (`closed` &lt; 4.5, `elongated` &gt; 5.5). Note: the pipeline still names the 4.5–5.5 Å bin `paper_d1_n_open` (inverted vs Murata; see G0).
+We do **not** hard-code A/B/C1/C2 labels. Continuous site distances go into the changepoint pipeline; clusters are then compared against the expected RMSD ordering (~1.0 / 1.5 / 1.6–2.5 / 2.7 Å). For motif reading, flag a corrected d1 contact as **compact** when its distance sits in **4.5–5.5 Å** (`closed` &lt; 4.5, `elongated` &gt; 5.5). The pipeline names the 4.5–5.5 Å count `paper_d1_n_compact`; CSVs written before the rename call it `paper_d1_n_open` and are still read under the new name. The per-pair `open_pairs` / `n_open_pairs` columns keep the old "open" wording for the same window.
 
 ```mermaid
 flowchart TD
@@ -442,7 +442,7 @@ See [endpoint_cluster_discrimination.md §11](endpoint_cluster_discrimination.md
 | `endpoint_dist_{mean,min,max,std}` | Assembly-wide aggregates |
 | `endpoint_dist_{i}s{a}_{j}s{b}` | Optional raw site–site distance (`--include-site-pairs`) |
 | `paper_d1_m{i}r2_m{j}r3` / `paper_d1_m{i}r3_m{j}r2` | Murata d1: R2/R3 ipso carbons (C2–C3); enabled by default |
-| `paper_d1_min`, `paper_d1_n_open`, … | Assembly summaries over all directional d1 contacts |
+| `paper_d1_min`, `paper_d1_n_compact`, … | Assembly summaries over all directional d1 contacts |
 
 `endpoint_sites.csv` includes `role` so site index 3 is **R2** and index 6 is **R1** on every B* cohort. Hull fallback (non-GSA monomers) leaves `role` blank and labels sites `s{k}:R` / `s{k}:A`.
 
@@ -462,7 +462,7 @@ Outputs: `paper_d1_atoms.csv` (atom map), `paper_d1_*` columns in the features C
 
 ### Remap stored pairs → Murata equatorial d1
 
-Existing `*_endpoint_features.csv` files still use hull `s3`/`s7` paper-d1 columns (all 30 monomer-pair directions). Do **not** re-read trajectories. `scripts/remap_murata_d1.py` matches hull sites to canonical **R2/R3**, keeps the **six equatorial** interlocking contacts (Hungarian assignment on median R2(i)→R3(j) distance), and classifies with Murata's windows — not the inverted `paper_d1_n_open` bin:
+Existing `*_endpoint_features.csv` files still use hull `s3`/`s7` paper-d1 columns (all 30 monomer-pair directions). Do **not** re-read trajectories. `scripts/remap_murata_d1.py` matches hull sites to canonical **R2/R3**, keeps the **six equatorial** interlocking contacts (Hungarian assignment on median R2(i)→R3(j) distance), and classifies with Murata's windows — not the `paper_d1_n_compact` count bin (formerly `paper_d1_n_open`):
 
 | State | Distance |
 |-------|----------|
@@ -903,7 +903,7 @@ Produced by `scripts/compare_endpoint_clusters_across_cohorts.py` (or `compare_e
 
 **`cluster_proxy_summary.csv`** — one row per cohort × cluster. Key columns:
 
-`cohort`, `cluster_label`, `deformation_rank`, `n_segments`, `n_trajectories`, `total_frames`, `endpoint_dist_mean`, `endpoint_dist_std`, `paper_d1_min_mean`, `paper_d1_n_open_mean`, `n_open_pairs`, `n_closed_pairs`, `n_elongated_pairs`, `open_pair_segment_fraction`, `cohort_top_pair_labels`, `dominant_top_pair`, `dominant_top_pair_eta2`, `dominant_top_pair_cohens_d`, `cohens_d_direction`, `n_top_pairs_marking_cluster`, `low_confidence`
+`cohort`, `cluster_label`, `deformation_rank`, `n_segments`, `n_trajectories`, `total_frames`, `endpoint_dist_mean`, `endpoint_dist_std`, `paper_d1_min_mean`, `paper_d1_n_compact_mean`, `n_open_pairs`, `n_closed_pairs`, `n_elongated_pairs`, `open_pair_segment_fraction`, `cohort_top_pair_labels`, `dominant_top_pair`, `dominant_top_pair_eta2`, `dominant_top_pair_cohens_d`, `cohens_d_direction`, `n_top_pairs_marking_cluster`, `low_confidence`
 
 **`cluster_proxy_by_rank.csv`** — wide pivot keyed by `deformation_rank`; columns like `{cohort}_endpoint_dist_mean`, `{cohort}_paper_d1_min_mean`, `{cohort}_dominant_top_pair`, … (excludes `low_confidence` clusters).
 

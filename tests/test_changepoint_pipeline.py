@@ -620,7 +620,14 @@ def test_paper_d1_column_naming_and_parser() -> None:
     assert parse_paper_d1_feature(role_name) == (0, "r2", 1, "r3")
     assert parse_paper_d1_feature("endpoint_dist_0s3_1s7") is None
     cols = list_paper_d1_columns(
-        [name, role_name, "paper_d1_min", "paper_d1_n_open", "endpoint_dist_0s3_1s7"]
+        [
+            name,
+            role_name,
+            "paper_d1_min",
+            "paper_d1_n_compact",
+            "paper_d1_n_open",
+            "endpoint_dist_0s3_1s7",
+        ]
     )
     assert cols == [name, role_name]
 
@@ -780,7 +787,37 @@ def test_compute_paper_d1_distances_synthetic() -> None:
     assert abs(out.loc[0, c_open] - 5.0) < 1e-6
     assert classify_paper_d1_state(out.loc[0, c_open]) == "open"
     assert out.loc[0, c_long] > 5.5
-    assert out.loc[0, "paper_d1_n_open"] >= 1
+    assert out.loc[0, "paper_d1_n_compact"] >= 1
+    assert "paper_d1_n_open" not in out.columns
+
+
+def test_summarize_paper_d1_by_segments_reads_legacy_compact_column() -> None:
+    from src.ChangepointAnalysis.endpoint_features import (
+        paper_d1_column_name,
+        summarize_paper_d1_by_segments,
+    )
+
+    col = paper_d1_column_name(0, "r2", 1, "r3")
+    features = pd.DataFrame(
+        {
+            "traj_id": ["t1"] * 4,
+            "frame": [0, 1, 2, 3],
+            col: [5.0, 5.0, 8.0, 8.0],
+            "paper_d1_n_open": [1, 1, 0, 0],
+        }
+    )
+    segments = pd.DataFrame(
+        {
+            "traj_id": ["t1", "t1"],
+            "group": ["endpoint", "endpoint"],
+            "segment_id": [0, 1],
+            "start_frame": [0, 2],
+            "end_frame": [1, 3],
+        }
+    )
+    out = summarize_paper_d1_by_segments(features, segments)
+    assert "paper_d1_n_open_mean" not in out.columns
+    assert list(out["paper_d1_n_compact_mean"]) == [1.0, 0.0]
 
 
 def test_resolve_traj_workers() -> None:
@@ -908,6 +945,7 @@ def test_summarize_endpoint_cluster_proxies_schema(tmp_path: Path) -> None:
         {
             "cluster_label": [0, 0, 1, 2],
             "paper_d1_min_mean": [9.5, 9.7, 9.6, 10.0],
+            # Pre-rename column name; must surface as paper_d1_n_compact_mean.
             "paper_d1_n_open_mean": [0.0, 0.0, 0.0, 0.0],
             "n_open_pairs": [0, 0, 0, 1],
             "n_closed_pairs": [0, 0, 0, 0],
@@ -934,6 +972,8 @@ def test_summarize_endpoint_cluster_proxies_schema(tmp_path: Path) -> None:
     assert ranked.iloc[0]["endpoint_dist_mean"] == pytest.approx(16.5)
     assert ranked.iloc[2]["cluster_label"] == 2
     assert "dominant_top_pair" in summary.columns
+    assert "paper_d1_n_compact_mean" in summary.columns
+    assert "paper_d1_n_open_mean" not in summary.columns
     assert summary.loc[summary["cluster_label"] == 2, "dominant_top_pair"].iloc[0] == "M2S2-M3S3"
     assert summary.loc[summary["cluster_label"] == 2, "cohens_d_direction"].iloc[0] == "closed"
 

@@ -21,6 +21,7 @@ import pandas as pd
 
 from src.utils.run_log import log_event
 
+from .endpoint_features import rename_legacy_paper_d1_columns
 from .reporting import (
     _cohens_d_direction,
     cohort_name_from_changepoints_dir,
@@ -476,7 +477,9 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
         feat = d / "endpoint_features"
         sites = _read_csv_if_exists(feat / "endpoint_sites.csv")
         d1_atoms = _read_csv_if_exists(feat / "paper_d1_atoms.csv")
-        d1_segs = _read_csv_if_exists(d / "paper_d1_segment_states.csv")
+        d1_segs = rename_legacy_paper_d1_columns(
+            _read_csv_if_exists(d / "paper_d1_segment_states.csv")
+        )
 
         n_sites = len(sites)
         n_ring = int((sites["kind"] == "ring").sum()) if "kind" in sites.columns else 0
@@ -525,9 +528,9 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
             if "n_open_pairs" in d1_segs.columns:
                 n_open_mean = float(d1_segs["n_open_pairs"].mean())
                 frac_open = float((d1_segs["n_open_pairs"] > 0).mean())
-            elif "paper_d1_n_open_mean" in d1_segs.columns:
-                n_open_mean = float(d1_segs["paper_d1_n_open_mean"].mean())
-                frac_open = float((d1_segs["paper_d1_n_open_mean"] > 0).mean())
+            elif "paper_d1_n_compact_mean" in d1_segs.columns:
+                n_open_mean = float(d1_segs["paper_d1_n_compact_mean"].mean())
+                frac_open = float((d1_segs["paper_d1_n_compact_mean"] > 0).mean())
 
         rows.append(
             {

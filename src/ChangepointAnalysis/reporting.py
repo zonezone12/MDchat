@@ -13,6 +13,7 @@ from matplotlib.lines import Line2D
 
 from src.utils.run_log import log_event
 
+from .endpoint_features import rename_legacy_paper_d1_columns
 from .feature_groups import (
     DEFAULT_GROUPS,
     GROUP_COLORS,
@@ -1692,12 +1693,13 @@ def _aggregate_paper_d1_by_cluster(d1_df: pd.DataFrame) -> pd.DataFrame:
     if d1_df.empty or "cluster_label" not in d1_df.columns:
         return pd.DataFrame()
 
+    d1_df = rename_legacy_paper_d1_columns(d1_df)
     rows: list[dict] = []
     for label, sub in d1_df.groupby("cluster_label"):
         row: dict = {"cluster_label": label}
         for col in (
             "paper_d1_min_mean",
-            "paper_d1_n_open_mean",
+            "paper_d1_n_compact_mean",
             "n_open_pairs",
             "n_closed_pairs",
             "n_elongated_pairs",

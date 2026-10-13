@@ -102,6 +102,14 @@ from .gsa_cohort_run import (
     run_gsa_step1_cohorts,
     stage_cube_feature_dir,
 )
+from .assembly_qc import (
+    ASSEMBLY_QC_MIN_COMPONENT_SIZE,
+    ASSEMBLY_QC_RG_MAX,
+    assembly_qc_failures,
+    drop_trajectories,
+    scan_assembly_qc,
+    scan_assembly_qc_dir,
+)
 from .segment_clustering import (
     SegmentClusteringConfig,
     build_feature_matrix_from_segments_df,
@@ -127,6 +135,8 @@ from .transition_attribution import (
 )
 
 __all__ = [
+    "ASSEMBLY_QC_MIN_COMPONENT_SIZE",
+    "ASSEMBLY_QC_RG_MAX",
     "ChangepointConfig",
     "ChangepointPipeline",
     "ChangepointTables",
@@ -149,6 +159,7 @@ __all__ = [
     "attach_site_metadata",
     "attribute_endpoint_transitions",
     "auto_penalty",
+    "assembly_qc_failures",
     "assess_chemical_separation",
     "benjamini_hochberg_qvalues",
     "build_feature_matrix_from_segments_df",
@@ -176,6 +187,7 @@ __all__ = [
     "discover_endpoint_k_cohort_dirs",
     "discover_feature_csvs",
     "discover_gsa_feature_csvs_by_cube",
+    "drop_trajectories",
     "filter_non_encapsulated",
     "find_penalty_elbow",
     "find_stable_plateaus",
@@ -207,6 +219,8 @@ __all__ = [
     "resolve_site_pair_metadata",
     "run_endpoint_changepoint",
     "run_gsa_step1_cohorts",
+    "scan_assembly_qc",
+    "scan_assembly_qc_dir",
     "scan_chemical_separation_by_k",
     "scan_cohort_chemical_k",
     "select_k_by_chemical_information",
