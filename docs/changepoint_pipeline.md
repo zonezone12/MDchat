@@ -90,7 +90,11 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `src/ChangepointAnalysis/detection.py` | `ChangepointConfig`, detection + CSV writers, `discover_feature_csvs(..., suffix=)` |
 | `src/ChangepointAnalysis/penalty_sweep.py` | Elbow / plateau sweep |
 | `src/ChangepointAnalysis/segment_clustering.py` | Segment clustering |
-| `src/ChangepointAnalysis/cluster_k_diagnostics.py` | Silhouette-vs-k / switching / geometry comparison across B* cohorts (`group=endpoint` or `gsa`) |
+| `src/ChangepointAnalysis/cluster_k_diagnostics.py` | Silhouette-vs-k / switching / geometry comparison across B* cohorts (`group=endpoint` or `gsa`); chemical k-scan, k selection by Murata-label NMI (one-SE rule), Murata label spread across k |
+| `src/ChangepointAnalysis/cluster_replicas.py` | Clusters carried by one replica: replica composition, that replica's Rg inside vs outside the cluster, feature margins against the other clusters |
+| `src/ChangepointAnalysis/assembly_qc.py` | G2 assembly QC rule (assembly Rg > 15 Å or a lost monomer) and dropping failed replicas |
+| `src/ChangepointAnalysis/murata_criteria.py` | Murata A/B/C1/C2/other criteria, Table 1 constants, occupancy vs Table 1, cutoff-grid fit |
+| `src/ChangepointAnalysis/murata_rmsd.py` | Load `*_motif_rmsd.csv`, label frames A/B/C1/C2/other, apo-frame filter |
 | `src/ChangepointAnalysis/gsa_cohort_run.py` | Split mixed `gsa_features_step1` CSVs by cube; run per-cube detect+cluster |
 | `src/ChangepointAnalysis/reporting.py` | Cohort tables, plots, `compare_endpoint_clusters_to_deformation`, `summarize_endpoint_cluster_proxies`, `compare_endpoint_clusters_across_cohorts`, segment-η² timeline panels |
 | `src/ChangepointAnalysis/murata_d1.py` | Remap stored `endpoint_dist_*` columns onto six equatorial Murata d1 contacts |
@@ -112,8 +116,22 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features, one cube per `--features-dir`) |
 | `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
 | `scripts/remap_murata_d1.py` | Map stored site-pair columns onto six equatorial Murata d1 contacts |
+| `scripts/select_chemical_k.py` | G3: pick k per cube (chemical gate, then the one-SE Murata-NMI rule); writes the G3 summary and rule sensitivity |
+| `scripts/rank_endpoint_pairs_at_k.py` | G4: site-pair η² ranking with permutation p / BH q at each cube's selected k |
+| `scripts/describe_endpoint_clusters.py` | Per-cluster motif profile and the site pairs that separate chosen clusters (one cube, one k) |
+| `scripts/audit_cluster_replicas.py` | Flag clusters carried by one replica; its Rg window, QC verdict and feature margins |
+| `scripts/compute_murata_motif_rmsd.py` | Trajectory → per-frame Murata motif RMSD, π(pole)/π(eq), d1, d2 (`*_motif_rmsd.csv`) |
+| `scripts/compare_to_murata_metastructures.py` | G5: occupancy vs Murata Table 1; Murata label × endpoint cluster tables |
+| `scripts/murata_label_diagnostics.py` | G5: label robustness (cutoff grid and its fit to Table 1, near-cutoff C2, bootstrap intervals, open-count switching) |
+| `scripts/murata_labels_across_k.py` | G5: C2-vs-other spread and the intact-belt cluster at every stored k |
+| `scripts/recompute_matched_penalties.py` | Reproduce the `matched_*` endpoint detections and timing |
+| `scripts/recompute_own_elbow_g1.py` | Reproduce the G1 own-elbow BMHpH / BMMpM sweep, detections and timing; `--compare-to` checks them against the reported files |
+| `scripts/find_run_manifests.py` | Which logged run wrote a folder (searches `output/<run_id>/manifest.json`) |
+| `src/utils/csv_compare.py` | Regenerated vs reference CSV: identical, within tolerance, differs, missing |
+| `src/utils/run_log.py` | Run manifests and event logs; `find_runs` |
 | `src/mdchat/skills/changepoint_pipeline.py` | MDChat skills |
 | `tests/test_changepoint_pipeline.py` | Synthetic regression tests |
+| `tests/test_cluster_attribution.py`, `tests/test_cluster_replicas.py`, `tests/test_assembly_qc.py`, `tests/test_csv_compare.py` | G3 k selection, G4 permutation / FDR, replica audit, QC rule, reproduction checks |
 
 ---
 
@@ -943,6 +961,29 @@ Produced by `scripts/compare_endpoint_cluster_k.py --chemical-scan` or `scan_che
 
 `chemical_separation` is the G3 flag (top-N pairs, min cluster size 5). `chemical_separation_fdr` is the stricter G4 version on BH-significant pairs only.
 
+`scripts/select_chemical_k.py` then picks k per cohort and writes, in the same folder:
+
+| Artifact | Role |
+|----------|------|
+| `chemical_k_murata_nmi_by_k.csv` | Scan rows plus NMI / AMI / Cramér's V of the cluster labels vs Murata A/B/C1/C2/other (apo frames) and the replica-bootstrap SE of NMI |
+| `chemical_k_selected.csv` | Per cohort: `selected_k`, `selection_rule`, max-NMI k and its SE |
+| `chemical_k_summary.csv` | Per cohort: silhouette-max k, gated k list, first / best chemical k, the k=5 verdict and fail reason, max-NMI k, selected k, FDR pass range |
+| `chemical_k_rule_sensitivity.csv` | Selected k under plain max NMI and the one-SE rule for each scan upper bound (`--sensitivity-k-max`, default 10, plus the scan's own) |
+
+### Single-replica cluster audit (`output/cluster_replica_audit/`)
+
+Produced by `scripts/audit_cluster_replicas.py` (`--own-elbow`; `--k` or `--k-selected` for another cut). Reads `segments_clustered.csv` and the per-cube `*_gsa_features.csv`. Each segment covers the frames up to the next segment's start, so the frames between stride-5 segments count toward the cluster they sit in.
+
+| Artifact | Role |
+|----------|------|
+| `cluster_replica_composition.csv` | Per cohort and cluster: segments, replicas, frames, the replica with the most frames and its share; `single_replica` when that share ≥ `--min-top-share` (0.8) |
+| `single_replica_clusters.csv` | Flagged clusters: the replica's assembly Rg inside vs outside the cluster, where its Rg maximum falls, whether its run ends in the cluster, its Rg-max rank among all scanned replicas, and its QC verdict |
+| `single_replica_feature_margins.csv` | Per flagged cluster: monomer-pair segment means and how far each lies outside the other clusters' range (`margin`, Å) |
+
+### Murata labels across k (`output/murata_labels_across_k/`)
+
+`scripts/murata_labels_across_k.py` maps apo, Murata-labelled motif frames of the three mapped cubes onto every Ward cut in `by_k/`. `murata_labels_across_k.csv` has, per cohort and k, the total-variation distance between the cluster distributions of C2 and "other" frames (`tvd_C2_vs_other_pct`), and the intact-belt cluster's frame count, share of the intact-belt frames, and share of each label. A frame count that stays the same over k means the Ward tree did not split that cluster.
+
 ### GSA k-diagnostics outputs (`output/gsa_cluster_k_diagnostics/`)
 
 Produced by `scripts/run_gsa_step1_cluster_k.py` (detect+cluster+compare) or `scripts/compare_endpoint_cluster_k.py --group gsa` (compare only). Reads `clusters/gsa/`; no paper-d1.
@@ -990,6 +1031,9 @@ Coverage includes:
 - Cube discovery from mixed `gsa_features_step1` (`discover_gsa_feature_csvs_by_cube`)
 - Canonical GSA site map vs known methyl pattern (`tests/test_gsa_site_map.py`)
 - Murata d1 remap of stored site-pair columns (`tests/test_murata_d1.py`)
+- G3 k selection, rule sensitivity, G3 summary and Murata label spread across k (`tests/test_cluster_attribution.py`)
+- Single-replica cluster audit (`tests/test_cluster_replicas.py`) and the Murata cutoff-grid fit (`tests/test_murata_criteria.py`)
+- Reproduction checks and run-manifest lookup (`tests/test_csv_compare.py`, `tests/test_run_log.py`)
 
 ---
 

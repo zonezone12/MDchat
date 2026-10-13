@@ -413,6 +413,36 @@ class RunContext:
         return cls(name=name, output_root=output_root, manifest=manifest)
 
 
+def find_runs(
+    root: Optional[str | Path] = None,
+    *,
+    contains: Optional[str] = None,
+    name: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    """Manifests of the runs logged under ``root`` (default ``MD_LOG_ROOT``), oldest first.
+
+    ``contains`` keeps runs whose manifest mentions that text, e.g. an output
+    folder name (case-insensitive, ``\\`` and ``/`` alike); ``name`` keeps runs
+    of one :class:`RunContext` name.
+    """
+    base = Path(root) if root is not None else _log_root()
+    needle = contains.replace("\\", "/").lower() if contains else None
+    runs: list[Dict[str, Any]] = []
+    for path in sorted(base.glob("*/manifest.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or (name is not None and data.get("name") != name):
+            continue
+        if needle is not None:
+            text = json.dumps(data, default=str, ensure_ascii=False).replace("\\\\", "/").lower()
+            if needle not in text:
+                continue
+        runs.append(data)
+    return sorted(runs, key=lambda d: str(d.get("started_at", "")))
+
+
 def pool_worker_init(
     log_queue: Optional[mp.Queue],
     run_id_value: Optional[str] = None,

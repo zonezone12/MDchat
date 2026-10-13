@@ -301,6 +301,98 @@ def test_select_k_one_se_rule_prefers_smallest_k_within_noise() -> None:
     assert picked["selected_nmi"] == pytest.approx(0.425)
 
 
+def test_rule_sensitivity_and_g3_summary() -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import (
+        chemical_k_rule_sensitivity,
+        select_k_by_chemical_information,
+        summarize_chemical_k_selection,
+    )
+
+    by_k = pd.DataFrame(
+        {
+            "cohort": ["BMHpM"] * 5,
+            "k": [3, 4, 8, 12, 15],
+            "chemical_separation": [False, True, True, True, True],
+            "fail_reason": ["single_marked_cluster", "", "", "", ""],
+            "n_marked_clusters": [1, 2, 2, 3, 3],
+            "silhouette": [0.50, 0.30, 0.25, 0.20, 0.18],
+            "n_significant_fdr": [600, 700, 800, 900, 960],
+            "murata_nmi": [0.60, 0.30, 0.41, 0.425, 0.43],
+            "murata_ami": [0.58, 0.29, 0.40, 0.42, 0.425],
+            "murata_nmi_se": [0.02, 0.02, 0.02, 0.016, 0.015],
+        }
+    )
+    sens = chemical_k_rule_sensitivity(by_k, [10, 15])
+    picks = {(r.rule, r.k_max): int(r.selected_k) for r in sens.itertuples()}
+    assert picks == {("max_nmi", 10): 8, ("one_se", 10): 8, ("max_nmi", 15): 15, ("one_se", 15): 12}
+
+    summary = summarize_chemical_k_selection(by_k, select_k_by_chemical_information(by_k), comparison_k=4)
+    row = summary.iloc[0]
+    assert int(row["silhouette_max_k"]) == 3
+    assert not row["chemical_at_silhouette_max"]
+    assert row["chemical_k_list"] == "4,8,12,15"
+    assert int(row["first_chemical_k"]) == 4
+    assert int(row["best_chemical_k"]) == 12
+    assert row["chemical_at_k4"]
+    assert int(row["max_nmi_k"]) == 15
+    assert int(row["selected_k"]) == 12
+    assert row["n_significant_fdr_min"] == 600
+    assert row["n_significant_fdr_max"] == 960
+    assert row["max_abs_ami_minus_nmi"] == pytest.approx(0.02)
+
+
+def test_murata_label_spread_tvd_and_intact_cluster() -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import murata_label_spread
+
+    joined = pd.DataFrame(
+        {
+            "cluster_label": [0, 0, 0, 0, 1, 1, 2, 2],
+            "murata_metastructure": ["A", "A", "B", "C2", "C2", "other", "C2", "other"],
+            "murata_d1_n_elongated": [0, 0, 0, 1, 1, 1, 1, 2],
+        }
+    )
+    out = murata_label_spread(joined)
+    assert out["n_clusters"] == 3
+    assert out["tvd_C2_vs_other_pct"] == pytest.approx(100.0 / 3.0)
+    assert out["intact_cluster"] == 0
+    assert out["intact_cluster_n_frames"] == 4
+    assert out["intact_cluster_share_of_intact_pct"] == pytest.approx(100.0)
+    assert out["intact_cluster_pct_intact"] == pytest.approx(75.0)
+    assert out["pct_A_in_intact_cluster"] == pytest.approx(100.0)
+    assert out["pct_C2_in_intact_cluster"] == pytest.approx(100.0 / 3.0)
+    assert out["pct_other_in_intact_cluster"] == pytest.approx(0.0)
+    assert np.isnan(out["pct_C1_in_intact_cluster"])
+
+
+def test_murata_labels_across_k_skips_missing_cuts(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import murata_labels_across_k
+
+    for k, labels in ((2, [0, 1]), (3, [0, 2])):
+        cut = tmp_path / "clusters" / "endpoint" / "by_k" / f"k_{k:02d}"
+        cut.mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "traj_id": ["BHHpM_1_mdcrd_v"] * 2,
+                "group": ["endpoint"] * 2,
+                "start_frame": [0, 10],
+                "end_frame": [9, 19],
+                "cluster_label": labels,
+            }
+        ).to_csv(cut / "segments_clustered.csv", index=False)
+    frames = pd.DataFrame(
+        {
+            "traj_id": ["1_mdcrd_v"] * 4,
+            "frame": [0, 5, 10, 15],
+            "murata_metastructure": ["A", "C2", "other", "other"],
+            "murata_d1_n_elongated": [0, 0, 1, 1],
+        }
+    )
+    out = murata_labels_across_k(tmp_path, frames, cube="BHHpM", k_values=[2, 3, 4])
+    assert list(out["k"]) == [2, 3]
+    assert list(out["tvd_C2_vs_other_pct"]) == pytest.approx([100.0, 100.0])
+    assert list(out["intact_cluster"]) == [0, 0]
+
+
 def test_nmi_from_contingency_matches_sklearn_and_bootstrap_se() -> None:
     from sklearn.metrics import normalized_mutual_info_score
 

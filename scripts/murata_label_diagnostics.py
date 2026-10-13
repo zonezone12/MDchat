@@ -6,6 +6,9 @@ For apo motif frames of BMMpM (1₆), BMHpM (2₆) and BHHpM (3₆) this writes:
   elongated d1 count, which is what the labels are built from;
 * ``cutoff_sensitivity.csv``: label occupancy over a grid of the π(pole) open
   cutoff (6.5 Å) and the d1 elongated cutoff (7.0 Å);
+* ``cutoff_sensitivity_fit.csv``: per grid cell, each cohort's deviation from
+  Murata Table 1 by class, its worst class, and the summed |deviation| over
+  all cohorts and classes, best fit first;
 * ``c2_near_cutoff.csv``: how close C2 frames sit to becoming "other", i.e. the
   third-widest π(pole) relative to the open cutoff and the second-longest d1
   relative to the elongated cutoff;
@@ -46,6 +49,7 @@ from src.ChangepointAnalysis.murata_criteria import (
     METASTRUCTURES,
     MURATA_TABLE1_PCT,
     classify_murata_metastructure_columns,
+    cutoff_grid_fit,
 )
 from src.ChangepointAnalysis.murata_d1 import D1_ELONGATED_LO
 from src.ChangepointAnalysis.murata_rmsd import (
@@ -241,6 +245,7 @@ def main() -> int:
     tables = {
         "open_by_elongated.csv": pd.concat(joint_rows, ignore_index=True),
         "cutoff_sensitivity.csv": pd.DataFrame(sens_rows),
+        "cutoff_sensitivity_fit.csv": cutoff_grid_fit(pd.DataFrame(sens_rows)),
         "c2_near_cutoff.csv": pd.DataFrame(near_rows),
         "occupancy_bootstrap.csv": pd.DataFrame(boot_rows),
         "open_count_switching.csv": pd.DataFrame(switch_rows),
@@ -261,6 +266,14 @@ def main() -> int:
     ).pivot(index="cohort", columns="metastructure", values="ours")
     print("\nApo occupancy % [trajectory-bootstrap 95% CI]:")
     print(show.reindex(columns=list(METASTRUCTURES)).to_string(), flush=True)
+    fit = tables["cutoff_sensitivity_fit.csv"]
+    fit_cols = ["pi_open_lo", "d1_elongated_lo", "is_published_cutoff", "total_abs_dev_pp"]
+    fit_cols += [c for c in fit.columns if c.endswith(("_worst_class", "_worst_abs_dev_pp"))]
+    shown = fit[[c for c in fit_cols if c in fit.columns]].copy()
+    pp_cols = [c for c in shown.columns if c.endswith("_pp")]
+    shown[pp_cols] = shown[pp_cols].round(1)
+    print("\nCutoff cells by summed |deviation| from Murata Table 1 (pp):")
+    print(shown.to_string(index=False), flush=True)
     print("\nC2 frames near a cutoff:")
     print(tables["c2_near_cutoff.csv"].round(2).to_string(index=False), flush=True)
     print("\nOpened-π count switching (all frames):")

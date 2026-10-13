@@ -1453,6 +1453,112 @@ def select_k_by_chemical_information(by_k: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def chemical_k_rule_sensitivity(
+    by_k: pd.DataFrame,
+    k_max_values: Sequence[int],
+) -> pd.DataFrame:
+    """Selected k per cohort under plain max NMI and the one-SE rule, per scan upper bound.
+
+    ``by_k`` is the scored scan (``chemical_k_murata_nmi_by_k.csv``). Rows with
+    ``k > k_max`` are dropped before :func:`select_k_by_chemical_information`
+    runs, so each row is what a scan stopping at ``k_max`` would have picked.
+    """
+    if by_k.empty:
+        return pd.DataFrame()
+    k_col = pd.to_numeric(by_k["k"], errors="coerce")
+    rows: list[dict] = []
+    for k_max in sorted({int(k) for k in k_max_values}):
+        sub = by_k[k_col <= k_max]
+        if sub.empty:
+            continue
+        variants = [("max_nmi", sub.drop(columns=["murata_nmi_se"], errors="ignore"))]
+        if "murata_nmi_se" in sub.columns:
+            variants.append(("one_se", sub))
+        for rule, frame in variants:
+            for rec in select_k_by_chemical_information(frame).to_dict("records"):
+                rows.append(
+                    {
+                        "cohort": rec["cohort"],
+                        "k_max": k_max,
+                        "rule": rule,
+                        "selection_rule": rec["selection_rule"],
+                        "selected_k": rec["selected_k"],
+                        "selected_nmi": rec.get("selected_nmi", np.nan),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def summarize_chemical_k_selection(
+    by_k: pd.DataFrame,
+    picked: pd.DataFrame,
+    *,
+    comparison_k: int = 5,
+) -> pd.DataFrame:
+    """Per-cohort G3 table: silhouette peak, chemical gate, NMI peak and selected k.
+
+    ``by_k`` is the scored scan (``chemical_k_murata_nmi_by_k.csv``), ``picked``
+    the output of :func:`select_k_by_chemical_information`. ``comparison_k`` is
+    the fixed cut reported alongside (the stored k=5).
+    """
+    if by_k.empty:
+        return pd.DataFrame()
+    sel = picked.set_index("cohort") if not picked.empty else pd.DataFrame()
+    carried = (
+        "max_nmi_k",
+        "max_nmi",
+        "max_nmi_se",
+        "selected_k",
+        "selected_nmi",
+        "selection_rule",
+        "ami_among_chemical_k",
+    )
+    rows: list[dict] = []
+    for cohort, sub in by_k.groupby("cohort", sort=True):
+        sub = sub.assign(k=pd.to_numeric(sub["k"], errors="coerce").astype(int))
+        sub = sub.sort_values("k").set_index("k")
+        gate = _chemical_flag(sub["chemical_separation"])
+        passing = sub[gate]
+        row: dict = {
+            "cohort": cohort,
+            "k_min": int(sub.index.min()),
+            "k_max": int(sub.index.max()),
+            "chemical_k_list": ",".join(str(int(k)) for k in passing.index),
+            "first_chemical_k": int(passing.index.min()) if len(passing) else np.nan,
+            "best_chemical_k": np.nan,
+        }
+        if "silhouette" in sub.columns:
+            sil = pd.to_numeric(sub["silhouette"], errors="coerce")
+            if sil.notna().any():
+                sil_k = int(sil.idxmax())
+                row["silhouette_max_k"] = sil_k
+                row["silhouette_max"] = float(sil.max())
+                row["chemical_at_silhouette_max"] = bool(gate.loc[sil_k])
+        if len(passing) and "n_marked_clusters" in passing.columns:
+            marked = pd.to_numeric(passing["n_marked_clusters"], errors="coerce")
+            if marked.notna().any():
+                row["best_chemical_k"] = int(marked.idxmax())
+        if comparison_k in sub.index:
+            row[f"chemical_at_k{comparison_k}"] = bool(gate.loc[comparison_k])
+            if "fail_reason" in sub.columns:
+                row[f"fail_reason_at_k{comparison_k}"] = sub.loc[comparison_k, "fail_reason"]
+        if "n_significant_fdr" in sub.columns:
+            fdr = pd.to_numeric(sub["n_significant_fdr"], errors="coerce")
+            row["n_significant_fdr_min"] = fdr.min()
+            row["n_significant_fdr_max"] = fdr.max()
+        if {"murata_nmi", "murata_ami"} <= set(sub.columns):
+            gap = pd.to_numeric(sub["murata_ami"], errors="coerce") - pd.to_numeric(
+                sub["murata_nmi"], errors="coerce"
+            )
+            row["max_abs_ami_minus_nmi"] = float(gap.abs().max())
+        if cohort in sel.index:
+            for col in carried:
+                if col in sel.columns:
+                    row[col] = sel.loc[cohort, col]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def nmi_from_contingency(table: np.ndarray) -> float:
     """NMI of a cluster × label count table (arithmetic normalization, as sklearn)."""
     t = np.asarray(table, dtype=float)
@@ -1561,6 +1667,75 @@ def score_murata_nmi_by_k(
         out["murata_nmi_se"] = out["k"].map(se)
         out["n_bootstrap"] = int(n_bootstrap)
     return out
+
+
+def murata_label_spread(
+    joined: pd.DataFrame,
+    *,
+    pair: tuple[str, str] = ("C2", "other"),
+) -> dict:
+    """How Murata labels and intact-belt frames spread over one cut's clusters.
+
+    ``joined`` holds apo frames with ``cluster_label``, ``murata_metastructure``
+    and ``murata_d1_n_elongated``. The total-variation distance between the
+    cluster distributions of the two ``pair`` labels is 0% when the cut cannot
+    tell them apart and 100% when they never share a cluster. The intact-belt
+    cluster is the one holding the most frames with no elongated d1; across
+    Ward cuts an unchanged ``intact_cluster_n_frames`` means it was not split.
+    """
+    from .murata_criteria import METASTRUCTURES
+
+    a, b = pair
+    lab = joined["cluster_label"].astype(int)
+    meta = joined["murata_metastructure"].astype(str)
+    out: dict = {"n_clusters": int(lab.nunique()), "n_frames": int(len(lab))}
+    dist_a = lab[meta == a].value_counts(normalize=True)
+    dist_b = lab[meta == b].value_counts(normalize=True)
+    tvd = 0.5 * dist_a.subtract(dist_b, fill_value=0.0).abs().sum()
+    out[f"tvd_{a}_vs_{b}_pct"] = 100.0 * float(tvd) if len(dist_a) and len(dist_b) else np.nan
+    intact = lab[pd.to_numeric(joined["murata_d1_n_elongated"], errors="coerce") == 0]
+    if intact.empty:
+        return out
+    shares = intact.value_counts(normalize=True)
+    top = int(shares.idxmax())
+    in_top = lab == top
+    out["intact_cluster"] = top
+    out["intact_cluster_n_frames"] = int(in_top.sum())
+    out["intact_cluster_share_of_intact_pct"] = 100.0 * float(shares.max())
+    out["intact_cluster_pct_intact"] = 100.0 * float(len(intact[intact == top]) / in_top.sum())
+    for m in METASTRUCTURES:
+        n_m = int((meta == m).sum())
+        out[f"pct_{m}_in_intact_cluster"] = (
+            100.0 * float((in_top & (meta == m)).sum()) / n_m if n_m else np.nan
+        )
+    return out
+
+
+def murata_labels_across_k(
+    changepoints_dir: Path | str,
+    apo_frames: pd.DataFrame,
+    *,
+    cube: str,
+    k_values: Sequence[int],
+    group: str = "endpoint",
+    pair: tuple[str, str] = ("C2", "other"),
+) -> pd.DataFrame:
+    """:func:`murata_label_spread` for each Ward cut in ``k_values``.
+
+    ``apo_frames`` are Murata-labelled motif frames, already filtered to the
+    frames to score (normally apo). Cuts missing from ``by_k/`` are skipped.
+    """
+    rows: list[dict] = []
+    for k in k_values:
+        segs = load_segments_at_k(changepoints_dir, int(k), group=group)
+        if segs.empty:
+            continue
+        joined = map_frames_to_segment_clusters(apo_frames, segs, cube=cube)
+        joined = joined.dropna(subset=["cluster_label", "murata_metastructure"])
+        if joined.empty:
+            continue
+        rows.append({"cohort": cube, "k": int(k), **murata_label_spread(joined, pair=pair)})
+    return pd.DataFrame(rows)
 
 
 def _format_chemical_txt(long_df: pd.DataFrame, peaks: pd.DataFrame) -> str:

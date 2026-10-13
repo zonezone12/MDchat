@@ -822,6 +822,43 @@ def occupancy_vs_murata(
     return out
 
 
+def cutoff_grid_fit(sensitivity: pd.DataFrame) -> pd.DataFrame:
+    """How far each cell of a label-cutoff grid sits from Murata Table 1.
+
+    ``sensitivity`` has one row per cohort and cell (``pi_open_lo``,
+    ``d1_elongated_lo``) with ``murata_system`` and one % column per
+    metastructure, as in ``cutoff_sensitivity.csv``. Returns one row per cell
+    with, per mapped cohort, each class's signed deviation (ours − Murata, pp),
+    the summed |deviation| and the worst class; ``total_abs_dev_pp`` sums
+    |deviation| over every cohort and class. Best fit first.
+    """
+    keys = ["pi_open_lo", "d1_elongated_lo"]
+    rows: list[dict] = []
+    for (pi_lo, d1_lo), cell in sensitivity.groupby(keys, sort=True):
+        row: dict = {"pi_open_lo": float(pi_lo), "d1_elongated_lo": float(d1_lo)}
+        if "is_published_cutoff" in cell.columns:
+            row["is_published_cutoff"] = bool(cell["is_published_cutoff"].any())
+        total = 0.0
+        for rec in cell.to_dict("records"):
+            ref = MURATA_TABLE1_PCT.get(str(rec.get("murata_system", "")))
+            if not ref:
+                continue
+            cohort = str(rec["cohort"])
+            dev = {m: float(rec[m]) - ref[m] for m in METASTRUCTURES}
+            for m in METASTRUCTURES:
+                row[f"{cohort}_{m}_dev_pp"] = dev[m]
+            worst = max(METASTRUCTURES, key=lambda m: abs(dev[m]))
+            row[f"{cohort}_abs_dev_sum_pp"] = sum(abs(d) for d in dev.values())
+            row[f"{cohort}_worst_class"] = worst
+            row[f"{cohort}_worst_abs_dev_pp"] = abs(dev[worst])
+            total += row[f"{cohort}_abs_dev_sum_pp"]
+        row["total_abs_dev_pp"] = total
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["total_abs_dev_pp", *keys], kind="stable").reset_index(drop=True)
+
+
 def remap_endpoint_cohort_cation_pi(
     changepoints_dir: Path | str,
     topology: Path | str,

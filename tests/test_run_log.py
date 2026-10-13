@@ -13,6 +13,7 @@ from src.utils.run_log import (
     RunContext,
     active,
     attach_worker,
+    find_runs,
     log_event,
     logging_enabled,
     pool_worker_init,
@@ -81,3 +82,24 @@ def test_worker_events_reach_main_listener(tmp_path: Path, monkeypatch: pytest.M
 def test_log_event_noop_without_context() -> None:
     assert not logging_enabled()
     log_event("ignored", "should not raise", level=logging.DEBUG)
+
+
+def test_find_runs_matches_folder_names_oldest_first(tmp_path: Path) -> None:
+    manifests = {
+        "new": {"name": "compare_changepoint_timing", "started_at": "2026-09-11T00:00:00",
+                "output_dir": "output\\endpoint_vs_gsa_timing_g1b_BMMpM"},
+        "old": {"name": "changepoint_feature_groups", "started_at": "2026-09-10T00:00:00",
+                "output_dir": "output/endpoint_changepoints_G1A_BMHpH"},
+        "other": {"name": "changepoint_feature_groups", "started_at": "2026-09-09T00:00:00",
+                  "output_dir": "output/endpoint_changepoints_BHHpH"},
+    }
+    for run_id, data in manifests.items():
+        (tmp_path / run_id).mkdir()
+        (tmp_path / run_id / "manifest.json").write_text(json.dumps({"run_id": run_id, **data}), encoding="utf-8")
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "manifest.json").write_text("{not json", encoding="utf-8")
+
+    assert [r["run_id"] for r in find_runs(tmp_path)] == ["other", "old", "new"]
+    assert [r["run_id"] for r in find_runs(tmp_path, contains="output/endpoint_vs_gsa_timing_g1b")] == ["new"]
+    assert [r["run_id"] for r in find_runs(tmp_path, contains="g1a_bmhph")] == ["old"]
+    assert [r["run_id"] for r in find_runs(tmp_path, name="changepoint_feature_groups")] == ["other", "old"]

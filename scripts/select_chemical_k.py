@@ -6,6 +6,15 @@ labels, bootstraps replicas for the NMI standard error, and writes
 ``selected_k`` per cohort: the smallest chemically separated k whose NMI is
 within one SE of the best.
 
+Also written next to ``chemical_k_selected.csv``:
+
+* ``chemical_k_summary.csv``: one row per cohort with the silhouette peak,
+  the gated k, the NMI peak, the selected k and the k=5 verdict (the plan's
+  G3 table);
+* ``chemical_k_rule_sensitivity.csv``: the k that plain max NMI and the
+  one-SE rule pick when the scan stops at each ``--sensitivity-k-max`` and at
+  the scan's own upper bound.
+
 Example
 -------
 python scripts/select_chemical_k.py
@@ -29,8 +38,10 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from src.ChangepointAnalysis.cluster_k_diagnostics import (
+    chemical_k_rule_sensitivity,
     score_murata_nmi_by_k,
     select_k_by_chemical_information,
+    summarize_chemical_k_selection,
 )
 from src.ChangepointAnalysis.gsa_cohort_run import KNOWN_CUBES
 from src.ChangepointAnalysis.murata_rmsd import (
@@ -69,6 +80,13 @@ def parse_args() -> argparse.Namespace:
         help="Replica resamples for the NMI standard error (0 = plain max NMI)",
     )
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--sensitivity-k-max",
+        type=int,
+        nargs="*",
+        default=[10],
+        help="Scan upper bounds to re-run the selection at (the scan's own bound is always added)",
+    )
     p.add_argument(
         "--own-elbow",
         action="store_true",
@@ -156,13 +174,26 @@ def main() -> int:
     merged = chem.merge(nmi, on=["cohort", "k"], how="left")
     picked = select_k_by_chemical_information(merged)
     out_dir.mkdir(parents=True, exist_ok=True)
-    merged_path = out_dir / "chemical_k_murata_nmi_by_k.csv"
-    pick_path = out_dir / "chemical_k_selected.csv"
-    merged.to_csv(merged_path, index=False)
-    picked.to_csv(pick_path, index=False)
-    print(f"wrote {merged_path}", flush=True)
-    print(f"wrote {pick_path}", flush=True)
+    summary = summarize_chemical_k_selection(merged, picked)
+    sensitivity = chemical_k_rule_sensitivity(merged, [*args.sensitivity_k_max, k_max])
+    for name, table in (
+        ("chemical_k_murata_nmi_by_k.csv", merged),
+        ("chemical_k_selected.csv", picked),
+        ("chemical_k_summary.csv", summary),
+        ("chemical_k_rule_sensitivity.csv", sensitivity),
+    ):
+        path = out_dir / name
+        table.to_csv(path, index=False)
+        print(f"wrote {path}", flush=True)
     print(picked.to_string(index=False), flush=True)
+    if not sensitivity.empty:
+        print("\nSelected k by rule and scan upper bound:", flush=True)
+        print(
+            sensitivity.pivot_table(
+                index="cohort", columns=["rule", "k_max"], values="selected_k", aggfunc="first"
+            ).to_string(),
+            flush=True,
+        )
     plot_nmi_vs_k(merged, picked, out_dir / "plots" / "murata_nmi_vs_k.png")
     return 0
 

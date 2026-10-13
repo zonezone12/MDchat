@@ -21,6 +21,7 @@ from src.ChangepointAnalysis.murata_criteria import (
     cation_pi_unit_label,
     classify_murata_metastructure,
     classify_murata_metastructure_columns,
+    cutoff_grid_fit,
     equator_angle_column,
     equator_d1_column,
     equator_d1_d2_angle_deg,
@@ -156,6 +157,33 @@ def test_occupancy_vs_murata_maps_bmmpm_to_1six() -> None:
     assert row["murata_system"] == "1₆"
     assert row["our_percent"] == 80.0
     assert row["murata_percent"] == 78.4
+
+
+def test_cutoff_grid_fit_ranks_cells_by_deviation_from_table1() -> None:
+    table1 = {"A": 78.4, "B": 8.7, "C1": 2.3, "C2": 10.4, "other": 0.2}
+    shifted = {"A": 72.4, "B": 8.7, "C1": 2.3, "C2": 14.4, "other": 2.2}
+    sens = pd.DataFrame(
+        [
+            {"cohort": "BMMpM", "murata_system": "1₆", "pi_open_lo": 6.0, "d1_elongated_lo": 7.0,
+             "is_published_cutoff": False, **shifted},
+            {"cohort": "BMMpM", "murata_system": "1₆", "pi_open_lo": 6.5, "d1_elongated_lo": 7.0,
+             "is_published_cutoff": True, **table1},
+            {"cohort": "BHHpH", "murata_system": "", "pi_open_lo": 6.5, "d1_elongated_lo": 7.0,
+             "is_published_cutoff": True, **shifted},
+        ]
+    )
+    fit = cutoff_grid_fit(sens)
+    assert list(fit["pi_open_lo"]) == [6.5, 6.0]
+    assert list(fit["is_published_cutoff"]) == [True, False]
+    assert fit.loc[0, "total_abs_dev_pp"] == pytest.approx(0.0)
+    worse = fit.iloc[1]
+    assert worse["BMMpM_A_dev_pp"] == pytest.approx(-6.0)
+    assert worse["BMMpM_C2_dev_pp"] == pytest.approx(4.0)
+    assert worse["BMMpM_abs_dev_sum_pp"] == pytest.approx(12.0)
+    assert worse["BMMpM_worst_class"] == "A"
+    assert worse["BMMpM_worst_abs_dev_pp"] == pytest.approx(6.0)
+    assert worse["total_abs_dev_pp"] == pytest.approx(12.0)
+    assert not any(c.startswith("BHHpH_") for c in fit.columns)
 
 
 def test_match_hull_ring_role_ph() -> None:
