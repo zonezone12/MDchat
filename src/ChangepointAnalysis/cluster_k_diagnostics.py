@@ -1669,6 +1669,226 @@ def score_murata_nmi_by_k(
     return out
 
 
+# --- Label-free k: held-out cage geometry --------------------------------------
+#
+# Endpoint clusters are built from inter-monomer site distances. The GSA cage
+# descriptors below are never used to build them, so how much of their
+# variance a partition explains is an independent, physical check on it. They
+# are global and permutation-invariant, so splitting one deformation into
+# symmetry-equivalent orientations earns no credit.
+
+HELD_OUT_GEOMETRY_EXCLUDE: frozenset[str] = frozenset(
+    {
+        # duplicate the endpoint clustering features
+        "endpoint_dist_mean",
+        "endpoint_dist_std",
+        # frame-to-frame velocity, not a property of the state
+        "assembly_frame_to_frame_rmsd",
+    }
+)
+
+
+def held_out_geometry_columns(columns: Sequence[str]) -> list[str]:
+    """GSA cage-geometry columns present in *columns*, minus the excluded ones."""
+    from .feature_groups import GSA_COLS
+
+    present = set(columns)
+    return [c for c in GSA_COLS if c in present and c not in HELD_OUT_GEOMETRY_EXCLUDE]
+
+
+def load_held_out_geometry_frames(
+    gsa_features_dir: Path | str,
+    *,
+    stride: int = 5,
+) -> pd.DataFrame:
+    """Per-frame held-out geometry for one cube, on the endpoint stride.
+
+    Keeps ``traj_id``, ``frame`` and :func:`held_out_geometry_columns` from every
+    ``*_gsa_features.csv`` in *gsa_features_dir*, and frames that are multiples
+    of *stride* (the endpoint signal's sampling).
+    """
+    parts: list[pd.DataFrame] = []
+    for path in sorted(Path(gsa_features_dir).glob("*_gsa_features.csv")):
+        df = pd.read_csv(path)
+        cols = held_out_geometry_columns(df.columns)
+        df = df.loc[pd.to_numeric(df["frame"], errors="coerce") % int(stride) == 0]
+        parts.append(df[["traj_id", "frame", *cols]])
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def cluster_sufficient_stats(
+    z: np.ndarray,
+    traj_codes: np.ndarray,
+    labels: np.ndarray,
+    n_traj: int,
+    n_clusters: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per (trajectory, cluster) frame counts, feature sums and summed squares.
+
+    Returns ``N (T, C)``, ``S (T, C, F)`` and ``Q (T, C)``; any trajectory
+    resample's cluster means and sums of squares follow from them.
+    """
+    t = np.asarray(traj_codes, dtype=int)
+    c = np.asarray(labels, dtype=int)
+    flat = t * int(n_clusters) + c
+    size = int(n_traj) * int(n_clusters)
+    N = np.bincount(flat, minlength=size).reshape(n_traj, n_clusters).astype(float)
+    Q = np.bincount(flat, weights=(z**2).sum(axis=1), minlength=size).reshape(n_traj, n_clusters)
+    S = np.stack(
+        [np.bincount(flat, weights=z[:, f], minlength=size) for f in range(z.shape[1])],
+        axis=-1,
+    ).reshape(n_traj, n_clusters, z.shape[1])
+    return N, S, Q
+
+
+def _r2_from_stats(
+    N: np.ndarray,
+    S: np.ndarray,
+    Q: np.ndarray,
+    w_fit: np.ndarray,
+    w_eval: np.ndarray,
+) -> float:
+    """R² on trajectories weighted by *w_eval*, with means fitted on *w_fit*.
+
+    Cluster means come from the *w_fit* trajectories; a cluster with no fitted
+    frames is predicted by the fitted grand mean, which is also the baseline.
+    """
+    n_fit = w_fit @ N
+    s_fit = np.einsum("t,tcf->cf", w_fit, S)
+    if n_fit.sum() <= 0:
+        return float("nan")
+    grand = s_fit.sum(axis=0) / n_fit.sum()
+    mu = np.where(n_fit[:, None] > 0, s_fit / np.maximum(n_fit, 1.0)[:, None], grand)
+    n_ev = w_eval @ N
+    s_ev = np.einsum("t,tcf->cf", w_eval, S)
+    q_ev = float((w_eval @ Q).sum())
+    res = q_ev - 2.0 * float((s_ev * mu).sum()) + float((n_ev * (mu**2).sum(axis=1)).sum())
+    tot = q_ev - 2.0 * float(s_ev.sum(axis=0) @ grand) + float(n_ev.sum() * (grand @ grand))
+    return 1.0 - res / tot if tot > 0 else float("nan")
+
+
+def score_held_out_geometry_by_k(
+    changepoints_dir: Path | str,
+    geometry_frames: pd.DataFrame,
+    *,
+    cube: str,
+    k_min: int = 2,
+    k_max: int = 15,
+    group: str = "endpoint",
+    n_bootstrap: int = 500,
+    random_state: int = 0,
+) -> pd.DataFrame:
+    """How much held-out cage-geometry variance each k's clusters explain.
+
+    Frames are labelled by their covering segment's cluster, and features are
+    z-scored over the cohort. Per k:
+
+    * ``geometry_r2``: in-sample R² (always grows with k on nested Ward cuts);
+    * ``geometry_r2_oob``: out-of-bag R², the mean over replica bootstraps of
+      R² on the left-out trajectories with cluster means fitted on the drawn
+      ones, so clusters that do not recur across replicas stop paying;
+    * ``geometry_r2_oob_se``: its spread over those bootstraps, for the one-SE
+      rule in :func:`select_k_one_se`.
+
+    The same trajectory draws are used at every k.
+    """
+    cols = held_out_geometry_columns(geometry_frames.columns)
+    frames = geometry_frames.dropna(subset=cols)
+    z_all = frames[cols].to_numpy(dtype=float)
+    sd = z_all.std(axis=0)
+    keep = sd > 0
+    cols = [c for c, ok in zip(cols, keep) if ok]
+    z_all = (z_all[:, keep] - z_all[:, keep].mean(axis=0)) / sd[keep]
+
+    tids = frames["traj_id"].map(lambda t: _norm_traj_id(t, cube)).to_numpy()
+    traj_index = {t: i for i, t in enumerate(sorted(set(tids)))}
+    n_traj = len(traj_index)
+    rng = np.random.default_rng(random_state)
+    draws = rng.integers(0, n_traj, size=(int(n_bootstrap), n_traj))
+
+    rows: list[dict] = []
+    for k in range(int(k_min), int(k_max) + 1):
+        segs = load_segments_at_k(changepoints_dir, k, group=group)
+        if segs.empty:
+            continue
+        lab = map_frames_to_segment_clusters(
+            frames[["traj_id", "frame"]], segs, cube=cube
+        )["cluster_label"].to_numpy()
+        ok = np.isfinite(lab)
+        codes = np.array([traj_index[t] for t in tids[ok]])
+        uniq, lab_c = np.unique(lab[ok].astype(int), return_inverse=True)
+        N, S, Q = cluster_sufficient_stats(z_all[ok], codes, lab_c, n_traj, len(uniq))
+        ones = np.ones(n_traj)
+        oob: list[float] = []
+        for d in draws:
+            w_in = np.bincount(d, minlength=n_traj).astype(float)
+            w_out = (w_in == 0).astype(float)
+            if w_out.sum() == 0:
+                continue
+            oob.append(_r2_from_stats(N, S, Q, w_in, w_out))
+        oob_arr = np.asarray(oob, dtype=float)
+        rows.append(
+            {
+                "cohort": cube,
+                "k": int(k),
+                "n_frames": int(ok.sum()),
+                "n_geometry_features": len(cols),
+                "geometry_r2": _r2_from_stats(N, S, Q, ones, ones),
+                "geometry_r2_oob": float(np.nanmean(oob_arr)) if oob_arr.size else np.nan,
+                "geometry_r2_oob_se": (
+                    float(np.nanstd(oob_arr, ddof=1)) if oob_arr.size > 1 else np.nan
+                ),
+                "n_bootstrap": int(oob_arr.size),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def select_k_one_se(
+    by_k: pd.DataFrame,
+    *,
+    score_col: str,
+    se_col: str,
+    gate_col: str = "chemical_separation",
+) -> pd.DataFrame:
+    """Smallest gated k whose *score_col* is within one *se_col* of the gated best.
+
+    Rows failing *gate_col* are never picked. Without a finite SE the pick is
+    the gated maximum.
+    """
+    rows: list[dict] = []
+    for cohort, sub in by_k.groupby("cohort", sort=True):
+        sub = sub.sort_values("k")
+        passing = sub[_chemical_flag(sub[gate_col])] if gate_col in sub.columns else sub
+        passing = passing[pd.to_numeric(passing[score_col], errors="coerce").notna()]
+        if passing.empty:
+            rows.append({"cohort": cohort, "selected_k": np.nan, "selection_rule": "no_gated_k"})
+            continue
+        score = pd.to_numeric(passing[score_col], errors="coerce")
+        best = passing.loc[score.idxmax()]
+        se = float(pd.to_numeric(pd.Series([best.get(se_col)]), errors="coerce").iloc[0])
+        if np.isfinite(se):
+            pick = passing[score >= float(best[score_col]) - se].sort_values("k").iloc[0]
+            rule = f"one_se_{score_col}"
+        else:
+            pick, rule = best, f"max_{score_col}"
+        rows.append(
+            {
+                "cohort": cohort,
+                "selected_k": int(pick["k"]),
+                "selection_rule": rule,
+                "selected_score": float(pick[score_col]),
+                "best_k": int(best["k"]),
+                "best_score": float(best[score_col]),
+                "best_se": se,
+                "gated_k_list": ",".join(str(int(k)) for k in passing["k"]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def murata_label_spread(
     joined: pd.DataFrame,
     *,
