@@ -137,6 +137,18 @@ def test_occupancy_table_percentages() -> None:
     assert occ.loc["C1", "n_frames"] == 0
 
 
+def test_missing_open_count_is_unlabeled_not_other() -> None:
+    frames = pd.DataFrame(
+        {"n_open_cation_pi": [0, np.nan, 3], "murata_d1_n_elongated": [0, 0, 0]}
+    )
+    labels = attach_murata_metastructure_labels(frames)["murata_metastructure"]
+    assert labels.isna().tolist() == [False, True, False]
+    assert labels.dropna().tolist() == ["A", "other"]
+    occ = occupancy_table(labels).set_index("metastructure")
+    assert occ.loc["A", "percent"] == 50.0
+    assert occ.loc["other", "percent"] == 50.0
+
+
 def test_occupancy_vs_murata_maps_bmmpm_to_1six() -> None:
     labels = pd.Series(["A"] * 8 + ["B"] * 2)
     cmp = occupancy_vs_murata(labels, cohort="BMMpM", guest_filter="frames")

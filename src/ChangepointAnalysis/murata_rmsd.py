@@ -510,22 +510,28 @@ def discover_motif_rmsd_csvs_by_cube(
     *,
     cubes: Optional[Sequence[str]] = None,
 ) -> dict[str, list[Path]]:
-    """Find ``*_motif_rmsd.csv`` under ``output/{CUBE}_motif_rmsd`` (and the mixed folder)."""
+    """Find ``*_motif_rmsd.csv`` under ``output/{CUBE}_motif_rmsd`` (and the mixed folder).
+
+    One file per trajectory: a trajectory already found in the per-cube folder is
+    not read again from ``murata_motif_rmsd/{CUBE}``, which also holds older,
+    RMSD-only files for some of the same replicas.
+    """
     output_root = Path(output_root)
     wanted = tuple(cubes) if cubes else KNOWN_CUBES
     by_cube: dict[str, list[Path]] = {}
     extra = output_root / "murata_motif_rmsd"
+    suffix = "_motif_rmsd.csv"
     for cube in wanted:
-        hits: list[Path] = []
-        named = output_root / f"{cube}_motif_rmsd"
-        if named.is_dir():
-            hits.extend(named.rglob("*_motif_rmsd.csv"))
-        nested = extra / cube
-        if nested.is_dir():
-            hits.extend(nested.rglob("*_motif_rmsd.csv"))
-        uniq = sorted({p.resolve() for p in hits if p.is_file()})
-        if uniq:
-            by_cube[cube] = uniq
+        by_traj: dict[str, Path] = {}
+        for folder in (output_root / f"{cube}_motif_rmsd", extra / cube):
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.rglob(f"*{suffix}")):
+                if path.is_file():
+                    tid = _norm_traj_id(path.name[: -len(suffix)], cube)
+                    by_traj.setdefault(tid, path.resolve())
+        if by_traj:
+            by_cube[cube] = sorted(by_traj.values())
     return by_cube
 
 

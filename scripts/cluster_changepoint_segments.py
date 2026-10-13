@@ -32,7 +32,7 @@ from src.ChangepointAnalysis.assembly_qc import (
     assembly_qc_failures,
     scan_assembly_qc_dir,
 )
-from src.ChangepointAnalysis.feature_groups import DEFAULT_GROUPS
+from src.ChangepointAnalysis.feature_groups import ALL_GROUPS, DEFAULT_GROUPS
 from src.ChangepointAnalysis.segment_clustering import (
     cluster_all_groups,
     load_segment_stats,
@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
         "--groups",
         nargs="+",
         default=list(DEFAULT_GROUPS),
-        choices=list(DEFAULT_GROUPS),
-        help="Feature groups to cluster (default: all four)",
+        choices=list(ALL_GROUPS),
+        help="Feature groups to cluster (default: the four GSA groups)",
     )
     parser.add_argument(
         "--linkage",

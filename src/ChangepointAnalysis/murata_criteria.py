@@ -742,11 +742,15 @@ def attach_murata_metastructure_labels(
     n_open_col: str = "n_open_cation_pi",
     n_elongated_col: str = "murata_d1_n_elongated",
 ) -> pd.DataFrame:
-    """Add ``murata_metastructure`` from already-counted openings and d1."""
+    """Add ``murata_metastructure`` from already-counted openings and d1.
+
+    Frames without an opening count are left unlabeled (``None``), not "other".
+    """
     if n_open_col not in frames.columns:
         raise KeyError(n_open_col)
     out = frames.copy()
-    n_open = pd.to_numeric(out[n_open_col], errors="coerce").fillna(-1).to_numpy(dtype=int)
+    n_open_raw = pd.to_numeric(out[n_open_col], errors="coerce")
+    n_open = n_open_raw.fillna(0).to_numpy(dtype=int)
     if n_elongated_col in out.columns:
         n_elong = (
             pd.to_numeric(out[n_elongated_col], errors="coerce")
@@ -755,7 +759,9 @@ def attach_murata_metastructure_labels(
         )
     else:
         n_elong = np.zeros(len(out), dtype=int)
-    out["murata_metastructure"] = classify_murata_metastructure_columns(n_open, n_elong)
+    labels = classify_murata_metastructure_columns(n_open, n_elong)
+    labels[n_open_raw.isna().to_numpy()] = None
+    out["murata_metastructure"] = labels
     return out
 
 
@@ -777,7 +783,8 @@ def snapshot_assembly_rmsd_ref(
 
 
 def occupancy_table(labels: pd.Series) -> pd.DataFrame:
-    """Percent occupancy of A/B/C1/C2/other (Murata Table 1 layout)."""
+    """Percent occupancy of A/B/C1/C2/other (Murata Table 1 layout) over labeled frames."""
+    labels = labels.dropna()
     counts = labels.astype(str).value_counts()
     n = int(len(labels))
     rows = []

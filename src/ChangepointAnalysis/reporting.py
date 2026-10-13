@@ -1672,10 +1672,35 @@ _ENDPOINT_CHANGPOINTS_PREFIX = "endpoint_changepoints_"
 _GSA_CHANGPOINTS_PREFIX = "gsa_changepoints_"
 _LOW_CONFIDENCE_N_SEGMENTS = 5
 
+# Endpoint detections at each cube's own penalty elbow. They hold no
+# endpoint_features/ of their own; they were run on the published folder's.
+OWN_ELBOW_ENDPOINT_DIRS: dict[str, str] = {
+    "BHHpH": "endpoint_changepoints_matched_BHHpH",
+    "BHHpM": "endpoint_changepoints_matched_BHHpM",
+    "BMHpH": "endpoint_changepoints_g1a_BMHpH",
+    "BMHpM": "endpoint_changepoints_matched_BMHpM",
+    "BMMpH": "endpoint_changepoints_matched_BMMpH",
+    "BMMpM": "endpoint_changepoints_g1b_BMMpM",
+}
+_OWN_ELBOW_COHORTS = {name: cube for cube, name in OWN_ELBOW_ENDPOINT_DIRS.items()}
+
+
+def endpoint_changepoints_dir(
+    output_root: Path | str,
+    cube: str,
+    *,
+    own_elbow: bool = False,
+) -> Path:
+    """Endpoint changepoints folder for *cube*: the published run, or its own-elbow run."""
+    name = OWN_ELBOW_ENDPOINT_DIRS[cube] if own_elbow else f"{_ENDPOINT_CHANGPOINTS_PREFIX}{cube}"
+    return Path(output_root) / name
+
 
 def cohort_name_from_changepoints_dir(changepoints_dir: Path | str) -> str:
     """Extract cube cohort id (e.g. ``BMMpM``) from a changepoints path."""
     name = Path(changepoints_dir).name
+    if name in _OWN_ELBOW_COHORTS:
+        return _OWN_ELBOW_COHORTS[name]
     for prefix in (_ENDPOINT_CHANGPOINTS_PREFIX, _GSA_CHANGPOINTS_PREFIX):
         if name.startswith(prefix):
             return name[len(prefix) :]

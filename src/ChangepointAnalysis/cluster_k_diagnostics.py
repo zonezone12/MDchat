@@ -23,9 +23,11 @@ from src.utils.run_log import log_event
 
 from .endpoint_features import rename_legacy_paper_d1_columns
 from .reporting import (
+    OWN_ELBOW_ENDPOINT_DIRS,
     _cohens_d_direction,
     cohort_name_from_changepoints_dir,
     collect_endpoint_segment_means,
+    endpoint_changepoints_dir,
     score_cluster_discriminating_features,
 )
 
@@ -474,7 +476,7 @@ def collect_site_and_d1(cohort_dirs: Sequence[Path | str]) -> pd.DataFrame:
     rows: list[dict] = []
     for d in cohort_dirs:
         d = Path(d)
-        feat = d / "endpoint_features"
+        feat = resolve_endpoint_features_dir(d)
         sites = _read_csv_if_exists(feat / "endpoint_sites.csv")
         d1_atoms = _read_csv_if_exists(feat / "paper_d1_atoms.csv")
         d1_segs = rename_legacy_paper_d1_columns(
@@ -648,18 +650,14 @@ def _format_txt_summary(
                 if c in sites.columns
             ]
             lines.append(sites[cols].round(3).to_string(index=False))
-        lines.extend(
-            [
-                "",
-                "Talk track",
-                "----------",
-                "- All B* cohorts have five clusters because Ward is cut at fixed k=5.",
-                "- BHHpM: global silhouette max at k=6 (balanced split of one cluster).",
-                "- BHHpH / BMHpM: global max at k=2; k=6 is a weak local bump (tiny peel).",
-                "- BMMpM: silhouette rises with k — few switches, elongated d1, nested packing.",
-                "- Do not auto-select k by silhouette for these cubes (k=2 is too coarse;",
-                "  BMHpH k=2 is an outlier trap).",
-            ]
+        lines.extend(["", "Talk track", "----------"])
+        if not peaks.empty and {"cohort", "global_max_k", "curve_shape"} <= set(peaks.columns):
+            lines.extend(
+                f"- {rec.cohort}: silhouette maximum at k={rec.global_max_k} ({rec.curve_shape})."
+                for rec in peaks.itertuples(index=False)
+            )
+        lines.append(
+            "- Silhouette is inspection-only; a k=2 maximum often just isolates a few outlier segments."
         )
     else:
         lines.extend(
@@ -923,11 +921,20 @@ def _write_k_diagnostic_plots(
 
 
 def resolve_endpoint_features_dir(changepoints_dir: Path | str) -> Path:
-    """Default ``endpoint_features/`` next to a changepoints directory."""
+    """``endpoint_features/`` next to a changepoints directory.
+
+    An own-elbow run (``OWN_ELBOW_ENDPOINT_DIRS``) without its own copy resolves
+    to its cube's published ``endpoint_changepoints_{CUBE}/endpoint_features``.
+    """
     d = Path(changepoints_dir)
     nested = d / "endpoint_features"
     if nested.is_dir():
         return nested
+    if d.name in OWN_ELBOW_ENDPOINT_DIRS.values():
+        cube = cohort_name_from_changepoints_dir(d)
+        published = endpoint_changepoints_dir(d.parent, cube) / "endpoint_features"
+        if published.is_dir():
+            return published
     return d
 
 
@@ -1524,9 +1531,17 @@ def _format_chemical_txt(long_df: pd.DataFrame, peaks: pd.DataFrame) -> str:
             "- best_chemical_k = passing k with most marked clusters; ties → smaller k.",
             "- selected_k (automatic) = max Murata NMI among chemical_separation k;",
             "  silhouette is never used to pick k.",
-            "- Silhouette-max k=2 is not chemical; default k=5 is chemical in every B* cube.",
         ]
     )
+    if {"cohort", "k", "chemical_separation"} <= set(long_df.columns):
+        for k_ref in (2, 5):
+            at_k = long_df[long_df["k"] == k_ref]
+            if at_k.empty:
+                continue
+            ok = at_k["chemical_separation"].astype(bool)
+            passing = ", ".join(at_k.loc[ok, "cohort"].astype(str)) or "none"
+            failing = ", ".join(at_k.loc[~ok, "cohort"].astype(str)) or "none"
+            lines.append(f"- k={k_ref} is chemical in: {passing}; not in: {failing}.")
     return "\n".join(lines) + "\n"
 
 

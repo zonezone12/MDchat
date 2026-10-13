@@ -17,6 +17,11 @@ To pick k automatically (chemical_separation, then max Murata-label NMI;
 silhouette is not used):
 
 python scripts/select_chemical_k.py
+
+The same scan on the clusters of the own-elbow detections:
+
+python scripts/compare_endpoint_cluster_k.py --own-elbow --chemical-scan \\
+    --out-dir output/endpoint_cluster_chemical_k_own_elbow
 """
 
 from __future__ import annotations
@@ -29,10 +34,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.ChangepointAnalysis import (
+    OWN_ELBOW_ENDPOINT_DIRS,
     compare_cluster_k_diagnostics,
     compare_endpoint_cluster_k_diagnostics,
     discover_cluster_k_cohort_dirs,
     discover_endpoint_k_cohort_dirs,
+    endpoint_changepoints_dir,
 )
 from src.utils.run_log import RunContext
 
@@ -78,6 +85,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Explicit cohort directories (overrides auto-discovery)",
+    )
+    p.add_argument(
+        "--own-elbow",
+        action="store_true",
+        help=(
+            "Endpoint group only: use the own-elbow detections "
+            "(OWN_ELBOW_ENDPOINT_DIRS) that have clustered segments"
+        ),
     )
     p.add_argument(
         "--out-dir",
@@ -152,8 +167,20 @@ def main() -> None:
     )
     out_dir = args.out_dir or Path(f"output/{group}_cluster_k_diagnostics")
 
+    if args.own_elbow and group != "endpoint":
+        print("--own-elbow applies to the endpoint group only.", file=sys.stderr)
+        sys.exit(2)
+
     if args.cohort_dirs:
         cohort_dirs = [Path(d) for d in args.cohort_dirs]
+    elif args.own_elbow:
+        candidates = [
+            endpoint_changepoints_dir(args.output_root, cube, own_elbow=True)
+            for cube in OWN_ELBOW_ENDPOINT_DIRS
+        ]
+        cohort_dirs = [
+            d for d in candidates if (d / "clusters" / "endpoint" / "segments_clustered.csv").exists()
+        ]
     elif group == "endpoint":
         cohort_dirs = discover_endpoint_k_cohort_dirs(
             Path(args.output_root),

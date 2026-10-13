@@ -18,6 +18,23 @@ from src.ChangepointAnalysis.murata_rmsd import (
 )
 
 
+def test_discover_motif_csvs_one_file_per_trajectory(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.murata_rmsd import discover_motif_rmsd_csvs_by_cube
+
+    cube_dir = tmp_path / "BMMpM_motif_rmsd" / "BMMpM"
+    mixed_dir = tmp_path / "murata_motif_rmsd" / "BMMpM"
+    cube_dir.mkdir(parents=True)
+    mixed_dir.mkdir(parents=True)
+    full = cube_dir / "891249_mdcrd_v_motif_rmsd.csv"
+    stale = mixed_dir / "BMMpM_891249_mdcrd_v_motif_rmsd.csv"
+    only_mixed = mixed_dir / "BMMpM_123465_mdcrd_v_motif_rmsd.csv"
+    for path in (full, stale, only_mixed):
+        path.write_text("traj_id,frame\n", encoding="utf-8")
+
+    found = discover_motif_rmsd_csvs_by_cube(tmp_path, cubes=["BMMpM"])
+    assert found["BMMpM"] == sorted([full.resolve(), only_mixed.resolve()])
+
+
 def test_apo_frame_mask_drops_encapsulated() -> None:
     df = pd.DataFrame(
         {

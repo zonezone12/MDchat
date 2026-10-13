@@ -9,6 +9,10 @@ Example
 python scripts/select_chemical_k.py
 python scripts/select_chemical_k.py --chem-dir output/endpoint_cluster_chemical_k \\
     --output-root output --out-dir output/endpoint_cluster_chemical_k
+
+# Clusters of the own-elbow detections instead of the published ones
+python scripts/select_chemical_k.py --own-elbow \\
+    --chem-dir output/endpoint_cluster_chemical_k_own_elbow
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from src.ChangepointAnalysis.murata_rmsd import (
     label_motif_metastructures,
     load_motif_rmsd_csvs,
 )
+from src.ChangepointAnalysis.reporting import endpoint_changepoints_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cubes", nargs="*", default=list(KNOWN_CUBES))
     p.add_argument("--k-min", type=int, default=2)
     p.add_argument("--k-max", type=int, default=10)
+    p.add_argument(
+        "--own-elbow",
+        action="store_true",
+        help="Score the clusters of the own-elbow detections (OWN_ELBOW_ENDPOINT_DIRS)",
+    )
     return p.parse_args()
 
 
@@ -103,7 +113,7 @@ def main() -> int:
     by_cube = discover_motif_rmsd_csvs_by_cube(args.output_root, cubes=args.cubes)
     nmi_parts: list[pd.DataFrame] = []
     for cube, paths in by_cube.items():
-        cp_dir = args.output_root / f"endpoint_changepoints_{cube}"
+        cp_dir = endpoint_changepoints_dir(args.output_root, cube, own_elbow=args.own_elbow)
         if not cp_dir.is_dir():
             print(f"skip {cube}: missing {cp_dir}", flush=True)
             continue

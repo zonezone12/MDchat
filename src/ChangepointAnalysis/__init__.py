@@ -70,10 +70,12 @@ from .murata_rmsd import (
 )
 from .reporting import (
     DEFAULT_TIMELINE_PANELS,
+    OWN_ELBOW_ENDPOINT_DIRS,
     benjamini_hochberg_qvalues,
     cohort_name_from_changepoints_dir,
     compare_endpoint_clusters_across_cohorts,
     compare_endpoint_clusters_to_deformation,
+    endpoint_changepoints_dir,
     permutation_eta_squared_pvalues,
     plot_breakpoint_histogram,
     plot_cluster_representative_timelines,
@@ -150,6 +152,7 @@ __all__ = [
     "IODINE_COLS",
     "METADATA_COLS",
     "NA_WATER_COLS",
+    "OWN_ELBOW_ENDPOINT_DIRS",
     "PenaltySweepConfig",
     "PenaltySweepResult",
     "REGIME_COLS",
@@ -188,6 +191,7 @@ __all__ = [
     "discover_feature_csvs",
     "discover_gsa_feature_csvs_by_cube",
     "drop_trajectories",
+    "endpoint_changepoints_dir",
     "filter_non_encapsulated",
     "find_penalty_elbow",
     "find_stable_plateaus",

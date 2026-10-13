@@ -570,20 +570,27 @@ python scripts/compare_endpoint_cluster_k.py `
 | `best_chemical_k` | Passing k with the most marked clusters (inflates with k; **not** the automatic pick) |
 | `selected_k` | Max Murata-label NMI among chemical k; silhouette never used |
 
-Different cubes need not share a k. Results from the published-penalty scan (`output/endpoint_cluster_chemical_k/`):
+Different cubes need not share a k. The paper uses the own-elbow detections, re-clustered with the assembly QC rule (`output/endpoint_cluster_chemical_k_own_elbow/`):
+
+```powershell
+python scripts/compare_endpoint_cluster_k.py --own-elbow --chemical-scan `
+  --out-dir output/endpoint_cluster_chemical_k_own_elbow
+python scripts/select_chemical_k.py --own-elbow `
+  --chem-dir output/endpoint_cluster_chemical_k_own_elbow
+```
 
 | Cohort | Silhouette max | first_chemical_k | **selected_k (NMI)** | Chemical at k=5? |
 |--------|----------------|------------------|----------------------|------------------|
-| BHHpH | k=2 | **3** | **4** (0.280) | yes |
-| BHHpM | k=6 | **3** | **3** (0.272) | yes |
-| BMHpH | k=2 (outlier trap) | **5** | **7** (0.346) | yes |
-| BMHpM | k=2 | **5** | **5** (0.534) | yes |
-| BMMpH | k=2 | **3** | **3** (0.719) | yes (window k=3–5 only) |
-| BMMpM | rising to k=10 | **4** | **9** (0.617) | yes (also 6, 9) |
+| BHHpH | k=2 | **3** | **9** (0.220) | yes |
+| BHHpM | k=8 | **4** | **4** (0.250) | no (one marked cluster) |
+| BMHpH | k=2 (one-replica split) | **4** | **4** (0.496) | no (one marked cluster) |
+| BMHpM | k=7 | **5** | **10** (0.404, scan edge) | yes |
+| BMMpH | k=7 | **3** | **3** (0.744) | yes |
+| BMMpM | rising to k=10 | **4** | **4** (0.593) | no (only k=4 passes) |
 
-Silhouette-max k=2 never has chemical_separation. Default k=5 does, in every cube, and remains the G5 comparability cut; it is the NMI pick only for BMHpM. BMMpM is not empty of discrete cuts — it first splits at k=4 on methyl-site packings (`M2S2–M3S3` at k=5) — but silhouette keeps climbing while chemistry is intermittent. AMI agrees with NMI on every selected k.
+Silhouette-max k=2 still never has chemical_separation. k=5 is no longer chemical in every cube, so it is a comparability cut only. BMHpM's NMI is still rising at k=10, so its pick is bounded by the scan range. BMHpH's k=2 split is one replica (`157923`) whose cage loosens over its last 2.6 ns without disconnecting. BMMpM has one chemical cut (k=4) while silhouette keeps climbing. AMI agrees with NMI on every selected k.
 
-This scan uses **published-penalty** `by_k/` labels. Own-elbow detections were not re-clustered.
+The earlier published-penalty scan (`output/endpoint_cluster_chemical_k/`) selected 4, 3, 7, 5, 3, 9 and passed at k=5 in every cube. It is superseded: different segments, and its NMI counted frames from stale motif CSVs as "other".
 
 ---
 

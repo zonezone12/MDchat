@@ -988,6 +988,27 @@ def test_summarize_endpoint_cluster_proxies_schema(tmp_path: Path) -> None:
     assert "deformation_rank" in cross.columns
 
 
+def test_own_elbow_dir_maps_to_cube_and_published_features(tmp_path: Path) -> None:
+    from src.ChangepointAnalysis.cluster_k_diagnostics import resolve_endpoint_features_dir
+    from src.ChangepointAnalysis.reporting import (
+        OWN_ELBOW_ENDPOINT_DIRS,
+        cohort_name_from_changepoints_dir,
+        endpoint_changepoints_dir,
+    )
+
+    own = endpoint_changepoints_dir(tmp_path, "BMHpH", own_elbow=True)
+    assert own.name == OWN_ELBOW_ENDPOINT_DIRS["BMHpH"]
+    assert endpoint_changepoints_dir(tmp_path, "BMHpH").name == "endpoint_changepoints_BMHpH"
+    assert cohort_name_from_changepoints_dir(own) == "BMHpH"
+
+    own.mkdir()
+    published_feat = endpoint_changepoints_dir(tmp_path, "BMHpH") / "endpoint_features"
+    published_feat.mkdir(parents=True)
+    assert resolve_endpoint_features_dir(own) == published_feat
+    (own / "endpoint_features").mkdir()
+    assert resolve_endpoint_features_dir(own) == own / "endpoint_features"
+
+
 def _write_k_diag_cohort(
     root: Path,
     name: str,

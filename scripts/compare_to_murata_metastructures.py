@@ -3,7 +3,8 @@
 Labels every motif frame A/B/C1/C2/other from pole π ≥ 6.5 Å and elongated
 d1 ≥ 7.0 Å, then compares the three mapped cohorts (BMMpM=1₆, BMHpM=2₆,
 BHHpM=3₆). 2₆′ has no cohort here. Optionally cross-tabulates Murata labels
-against stored endpoint cluster labels. Replicas failing the assembly QC rule
+against stored endpoint cluster labels, and writes each cluster's make-up by
+elongated-d1 and opened-π counts. Replicas failing the assembly QC rule
 (Rg > 15 Å or a lost monomer, from ``--qc-gsa-root/{CUBE}``) are dropped first
 unless ``--no-assembly-qc`` is given.
 
@@ -11,6 +12,14 @@ Example
 -------
 python scripts/compare_to_murata_metastructures.py
 python scripts/compare_to_murata_metastructures.py --output-root output --out-dir output/murata_g5
+
+# Cross-tabulate against the clusters of the own-elbow detections
+python scripts/compare_to_murata_metastructures.py --own-elbow --out-dir output/murata_g5_own_elbow
+
+# ... at each cube's G3-selected k instead of the stored k=5 cut
+python scripts/compare_to_murata_metastructures.py --own-elbow \
+    --k-selected output/endpoint_cluster_chemical_k_own_elbow/chemical_k_selected.csv \
+    --out-dir output/murata_g5_own_elbow_selected_k
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from src.ChangepointAnalysis.assembly_qc import (
     drop_trajectories,
     scan_assembly_qc_dir,
 )
+from src.ChangepointAnalysis.cluster_k_diagnostics import chosen_k_from_cohort, load_segments_at_k
 from src.ChangepointAnalysis.gsa_cohort_run import KNOWN_CUBES
 from src.ChangepointAnalysis.murata_criteria import (
     COHORT_TO_MURATA_SYSTEM,
@@ -44,6 +54,7 @@ from src.ChangepointAnalysis.murata_rmsd import (
     label_motif_metastructures,
     load_motif_rmsd_csvs,
 )
+from src.ChangepointAnalysis.reporting import endpoint_changepoints_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +74,22 @@ def parse_args() -> argparse.Namespace:
         "--no-assembly-qc",
         action="store_true",
         help="Keep replicas that fail the assembly QC rule",
+    )
+    p.add_argument(
+        "--own-elbow",
+        action="store_true",
+        help="Read endpoint clusters from the own-elbow detections (OWN_ELBOW_ENDPOINT_DIRS)",
+    )
+    k_choice = p.add_mutually_exclusive_group()
+    k_choice.add_argument(
+        "--k",
+        type=int,
+        help="Cross-tabulate the Ward cut at this k (default: the stored clustering)",
+    )
+    k_choice.add_argument(
+        "--k-selected",
+        type=Path,
+        help="chemical_k_selected.csv from select_chemical_k.py; use each cube's selected_k",
     )
     return p.parse_args()
 
@@ -93,6 +120,33 @@ def _assign_endpoint_clusters(
             lab[m] = rec.cluster_label
         out.loc[mask, "cluster_label"] = lab
     return out.drop(columns=["_tid"])
+
+
+def _cluster_composition(joined: pd.DataFrame, *, cube: str, k: int) -> pd.DataFrame:
+    """Per endpoint cluster: % of its apo frames by elongated-d1 and opened-π counts.
+
+    ``pct_of_intact_belt`` is the share of the cohort's frames with no elongated
+    d1 that fall in the cluster.
+    """
+    joined = joined[joined["murata_metastructure"].notna()]
+    labels = joined["cluster_label"].astype(int)
+    intact = labels[pd.to_numeric(joined["murata_d1_n_elongated"], errors="coerce") == 0]
+    parts = [
+        labels.value_counts().sort_index().rename("n_frames"),
+        (100.0 * intact.value_counts(normalize=True)).rename("pct_of_intact_belt"),
+    ]
+    for col, prefix in (("murata_d1_n_elongated", "pct_d1_elongated"), ("n_open_cation_pi", "pct_open")):
+        cap = 2 if prefix == "pct_d1_elongated" else 3
+        counts = pd.to_numeric(joined[col], errors="coerce").clip(upper=cap).astype(int)
+        share = pd.crosstab(labels, counts, normalize="index").reindex(columns=range(cap + 1), fill_value=0.0)
+        share.columns = [f"{prefix}_{c}" if c < cap else f"{prefix}_{c}plus" for c in share.columns]
+        parts.append(100.0 * share)
+    out = pd.concat(parts, axis=1).rename_axis("cluster_label").reset_index()
+    out["pct_of_intact_belt"] = out["pct_of_intact_belt"].fillna(0.0)
+    out.insert(0, "k", k)
+    out.insert(0, "murata_system", COHORT_TO_MURATA_SYSTEM[cube])
+    out.insert(0, "cohort", cube)
+    return out
 
 
 def plot_occupancy_vs_murata(cmp: pd.DataFrame, output_path: Path) -> Path:
@@ -134,9 +188,14 @@ def main() -> int:
         print(f"No *_motif_rmsd.csv under {args.output_root}", flush=True)
         return 1
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    selected_k: dict[str, int] = {}
+    if args.k_selected is not None:
+        sel = pd.read_csv(args.k_selected)
+        selected_k = dict(zip(sel["cohort"].astype(str), sel["selected_k"].astype(int)))
     occupancy_rows: list[pd.DataFrame] = []
     xtab_rows: list[pd.DataFrame] = []
     other_rows: list[pd.DataFrame] = []
+    composition_rows: list[pd.DataFrame] = []
     qc_rows: list[pd.DataFrame] = []
 
     for cube, paths in by_cube.items():
@@ -166,17 +225,17 @@ def main() -> int:
                     guest_filter=name,
                 )
             )
-        segs_path = (
-            args.output_root
-            / f"endpoint_changepoints_{cube}"
-            / "clusters"
-            / "endpoint"
-            / "segments_clustered.csv"
-        )
-        if cube not in COHORT_TO_MURATA_SYSTEM or not segs_path.is_file():
+        cp_dir = endpoint_changepoints_dir(args.output_root, cube, own_elbow=args.own_elbow)
+        if cube not in COHORT_TO_MURATA_SYSTEM or not (cp_dir / "clusters" / "endpoint").is_dir():
+            continue
+        if args.k_selected is not None and cube not in selected_k:
+            print(f"  {cube}: not in {args.k_selected}, using the stored clustering", flush=True)
+        k = args.k or selected_k.get(cube) or chosen_k_from_cohort(cp_dir, group="endpoint")
+        segs = load_segments_at_k(cp_dir, k, group="endpoint")
+        if segs.empty:
+            print(f"  {cube}: no endpoint clustering at k={k}", flush=True)
             continue
         apo = filter_non_encapsulated(df, traj_filter="frames")
-        segs = pd.read_csv(segs_path, usecols=["traj_id", "group", "start_frame", "end_frame", "cluster_label"])
         joined = _assign_endpoint_clusters(apo, segs, cube=cube)
         joined = joined.dropna(subset=["cluster_label"])
         if joined.empty:
@@ -189,7 +248,9 @@ def main() -> int:
         xtab = xtab.reindex(METASTRUCTURES)
         xtab.insert(0, "cohort", cube)
         xtab.insert(1, "murata_system", COHORT_TO_MURATA_SYSTEM[cube])
+        xtab.insert(2, "k", k)
         xtab_rows.append(xtab.reset_index())
+        composition_rows.append(_cluster_composition(joined, cube=cube, k=k))
         other = joined[joined["murata_metastructure"] == "other"]
         if not other.empty:
             counts = other["cluster_label"].astype(int).value_counts(normalize=True).sort_index()
@@ -198,6 +259,7 @@ def main() -> int:
                     {
                         "cohort": cube,
                         "murata_system": COHORT_TO_MURATA_SYSTEM[cube],
+                        "k": k,
                         "cluster_label": counts.index.astype(int),
                         "percent_of_other": 100.0 * counts.to_numpy(),
                         "n_other_frames": int(len(other)),
@@ -251,6 +313,10 @@ def main() -> int:
         other_path = args.out_dir / "murata_other_vs_endpoint_cluster.csv"
         pd.concat(other_rows, ignore_index=True).to_csv(other_path, index=False)
         print(f"wrote {other_path}", flush=True)
+    if composition_rows:
+        comp_path = args.out_dir / "endpoint_cluster_composition.csv"
+        pd.concat(composition_rows, ignore_index=True).to_csv(comp_path, index=False)
+        print(f"wrote {comp_path}", flush=True)
     return 0
 
 
