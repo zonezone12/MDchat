@@ -1139,6 +1139,7 @@ def scan_cohort_chemical_k(
     random_state: int = 0,
     top_n: int = 10,
     min_cluster_size: int = 5,
+    max_top_replica_share: Optional[float] = None,
     min_abs_d: float = 0.5,
     features_suffix: Optional[str] = None,
 ) -> pd.DataFrame:
@@ -1187,6 +1188,12 @@ def scan_cohort_chemical_k(
     for k in range(int(k_min), int(k_max) + 1):
         segs_k = load_segments_at_k(d, k, group=group)
         sizes = _cluster_size_map(segs_k)
+        shares = top_replica_frame_shares(segs_k)
+        dominated = sorted(
+            c for c, share in shares.items()
+            if max_top_replica_share is not None and share >= float(max_top_replica_share)
+        )
+        gate_sizes = {c: (0 if c in dominated else n) for c, n in sizes.items()}
         y_k = _align_labels_to_keys(keys, segs_k)
         ranking = pd.DataFrame()
         if y_k is not None and len(set(int(v) for v in y_k.tolist())) >= 2:
@@ -1202,7 +1209,7 @@ def scan_cohort_chemical_k(
             )
         chem = assess_chemical_separation(
             ranking,
-            sizes,
+            gate_sizes,
             fdr_alpha=float(fdr_alpha),
             top_n=int(top_n),
             min_cluster_size=int(min_cluster_size),
@@ -1218,9 +1225,23 @@ def scan_cohort_chemical_k(
                 "n_segments": int(sum(sizes.values()) if sizes else 0),
                 "cluster_sizes": ",".join(str(sizes[c]) for c in sorted(sizes)),
                 **chem,
+                "max_top_replica_share": (
+                    float(max_top_replica_share) if max_top_replica_share is not None else np.nan
+                ),
+                "single_replica_clusters": ",".join(str(c) for c in dominated),
             }
         )
     return pd.DataFrame(rows)
+
+
+def top_replica_frame_shares(segments: pd.DataFrame) -> dict[int, float]:
+    """Per cluster, the share of its frames that come from its largest single replica."""
+    if segments.empty or not {"cluster_label", "traj_id", "n_frames"} <= set(segments.columns):
+        return {}
+    frames = segments.groupby(["cluster_label", "traj_id"])["n_frames"].sum()
+    totals = frames.groupby(level=0).sum()
+    tops = frames.groupby(level=0).max()
+    return {int(c): float(tops[c] / totals[c]) for c in totals.index if totals[c] > 0}
 
 
 def _chemical_flag(series: pd.Series) -> pd.Series:
@@ -2102,6 +2123,7 @@ def scan_chemical_separation_by_k(
     random_state: int = 0,
     top_n: int = 10,
     min_cluster_size: int = 5,
+    max_top_replica_share: Optional[float] = None,
     min_abs_d: float = 0.5,
     features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
@@ -2125,6 +2147,7 @@ def scan_chemical_separation_by_k(
             random_state=random_state,
             top_n=top_n,
             min_cluster_size=min_cluster_size,
+            max_top_replica_share=max_top_replica_share,
             min_abs_d=min_abs_d,
             features_suffix=features_suffix,
         )
@@ -2167,6 +2190,7 @@ def compare_cluster_k_diagnostics(
     fdr_alpha: float = 0.05,
     random_state: int = 0,
     min_cluster_size: int = 5,
+    max_top_replica_share: Optional[float] = None,
     features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
     """Write silhouette / switching / geometry tables and plots for B* cohorts."""
@@ -2243,6 +2267,7 @@ def compare_cluster_k_diagnostics(
             fdr_alpha=fdr_alpha,
             random_state=random_state,
             min_cluster_size=min_cluster_size,
+            max_top_replica_share=max_top_replica_share,
             features_suffix=features_suffix,
         )
         written.update(chem_written)
@@ -2268,6 +2293,7 @@ def compare_endpoint_cluster_k_diagnostics(
     fdr_alpha: float = 0.05,
     random_state: int = 0,
     min_cluster_size: int = 5,
+    max_top_replica_share: Optional[float] = None,
     features_suffix: Optional[str] = None,
 ) -> dict[str, Path]:
     """Write silhouette / switching / d1 tables and plots for B* endpoint cohorts."""
@@ -2285,5 +2311,6 @@ def compare_endpoint_cluster_k_diagnostics(
         fdr_alpha=fdr_alpha,
         random_state=random_state,
         min_cluster_size=min_cluster_size,
+        max_top_replica_share=max_top_replica_share,
         features_suffix=features_suffix,
     )

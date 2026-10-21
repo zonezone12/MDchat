@@ -155,3 +155,44 @@ def cluster_feature_margins(
     )
     order = np.argsort(-np.abs(out["margin"].to_numpy()), kind="stable")
     return out.iloc[order].reset_index(drop=True)
+
+
+def isolated_replicas_by_k(
+    segments_by_k: dict[int, pd.DataFrame],
+    *,
+    min_top_share: float = 0.5,
+    group: str = "endpoint",
+) -> pd.DataFrame:
+    """Replicas the clustering isolates: per k, clusters whose largest replica holds ``min_top_share`` of the frames.
+
+    One row per (k, flagged cluster), with the replica, its frame share, the
+    cluster size, and the first and last frame of the replica's segments in
+    that cluster. A replica that is isolated across many k is an outlier run,
+    not a state shared by the ensemble.
+    """
+    rows: list[dict] = []
+    for k in sorted(segments_by_k):
+        segs = segments_by_k[k]
+        comp = cluster_replica_composition(segs, group=group)
+        if comp.empty:
+            continue
+        flagged = comp[comp["top_traj_frame_share"] >= float(min_top_share)]
+        segs = _group_rows(segs, group)
+        for rec in flagged.itertuples(index=False):
+            own = segs[
+                (segs["cluster_label"] == rec.cluster_label) & (segs["traj_id"].astype(str) == str(rec.top_traj))
+            ]
+            rows.append(
+                {
+                    "k": int(k),
+                    "cluster_label": int(rec.cluster_label),
+                    "traj_id": str(rec.top_traj),
+                    "top_traj_frame_share": float(rec.top_traj_frame_share),
+                    "cluster_n_segments": int(rec.n_segments),
+                    "cluster_n_traj": int(rec.n_traj),
+                    "replica_n_segments": int(len(own)),
+                    "window_first_frame": int(own["start_frame"].min()) if len(own) else -1,
+                    "window_last_frame": int(own["end_frame"].max()) if len(own) else -1,
+                }
+            )
+    return pd.DataFrame(rows)

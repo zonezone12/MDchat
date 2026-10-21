@@ -152,6 +152,15 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Ignore clusters smaller than this when scoring chemical splits (default: 5)",
     )
+    p.add_argument(
+        "--max-top-replica-share",
+        type=float,
+        default=None,
+        help=(
+            "Also ignore clusters whose largest single replica holds at least this share "
+            "of their frames (e.g. 0.5): one run's excursion is not a chemical state"
+        ),
+    )
     return p.parse_args()
 
 
@@ -219,6 +228,7 @@ def main() -> None:
                 n_permutations=args.n_permutations,
                 fdr_alpha=args.fdr_alpha,
                 min_cluster_size=args.min_cluster_size,
+                max_top_replica_share=args.max_top_replica_share,
             )
         else:
             written = compare_cluster_k_diagnostics(

@@ -8,7 +8,21 @@ from src.ChangepointAnalysis.cluster_k_diagnostics import (
     cluster_sufficient_stats,
     held_out_geometry_columns,
     select_k_one_se,
+    top_replica_frame_shares,
 )
+
+
+def test_top_replica_frame_shares_flags_a_one_run_cluster():
+    segs = pd.DataFrame(
+        {
+            "cluster_label": [0, 0, 0, 1, 1, 1],
+            "traj_id": ["a", "a", "a", "a", "b", "c"],
+            "n_frames": [100, 200, 300, 100, 100, 200],
+        }
+    )
+    shares = top_replica_frame_shares(segs)
+    assert shares[0] == 1.0  # three segments, all from run "a"
+    assert shares[1] == 0.5
 
 
 def _direct_r2(z, labels):

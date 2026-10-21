@@ -77,3 +77,32 @@ def test_cluster_feature_margins_signed_and_sorted() -> None:
     assert list(margins["margin"]) == pytest.approx([4.0, -2.0, 0.0])
     assert margins.loc[0, "cluster_mean"] == pytest.approx(20.0)
     assert cluster_feature_margins(segs, 7).empty
+
+
+def test_isolated_replicas_by_k_tracks_one_run_across_cuts():
+    import pandas as pd
+
+    from src.ChangepointAnalysis.cluster_replicas import isolated_replicas_by_k
+
+    def segs(labels):
+        # run "a" has two 100-frame segments; runs b-f one 300-frame segment each
+        return pd.DataFrame(
+            {
+                "traj_id": ["a", "a", "b", "c", "d", "e", "f"],
+                "segment_id": [0, 1, 0, 0, 0, 0, 0],
+                "start_frame": [0, 500, 0, 0, 0, 0, 0],
+                "end_frame": [495, 995, 995, 995, 995, 995, 995],
+                "n_frames": [100, 100, 300, 300, 300, 300, 300],
+                "cluster_label": labels,
+            }
+        )
+
+    # k=2: run a sits inside a multi-run cluster. k=3: its second half becomes a cluster of its own.
+    out = isolated_replicas_by_k(
+        {2: segs([0, 0, 0, 0, 1, 1, 1]), 3: segs([0, 2, 0, 0, 1, 1, 1])},
+        min_top_share=0.5,
+    )
+    assert out["k"].tolist() == [3]
+    row = out.iloc[0]
+    assert row["traj_id"] == "a" and row["top_traj_frame_share"] == 1.0
+    assert (row["window_first_frame"], row["window_last_frame"]) == (500, 995)
