@@ -10,49 +10,241 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from itertools import combinations, permutations
 
 import numpy as np
 
-COPY_R = 0.90
+COPY_R = 0.95
 _CONTACT_PAIR_RE = re.compile(r"_e\d+_M(\d+)-M(\d+)$")
 COMPACT_A_PCT = 90.0
 MOSTLY_COMPACT_A_PCT = 50.0
 INTACT_BELT_ELONGATED_PCT = 15.0
 CLEAN_EDGE_PCT = 50.0
 OPEN_POLE_PCT = 40.0
+N_MONOMERS = 6
+
+# Directed pole sandwiches and equatorial d1 edges of the six-monomer cage.
+DEFAULT_POLE_EDGES: frozenset[tuple[int, int]] = frozenset(
+    {(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)}
+)
+DEFAULT_D1_EDGES: frozenset[tuple[int, int]] = frozenset(
+    {(0, 4), (1, 5), (2, 3), (3, 1), (4, 2), (5, 0)}
+)
+CUBE_ADJACENCY: frozenset[frozenset[int]] = frozenset(
+    frozenset(pair) for pair in (DEFAULT_POLE_EDGES | DEFAULT_D1_EDGES)
+)
+# Octahedron vertices matching the contact graph (opposite = i ↔ i+3).
+OCTAHEDRON_COORDS = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, -1.0],
+    ],
+    dtype=float,
+)
+INVERSION_PERM: tuple[int, ...] = (3, 4, 5, 0, 1, 2)
+BELT_SIX_CYCLE: tuple[int, ...] = (4, 5, 3, 1, 2, 0)  # (0 4 2 3 1 5)
 
 
 def family_ids(
     labels: Sequence[int],
     pairs: Sequence[tuple[int, int, float]],
     threshold: float = COPY_R,
+    *,
+    linkage: str = "single",
 ) -> dict[int, int]:
     """Map each cluster to the smallest label in its orientation family.
 
     An edge joins two clusters when their best-relabelled profile correlation
-    is at least ``threshold``. Families are the connected components
-    (single linkage).
+    is at least ``threshold``. ``linkage='single'`` takes connected components.
+    ``linkage='complete'`` merges two groups only when every cross pair meets
+    the threshold (the farthest pair in the family stays above it).
     """
-    parent = {int(label): int(label) for label in labels}
+    method = str(linkage).strip().lower()
+    if method not in {"single", "complete"}:
+        raise ValueError("linkage must be 'single' or 'complete'")
 
-    def find(node: int) -> int:
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
-        return node
+    ids = [int(label) for label in labels]
+    if method == "single":
+        parent = {label: label for label in ids}
 
+        def find(node: int) -> int:
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for a, b, score in pairs:
+            if float(score) < threshold:
+                continue
+            a, b = int(a), int(b)
+            if a not in parent or b not in parent:
+                continue
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            keep, drop = (ra, rb) if ra < rb else (rb, ra)
+            parent[drop] = keep
+        return {label: find(label) for label in parent}
+
+    r_of: dict[tuple[int, int], float] = {}
     for a, b, score in pairs:
-        if float(score) < threshold:
-            continue
         a, b = int(a), int(b)
-        if a not in parent or b not in parent:
+        r_of[(a, b)] = float(score)
+        r_of[(b, a)] = float(score)
+    groups: dict[int, set[int]] = {label: {label} for label in ids}
+    while True:
+        best: tuple[float, int, int] | None = None
+        keys = list(groups)
+        for a, b in combinations(keys, 2):
+            cross = [
+                r_of.get((x, y), float("-inf"))
+                for x in groups[a]
+                for y in groups[b]
+            ]
+            min_r = min(cross) if cross else float("-inf")
+            if min_r >= threshold and (best is None or min_r > best[0]):
+                best = (min_r, a, b)
+        if best is None:
+            break
+        _, a, b = best
+        keep, drop = (a, b) if a < b else (b, a)
+        groups[keep] |= groups[drop]
+        del groups[drop]
+    out: dict[int, int] = {}
+    for members in groups.values():
+        head = min(members)
+        for label in members:
+            out[label] = head
+    return out
+
+
+def perm_cycles(perm: Sequence[int]) -> str:
+    """Cycle notation of a monomer permutation, or ``identity``."""
+    seen: set[int] = set()
+    parts = []
+    for start in range(len(perm)):
+        if start in seen or int(perm[start]) == start:
             continue
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            continue
-        keep, drop = (ra, rb) if ra < rb else (rb, ra)
-        parent[drop] = keep
-    return {label: find(label) for label in parent}
+        cycle = [start]
+        seen.add(start)
+        nxt = int(perm[start])
+        while nxt != start:
+            cycle.append(nxt)
+            seen.add(nxt)
+            nxt = int(perm[nxt])
+        parts.append("(" + " ".join(str(m) for m in cycle) + ")")
+    return "".join(parts) or "identity"
+
+
+def contact_automorphisms(
+    *edge_maps: Mapping[str, tuple],
+) -> list[tuple[int, ...]]:
+    """Monomer permutations that map each directed contact set onto itself.
+
+    With no arguments, uses :data:`DEFAULT_POLE_EDGES` and
+    :data:`DEFAULT_D1_EDGES`. Each positional argument is a motif-column map
+    ``{col: (edge, mon_a, mon_b)}`` as in ``describe_endpoint_clusters``.
+    """
+    if edge_maps:
+        edge_sets = [{(int(a), int(b)) for _, a, b in edges.values()} for edges in edge_maps]
+        monomers = sorted({m for edges in edge_sets for pair in edges for m in pair})
+    else:
+        edge_sets = [set(DEFAULT_POLE_EDGES), set(DEFAULT_D1_EDGES)]
+        monomers = list(range(N_MONOMERS))
+    found = []
+    for image in permutations(monomers):
+        perm = dict(zip(monomers, image))
+        if all({(perm[a], perm[b]) for a, b in edges} == edges for edges in edge_sets):
+            found.append(tuple(perm[m] for m in monomers))
+    return found
+
+
+def adjacency_automorphisms(n: int = N_MONOMERS) -> list[tuple[int, ...]]:
+    """The 48 face-adjacency automorphisms of the six-monomer cage."""
+    if int(n) != N_MONOMERS:
+        raise ValueError("adjacency_automorphisms is defined for six monomers")
+    found = []
+    for image in permutations(range(N_MONOMERS)):
+        mapped = {frozenset((image[a], image[b])) for a, b in CUBE_ADJACENCY}
+        if mapped == CUBE_ADJACENCY:
+            found.append(tuple(image))
+    return found
+
+
+def is_proper_permutation(perm: Sequence[int]) -> bool:
+    """True when *perm* is realized by a rotation of the octahedron (det +1)."""
+    p = np.asarray(perm, dtype=int)
+    coords = OCTAHEDRON_COORDS
+    target = coords[p]
+    h = coords.T @ target
+    u, _s, vt = np.linalg.svd(h)
+    rot = vt.T @ u.T
+    return float(np.linalg.det(rot)) >= 0.0
+
+
+def rotation_contact_automorphisms(
+    *edge_maps: Mapping[str, tuple],
+) -> list[tuple[int, ...]]:
+    """Contact-graph automorphisms that are proper rotations."""
+    return [perm for perm in contact_automorphisms(*edge_maps) if is_proper_permutation(perm)]
+
+
+def _map_site(
+    site_map: Sequence[int] | Mapping | np.ndarray | None,
+    monomer: int,
+    site: int,
+) -> int:
+    if site_map is None:
+        return int(site)
+    if isinstance(site_map, Mapping):
+        if monomer in site_map:
+            mapped = site_map[monomer]
+            if isinstance(mapped, Mapping):
+                return int(mapped.get(site, site))
+            return int(np.asarray(mapped)[site])
+        if site in site_map:
+            return int(site_map[site])
+        return int(site)
+    arr = np.asarray(site_map)
+    if arr.ndim == 1:
+        return int(arr[site])
+    return int(arr[monomer, site])
+
+
+def site_pair_column_permutation(
+    specs: Sequence[tuple],
+    perm: Sequence[int],
+    *,
+    site_map: Sequence[int] | Mapping | np.ndarray | None = None,
+) -> np.ndarray:
+    """Column indices that apply *perm* (and optional *site_map*) to *specs*.
+
+    ``specs`` are ``(name, mon_i, site_a, mon_j, site_b)``. Index ``k`` of the
+    result is the column of the spec that *perm* sends onto spec ``k``, so
+    ``y[mapped]`` is ``y`` after the relabelling. Missing images are ``-1``.
+    """
+    col_of: dict[tuple[int, int, int, int], int] = {}
+    parsed: list[tuple[int, int, int, int]] = []
+    for col, spec in enumerate(specs):
+        if len(spec) >= 5:
+            _name, i, a, j, b = spec[:5]
+        else:
+            raise ValueError("site-pair specs must be (name, i, a, j, b)")
+        i, a, j, b = int(i), int(a), int(j), int(b)
+        parsed.append((i, a, j, b))
+        col_of[(i, a, j, b)] = col
+        col_of[(j, b, i, a)] = col
+    p = [int(x) for x in perm]
+    mapped = np.full(len(parsed), -1, dtype=int)
+    for k, (i, a, j, b) in enumerate(parsed):
+        ia = _map_site(site_map, i, a)
+        jb = _map_site(site_map, j, b)
+        mapped[k] = col_of.get((p[i], ia, p[j], jb), -1)
+    return mapped
 
 
 def _ranked(row: Mapping, prefix: str) -> list[tuple[str, float]]:

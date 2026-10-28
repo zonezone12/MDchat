@@ -27,6 +27,38 @@ def _row(**overrides):
     return base
 
 
+def test_family_ids_missing_pairs_cannot_merge():
+    # A cluster that was never compared has no edges, so it stays its own family.
+    families = family_ids(
+        [0, 1, 3, 5, 9],
+        [(0, 1, 0.99)],
+        threshold=0.90,
+    )
+    assert families[0] == families[1] == 0
+    assert families[3] == 3 and families[5] == 5 and families[9] == 9
+
+
+def test_family_ids_all_pairs_at_copy_r_keeps_intact_clusters_apart():
+    # BMHpM-like: six belt-break copies plus three intact clusters that only
+    # meet the belt at r 0.91–0.93. The catalog threshold is 0.95.
+    labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    belt = [1, 2, 4, 6, 7, 8]
+    pairs = []
+    for i, a in enumerate(belt):
+        for b in belt[i + 1 :]:
+            pairs.append((a, b, 0.90 if {a, b} == {2, 7} else 0.97))
+    for intact in (3, 5, 9):
+        pairs.append((1, intact, 0.92))
+        pairs.append((2, intact, 0.91))
+    at_old = family_ids(labels, pairs, threshold=0.90)
+    at_new = family_ids(labels, pairs, threshold=0.95)
+    assert len(set(at_old.values())) == 2
+    assert len(set(at_new.values())) == 5
+    assert at_new[1] == at_new[2] == at_new[7]
+    assert at_new[3] == 3 and at_new[5] == 5 and at_new[9] == 9
+    assert at_new[0] == 0
+
+
 def test_family_ids_merge_a_chain_and_keep_a_weak_pair_apart():
     # 0–1 and 1–2 are copies; 0–2 is only related. Single linkage still joins them.
     # Cluster 3 stays apart.

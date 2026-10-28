@@ -134,9 +134,11 @@ A small p-value means the pair tracks these labels more tightly than a chance as
 
 The p-value calibrates the ranking given the labels. It does not check that the clustering itself was found independently of the endpoint distances. Those clusters were built from monomer-pair summaries of the same distances, so some association is already built in. Which pairs carry the between-cluster difference, beyond a random labeling, is what the shuffle answers. Whether the partition is worth keeping was already decided by the chemical gate and the held-out cage-geometry score in section 3.
 
-Ward keeps the monomer numbering, so one deformation is often stored as several clusters, one for each symmetry-related orientation. To recognize those copies, each cluster is given a deformation profile: the mean change, in ångströms, of every site pair relative to the other clusters of the same cube. The profile is a vector in the endpoint distances, not in d1 or π. Two profiles are compared as labeled, and again after every monomer relabeling that preserves the cage's directed contact graph (the six pole sandwiches and the six equatorial edges; six such relabelings exist). The Pearson correlation after the best relabeling is the symmetry-aware similarity.
+Ward keeps the monomer numbering, so one deformation is often stored as several clusters, one for each symmetry-related orientation. To recognize those copies, each cluster is given a deformation profile: the mean change, in ångströms, of every site pair relative to the mean of all clustered segments of that cube. The profile is a vector in the endpoint distances, not in d1 or π. Two profiles are compared as labeled, and again after every monomer relabeling that preserves the cage's directed contact graph (the six pole sandwiches and the six equatorial edges; six such relabelings exist). The Pearson correlation after the best relabeling is the symmetry-aware similarity. Every pair of clusters of the cube is scored. The merge does not depend on which clusters `describe_endpoint_clusters.py --clusters` contrasted for the site-pair ranking.
 
-Clusters of the same cube whose best-relabelled correlation is at least 0.90 are treated as one structure. The link is single-linkage, so a chain of pairs above 0.90 becomes one family even when the farthest pair is weaker. The family is named by its smallest cluster integer. This merge is what reduces 31 clusters to 19 structures: 3, 2, 4, 5, 3, and 2 for BHHpH through BMMpM. The occupancy of a structure is the sum of its clusters' apo-frame shares inside that cube.
+Clusters of the same cube whose best-relabelled correlation is at least 0.95 are treated as one structure. The link is single-linkage, so a chain of pairs above 0.95 becomes one family even when the farthest pair is weaker. The family is named by its smallest cluster integer. This merge reduces 31 clusters to 22 structures: 4, 3, 4, 5, 3, and 3 for BHHpH through BMMpM. The occupancy of a structure is the sum of its clusters' apo-frame shares inside that cube.
+
+A lower line at 0.90 would still keep BMHpM's six belt-break orientations, but it would also join that family to the intact clusters 3, 5 and 9 (the strongest links are 3–9 at 0.95, 7–9 at 0.91 and 3–7 at 0.89). The 0.95 line leaves those intact clusters as their own structures and still joins the six belt-break copies, whose weakest pair is 7–8 at 0.89 and which join through stronger neighbours (4–7 at 0.96, 1–8 at 0.99). An earlier catalog of 19 structures used 0.90 and only the pairs that had been contrasted. For BMHpM those were clusters 1, 2, 4, 6, 7 and 8, so 3, 5 and 9 could not merge. That count mixed the rule with the contrast set. The numbers in section 7 use all-cluster correlations at 0.95.
 
 ## 5. Mapping onto Murata's classification
 
@@ -170,57 +172,59 @@ A cluster in which one replica holds half or more of the frames but which is an 
 
 ## 7. Results at the label-free k
 
-These results were regenerated on 14 October 2026 with the replica-aware gate of section 3, which moved BMHpH from k = 4 to k = 6; the other five cubes keep their k and their rows. Each table ranks one cube's structures by their share of that cube's apo frames inside clustered segments. Rows are not matched across cubes. The A / B / C1 / C2 / other columns are Murata's frame labels from section 5, averaged over the structure's apo frames. The segment-majority columns count every segment, with no 5% floor. A broken-belt segment is one whose majority belt has at least one elongated edge.
+These results were regenerated on 28 October 2026 with the all-cluster orientation merge of section 4 (r ≥ 0.95). The replica-aware gate of section 3, from 14 October 2026, still sets k at 4, 4, 6, 10, 3 and 4. Each table ranks one cube's structures by their share of that cube's apo frames inside clustered segments. Rows are not matched across cubes. The A / B / C1 / C2 / other columns are Murata's frame labels from section 5, averaged over the structure's apo frames. The segment-majority columns count every segment, with no 5% floor. A broken-belt segment is one whose majority belt has at least one elongated edge.
 
 ### Across the six cubes
 
 Three patterns run across the six cubes. They compare how each cube's own structures look; they do not claim that a structure in one cube is a structure of another.
 
 1. A compact cage (at least 90% A frames, essentially no elongated d1) appears only in the four cubes with equatorial methyls. It holds 90.4% of BMMpH, 76.2% of BMMpM, 42.3% of BMHpH and 38.5% of BMHpM. BHHpH and BHHpM have no such structure. Their intact-belt structures (14.5% and 23.1%) are only 27–32% A, because pole contacts open while the belt holds.
-2. Where the belt breaks often, it breaks as one deformation seen in several orientations: two in BHHpH, three in BHHpM, six in BMHpM (one per equatorial edge), and three in BMMpM, where broken segments sit beside intact ones with one pole open. BMHpH has two belt-break structures, each in two orientations (r = 0.99 within each); the two match each other at r = 0.80–0.82, below the 0.90 merge line, so they stay separate. In BMMpH the belt breaks in only 20% of one small cluster, so there is nothing to merge.
+2. Where the belt breaks often, it breaks as one deformation seen in several orientations: two in BHHpM (clusters 1 and 3, r = 0.96), six in BMHpM (one per equatorial edge; weakest pair 0.89, joined through neighbours above 0.95), and two in BMMpM (clusters 2 and 3, r = 0.95). BHHpH's two clean belt-break clusters (0 and 1) match at r = 0.93, below the line, so they stay two structures on different edges. BMHpH has two belt-break structures, each in two orientations (r = 0.97 and 0.98); the two match each other at r = 0.72–0.77, so they stay separate under the whole-cluster rule. The catalog counts them as two. A label-free core/weak split (§9 D3) shows what {4, 5} is: the {2, 3} deformation in two further orientations, mixed with a weaker, non-compact state that makes up 54–61% of their frames. In BMMpH the belt breaks in only 20% of one small cluster, so there is nothing to merge.
 3. In the four cubes with equatorial methyls, a broken belt comes with exactly two open pole contacts: 94–100% of broken-belt segments, and none with three or more apart from the loosened BMHpH replica. In BHHpH and BHHpM, 30–57% of broken-belt segments in the belt-break and mixed structures have three or more open. Murata's scheme files three or more open contacts as "other", and this is where most of 3₆'s large "other" share comes from.
 
 ### BHHpH, k = 4
 
 | Rank | Structure | Clusters | Share of apo frames | Orientations (lowest r) | Segments (replicas) | A / B / C1 / C2 / other (%) | Segment majority: intact / one edge / two+ edges (%) | Broken-belt segments with 2 / 3+ poles open (%) |
 |---:|---|---|---:|---|---:|---|---|---|
-| 1 | one belt break, 2 orientations | 0, 1 | 57.4% | 2 (0.96) | 223 (36) | 0.1 / 3.9 / 1.5 / 51.4 / 43.1 | 4 / 91 / 5 | 52 / 47 |
+| 1 | belt broken along M5–M0 | 0 | 36.9% | 1 | 116 (18) | 0.0 / 4.4 / 1.8 / 51.7 / 42.1 | 4 / 88 / 8 | 53 / 46 |
 | 2 | mixed belt, largest edge M4–M2 | 3 | 28.1% | 1 | 129 (38) | 6.5 / 15.9 / 16.4 / 25.7 / 35.4 | 49 / 46 / 4 | 42 / 57 |
-| 3 | intact belt | 2 | 14.5% | 1 | 201 (44) | 26.9 / 28.2 / 30.7 / 6.4 / 7.8 | 94 / 6 / 0 | 84 / 16 |
+| 3 | belt broken along M0–M4 | 1 | 20.5% | 1 | 107 (19) | 0.1 / 3.0 / 1.0 / 51.0 / 44.8 | 2 / 98 / 0 | 52 / 48 |
+| 4 | intact belt | 2 | 14.5% | 1 | 201 (44) | 26.9 / 28.2 / 30.7 / 6.4 / 7.8 | 94 / 6 / 0 | 84 / 16 |
 
-The belt-break structure joins clusters 0 and 1. Each stretches one opposite-monomer axis by 2.2–2.3 Å (M0–M3 in cluster 0, M1–M4 in cluster 1), and its long d1 is one of the two edges at the ends of that axis. Cluster 3 holds the third axis, M2–M5 (edges M4–M2 and M1–M5), but half of its segment frames have an intact majority, so its profile matches the other two only at r = 0.73–0.79 and it stays a separate, mixed structure. The intact-belt structure is not compact: its segments have zero, one, two and three or more poles open in 30, 26, 36 and 8% of frames. All ten top site pairs mark the belt-break clusters and are shorter there (Cohen's d −2.3 to −4.0). Five join opposite monomers and five join same-pole neighbours.
+Clusters 0 and 1 are the two clean belt breaks, on M5–M0 and M0–M4. Their profiles match at r = 0.93 after relabelling, just below 0.95, so they stay two structures. Cluster 3 holds the third axis (edges M4–M2 and M1–M5), but half of its segment frames have an intact majority, and it matches 0 and 1 only at r = 0.80 and 0.74. The intact-belt structure is not compact: its segments have zero, one, two and three or more poles open in 30, 26, 36 and 8% of frames. All ten top site pairs mark the belt-break clusters and are shorter there (Cohen's d −2.3 to −4.0). Five join opposite monomers and five join same-pole neighbours.
 
 ### BHHpM (Murata 3₆), k = 4
 
 | Rank | Structure | Clusters | Share of apo frames | Orientations (lowest r) | Segments (replicas) | A / B / C1 / C2 / other (%) | Segment majority: intact / one edge / two+ edges (%) | Broken-belt segments with 2 / 3+ poles open (%) |
 |---:|---|---|---:|---|---:|---|---|---|
-| 1 | one belt break, 3 orientations | 0, 1, 3 | 76.9% | 3 (0.93) | 356 (48) | 0.1 / 7.1 / 1.9 / 51.8 / 39.0 | 4 / 86 / 10 | 66 / 30 |
-| 2 | intact belt | 2 | 23.1% | 1 | 182 (50) | 32.1 / 44.8 / 17.2 / 2.8 / 3.0 | 95 / 3 / 2 | 54 / 16 |
+| 1 | one belt break, 2 orientations | 1, 3 | 41.0% | 2 (0.96) | 188 (26) | 0.0 / 5.7 / 1.4 / 56.0 / 36.9 | 3 / 88 / 8 | 72 / 26 |
+| 2 | belt broken along M5–M0 | 0 | 35.9% | 1 | 168 (26) | 0.2 / 8.7 / 2.5 / 47.1 / 41.5 | 4 / 83 / 13 | 59 / 34 |
+| 3 | intact belt | 2 | 23.1% | 1 | 182 (50) | 32.1 / 44.8 / 17.2 / 2.8 / 3.0 | 95 / 3 / 2 | 54 / 16 |
 
-The belt-break structure joins clusters 0, 1 and 3 (r = 0.93–0.98) and appears in 48 of the 50 replicas. Each orientation stretches a different opposite axis by 2.0–2.1 Å (M0–M3, M1–M4, M2–M5), with the long d1 at either end of it. The intact-belt structure, cluster 2, holds 98.8% of the cube's A frames and only 1.6% of its C2 and 2.3% of its "other" frames. C2 and "other" fall into the three orientations in similar proportions, so this cut separates belt state and orientation, not C2 from "other". All ten top site pairs mark the belt-break orientations: seven opposite pairs that are shorter in the marked orientation (d −2.7 to −3.4) and three same-pole pairs.
+Clusters 1 and 3 join at r = 0.96 (edges M0–M4 and M4–M2 / M1–M5). Cluster 0 is the third belt break (M5–M0); it matches them at r = 0.94 and 0.93, below 0.95, so it stays its own structure. The intact-belt structure, cluster 2, holds 98.8% of the cube's A frames and only 1.6% of its C2 and 2.3% of its "other" frames. C2 and "other" fall into the belt-break clusters in similar proportions, so this cut separates belt state and orientation, not C2 from "other". All ten top site pairs mark the belt-break clusters: seven opposite pairs that are shorter in the marked cluster (d −2.7 to −3.4) and three same-pole pairs.
 
 ### BMHpH, k = 6
 
 | Rank | Structure | Clusters | Share of apo frames | Orientations (lowest r) | Segments (replicas) | A / B / C1 / C2 / other (%) | Segment majority: intact / one edge / two+ edges (%) | Broken-belt segments with 2 / 3+ poles open (%) |
 |---:|---|---|---:|---|---:|---|---|---|
 | 1 | compact cage | 1 | 42.3% | 1 | 129 (50) | 95.7 / 4.0 / 0.3 / 0.0 / 0.0 | 100 / 0 / 0 | — |
-| 2 | opened cage, 2 orientations | 5, 4 | 36.5% | 2 (0.99) | 85 (29) | 7.4 / 17.9 / 5.6 / 68.6 / 0.6 | 27 / 73 / 0 | 99 / 0 |
-| 3 | opened cage, 2 orientations | 3, 2 | 19.7% | 2 (0.99) | 55 (15) | 2.6 / 16.5 / 4.0 / 75.7 / 1.3 | 18 / 82 / 0 | 98 / 0 |
+| 2 | opened cage, 2 orientations | 5, 4 | 36.5% | 2 (0.97) | 85 (29) | 7.4 / 17.9 / 5.6 / 68.6 / 0.6 | 27 / 73 / 0 | 99 / 0 |
+| 3 | opened cage, 2 orientations | 3, 2 | 19.7% | 2 (0.98) | 55 (15) | 2.6 / 16.5 / 4.0 / 75.7 / 1.3 | 18 / 82 / 0 | 98 / 0 |
 | 4 | loosened single replica, edge M4–M2 | 0 | 1.5% | 1 | 7 (1) | 0.0 / 5.2 / 9.4 / 3.0 / 82.4 | 21 / 29 / 50 | 0 / 100 |
 
-The compact cage, cluster 1, appears in all 50 replicas. The k = 4 cut of the old gate had the same four frame sets; k = 6 splits each belt-break set by edge. Clusters 4 and 5 break at M1–M5/M5–M0 and at M0–M4/M4–M2, and clusters 2 and 3 at M2–M3 and M3–M1; within each pair the profiles match at r = 0.99. The two structures match each other at r = 0.80–0.82 and stay separate. In both, 98–99% of broken-belt segments have exactly two poles open. Cluster 0 is replica `157923` alone; every broken segment in it has three or more poles open, and it is reported separately (sections 6 and 8). At k = 4, six of the ten top site pairs marked that replica. At k = 6 none do: nine mark cluster 5, where same-pole M4–M5 pairs are longer (d +5.6 to +6.3) and equatorial M0–M5 pairs shorter (d −3.5 to −4.0), and one marks cluster 2.
+The compact cage, cluster 1, appears in all 50 replicas. The k = 4 cut of the old gate had the same four frame sets; k = 6 splits each belt-break set by edge. Clusters 4 and 5 break at M1–M5/M5–M0 and at M0–M4/M4–M2, and clusters 2 and 3 at M2–M3 and M3–M1; within each pair the profiles match at r = 0.97 and 0.98. The two structures match each other at r = 0.72–0.77 and stay separate. In both, 98–99% of broken-belt segments have exactly two poles open. Cluster 0 is replica `157923` alone; every broken segment in it has three or more poles open, and it is reported separately (sections 6 and 8). At k = 4, six of the ten top site pairs marked that replica. At k = 6 none do: nine mark cluster 5, where same-pole M4–M5 pairs are longer (d +5.6 to +6.3) and equatorial M0–M5 pairs shorter (d −3.5 to −4.0), and one marks cluster 2.
 
 ### BMHpM (Murata 2₆), k = 10
 
 | Rank | Structure | Clusters | Share of apo frames | Orientations (lowest r) | Segments (replicas) | A / B / C1 / C2 / other (%) | Segment majority: intact / one edge / two+ edges (%) | Broken-belt segments with 2 / 3+ poles open (%) |
 |---:|---|---|---:|---|---:|---|---|---|
-| 1 | one belt break, 6 orientations | 1, 2, 6, 7, 4, 8 | 50.3% | 6 (0.90) | 164 (46) | 4.7 / 15.2 / 1.6 / 77.7 / 0.8 | 13 / 87 / 0 | 94 / 0 |
+| 1 | one belt break, 6 orientations | 1, 2, 6, 7, 4, 8 | 50.3% | 6 (0.89) | 164 (46) | 4.7 / 15.2 / 1.6 / 77.7 / 0.8 | 13 / 87 / 0 | 94 / 0 |
 | 2 | compact cage | 0 | 38.5% | 1 | 131 (47) | 96.6 / 3.2 / 0.2 / 0.0 / 0.0 | 100 / 0 / 0 | — |
 | 3 | intact belt, M5–M3 often open | 3 | 4.4% | 1 | 38 (16) | 35.9 / 54.1 / 9.1 / 1.0 / 0.0 | 99 / 1 / 0 | 100 / 0 |
 | 4 | mostly compact | 5 | 3.7% | 1 | 23 (14) | 53.0 / 32.0 / 10.1 / 1.0 / 3.9 | 100 / 0 / 0 | — |
 | 5 | mostly compact | 9 | 3.1% | 1 | 24 (13) | 52.8 / 45.0 / 2.1 / 0.1 / 0.0 | 100 / 0 / 0 | — |
 
-The belt-break structure is six clusters, one for each equatorial edge: in each cluster, 99–100% of the frames with a single long d1 have it on that cluster's edge. Their profiles match at r = 0.90–0.99 after relabelling, and the lowest value involves cluster 7 (edge M4–M2), which is half intact by segment majority. Together they appear in 46 replicas, and 94% of their broken segments have exactly two poles open, none three or more. The compact cage, cluster 0, holds 83.1% of the cube's A frames. Three small intact structures (3.1–4.4% each) are cages whose pole contacts often open (B 32–54%). All ten top site pairs mark belt-break orientations: the four equatorial pairs lengthen (d +6.9 to +10.0), the three same-pole pairs shorten (d −9.0 to −12.0), and the three opposite pairs move both ways.
+The belt-break structure is six clusters, one for each equatorial edge: in each cluster, 99–100% of the frames with a single long d1 have it on that cluster's edge. Neighbouring copies match at r = 0.96–0.99 after relabelling. The weakest pair is 7–8 at 0.89 (cluster 7 is half intact by segment majority); single linkage still joins all six because 4–7 is 0.96 and 1–8 is 0.99. Together they appear in 46 replicas, and 94% of their broken segments have exactly two poles open, none three or more. The compact cage, cluster 0, holds 83.1% of the cube's A frames. Three small intact structures (3.1–4.4% each) are cages whose pole contacts often open (B 32–54%). They match the belt-break family at r = 0.83–0.91 and stay separate at 0.95. All ten top site pairs mark belt-break orientations: the four equatorial pairs lengthen (d +6.9 to +10.0), the three same-pole pairs shorten (d −9.0 to −12.0), and the three opposite pairs move both ways.
 
 ### BMMpH, k = 3
 
@@ -230,16 +234,17 @@ The belt-break structure is six clusters, one for each equatorial edge: in each 
 | 2 | mixed belt, largest edge M2–M3 | 1 | 5.8% | 1 | 24 (12) | 6.7 / 67.3 / 5.4 / 19.8 / 0.8 | 80 / 20 / 0 | 100 / 0 |
 | 3 | intact belt, M1–M2 often open | 2 | 3.8% | 1 | 16 (12) | 13.2 / 85.6 / 1.0 / 0.2 / 0.0 | 100 / 0 / 0 | — |
 
-The compact cage appears in every replica and has no pole open in any segment. In cluster 1, 80% of the frames are intact segments, 86% of them with one pole open; the other 20% are single breaks at M2–M3 with two poles open. Cluster 2 is an intact belt with one pole open in 87% of its frames. Nine of the ten top site pairs mark cluster 1 and are longer there (d +3.0 to +3.8): five same-pole M3–M4 pairs, three opposite M0–M3 pairs and one equatorial M2–M3 pair. The tenth, an opposite M1–M4 pair, is shorter in the compact cage. The orientation merge does not join clusters 1 and 2 (r = 0.73): they open different pole contacts.
+The compact cage appears in every replica and has no pole open in any segment. In cluster 1, 80% of the frames are intact segments, 86% of them with one pole open; the other 20% are single breaks at M2–M3 with two poles open. Cluster 2 is an intact belt with one pole open in 87% of its frames. Nine of the ten top site pairs mark cluster 1 and are longer there (d +3.0 to +3.8): five same-pole M3–M4 pairs, three opposite M0–M3 pairs and one equatorial M2–M3 pair. The tenth, an opposite M1–M4 pair, is shorter in the compact cage. The orientation merge does not join clusters 1 and 2 (r = 0.66): they open different pole contacts.
 
 ### BMMpM (Murata 1₆), k = 4
 
 | Rank | Structure | Clusters | Share of apo frames | Orientations (lowest r) | Segments (replicas) | A / B / C1 / C2 / other (%) | Segment majority: intact / one edge / two+ edges (%) | Broken-belt segments with 2 / 3+ poles open (%) |
 |---:|---|---|---:|---|---:|---|---|---|
 | 1 | compact cage | 0 | 76.2% | 1 | 76 (47) | 99.9 / 0.1 / 0.0 / 0.0 / 0.0 | 100 / 0 / 0 | — |
-| 2 | opened cage, 3 orientations | 3, 1, 2 | 23.8% | 3 (0.82) | 81 (26) | 9.2 / 36.6 / 9.6 / 43.7 / 0.9 | 55 / 45 / 0 | 100 / 0 |
+| 2 | opened cage, 2 orientations | 3, 2 | 15.6% | 2 (0.95) | 54 (19) | 10.3 / 29.5 / 8.9 / 50.1 / 1.2 | 48 / 52 / 0 | 100 / 0 |
+| 3 | mixed belt, largest edge M3–M1 | 1 | 8.2% | 1 | 27 (9) | 7.0 / 50.0 / 11.0 / 31.6 / 0.4 | 69 / 31 / 0 | 100 / 0 |
 
-The compact cage appears in 47 of the 51 replicas, has no pole open in any segment, and holds 97.2% of the cube's A frames. The opened-cage structure joins clusters 1, 2 and 3. Neighbouring pairs match at r = 0.93 and 0.94 and the far pair at 0.82, so the three join by single linkage. Its segments are either single breaks at M0–M4, M3–M1, M1–M5 or M5–M0 with exactly two poles open (45% of its frames), or intact (55%, three quarters of them with one pole open). All ten top site pairs mark this structure. Equatorial M2–M4 and M0–M5 pairs are shorter there (d −4.8 to −5.9), equatorial M0–M4 pairs are longer (d +4.2 to +4.5), and the two same-pole M4–M5 pairs move in opposite directions.
+The compact cage appears in 47 of the 51 replicas, has no pole open in any segment, and holds 97.2% of the cube's A frames. Clusters 2 and 3 join at r = 0.95 (edges M1–M5 and M0–M4). Cluster 1 is mixed at M3–M1; it matches them at r = 0.92 and 0.82, so it stays its own structure. The opened pair's segments are either single breaks with exactly two poles open or intact with one pole open. All ten top site pairs mark the non-compact clusters. Equatorial M2–M4 and M0–M5 pairs are shorter there (d −4.8 to −5.9), equatorial M0–M4 pairs are longer (d +4.2 to +4.5), and the two same-pole M4–M5 pairs move in opposite directions.
 
 The apo-frame shares, Murata labels and segment-majority columns for BMMpM cover 50 of its 51 runs. Run `587901`, truncated at 1,460 frames, has no motif file and is left out of them. It is one silent segment in the compact cage, so the segment and replica counts in the table include it. BMMpM is the only cube with a run missing from the motif pass.
 
@@ -266,15 +271,199 @@ The clustering never sees Rg. Even so, the three runs it isolates first and most
 
 The same 50% share sets the replica condition of the chemical gate (section 3), so a run flagged here cannot by itself make a cut pass. At the selected k, only BMHpH carries flagged clusters: `157923` as its own structure and `563849_re` inside an orientation pair.
 
+## 9. Structural checks on the clusters
+
+The four tests below do not re-segment or choose a new k. They read the Ward labels at the selected k (section 3) and the merged structures of section 7, and ask whether those sets are compact, unimodal, shared across replicas, and whether the orientation merge is supported. The unit is the segment mean, which is what Ward clustered. Distances are a symmetry-adjusted RMSD over the 960 inter-monomer site pairs, in Å: for two vectors x and y, d(x, y) is the minimum over admissible monomer relabellings g of the RMSD between x and y with its columns permuted by g. Nothing is aligned in Cartesian space. The distance describes how the monomers sit relative to one another. It cannot tell a structure from its mirror image; that is settled on coordinates in D1.
+
+Outputs live in `output/endpoint_cluster_validation_physical_k/`. The primary run uses every frame inside a clustered segment, which is what Ward saw. A second run with `--apo-only` repeats Tests A–D after dropping frames that have iodide in the cavity; that filter and its results are in the last subsection.
+
+### D1. Which relabellings are physically admissible
+
+`scripts/check_cage_symmetry.py` builds a compact-cage reference from each local pole-methyl trajectory (`BHHpM_109345`, `BMHpM_109345`, `BMMpM_891249`), then tests the 48 adjacency-preserving monomer permutations: 24 rotations and 24 improper operations. Each relabelled cage is superimposed twice, once with rotations only and once allowing a reflection, using the RDKit heavy-atom graph automorphism inside each monomer. An operation is admissible when it is one of the six contact-graph automorphisms (section 4) and its self-RMSD is within the thermal frame-to-frame RMSD of the same frames. An improper operation can pass only if the cage superimposes on its own mirror image.
+
+All six contact automorphisms pass on every cube. The three proper 3-folds match with a rotation (self-RMSD 0.16–1.26 Å). The inversion and the two S6 6-cycles match only when a reflection is allowed (0.15–1.16 Å) and fail by 10–11 Å with rotations only, so the compact cages are achiral and the mirrors stay in the group. The remaining 42 adjacency permutations fail both tests. Site maps from Hungarian matching of endpoint centroids are the identity: site a stays site a under every admissible operation. The three pole-H cubes have no local trajectory; each inherits the result of the pole-methyl cube with the same equator and is flagged `inferred`. Thermal scales are 0.79 Å (BHH), 0.69 Å (BMH) and 0.62 Å (BMM).
+
+### Test A. Intracluster diameter
+
+For every Ward cluster and every merged structure the script records the maximum, 95th percentile and median pairwise distance, the same three numbers with fixed monomer labels, the pair that sets the maximum, and each member's eccentricity as a robust z-score. Diameters are read against the within-dwell spread (the median frame-to-frame distance inside one segment, 1.03–1.29 Å).
+
+The compact cages are the tightest sets. Their 95th percentiles are 0.73 Å (BMMpM 0), 0.92 Å (BMMpH 0), 1.24 Å (BMHpH 1), 1.43 Å (BMHpM 0), 1.89 Å (BHHpH 2) and 2.16 Å (BHHpM 2). The opened and belt-break clusters sit at 2.3–4.0 Å. Symmetry adjustment shrinks the labelled diameter: a family of orientations that looks 3–4 Å wide at fixed labels is 1.4–2.4 Å after relabelling. The maximum is set by one or two segments and grows with cluster size, so clusters are compared on the 95th percentile and the median. Compact cages still list eccentric members (6–33) because the MAD of a tight set is small; those members remain inside 1.1–1.8 Å of the medoid. BMHpH cluster 0 (`157923` alone) has no eccentric flag and a median of 2.66 Å: it is a loose single-replica set, not a compact outlier.
+
+Separation over the 95th percentile is above 1 only between a compact cage and an opened structure (BMMpM 0: 1.88; BMMpH 0: 1.31; BMHpH 1: 1.19; BHHpM 2: 1.10). Orientation copies of one motif sit at 0.35–0.62, as they should: after the best relabelling they occupy the same region.
+
+### Test B. Distributions inside a cluster
+
+Each observable is the median of the frames inside a segment: pole cation–π (sorted and per sandwich), equatorial d1 and d2, assembly Rg, shape anisotropy and asphericity, the symmetry-adjusted RMSD to the cluster medoid, GSA contact counts, and the number of adjacent interfaces whose minimum endpoint distance exceeds the compact cage's 99th percentile. A one-component and a two-component Gaussian mixture are compared on clusters with at least 15 segments. The flag `two_populations` requires ΔBIC ≥ 10, Ashman's D ≥ 2, a minor component of at least 15% of segments, and those segments from at least three replicas.
+
+Most clusters flag on at least one observable. The flags are not all the same thing.
+
+- **Motif counts.** `n_open_cation_pi`, the second-largest pole distance, `equator_d1_erank1` and `n_broken_adjacent` split the opened clusters. That is the mixture already in section 7: a belt-break cluster still contains intact segments, and an intact cluster still contains frames with one pole open. BMHpM cluster 2 is the exception (`homogeneous` on every observable).
+- **Cage geometry.** Compact cages of BMHpM, BMMpH and BMMpM also split on Rg and on the total number of inter-monomer contacts. The compact set is not a single size. BHHpH 0 and BHHpM 0 split on shape anisotropy and on RMSD to the medoid.
+- **After reorientation.** The two-population test is repeated on the first principal components of the site-pair vectors after every segment is moved into the family template. A split that disappears was two orientations of one motif. A split that remains is a candidate second deformation. It remains in BHHpH 0, BHHpM 2, BMHpH 1 and 5, BMHpM 0 and 1, BMMpH 2, and BMMpM 1 and 3. The compact-cage splits (BHHpM 2, BMHpH 1, BMHpM 0) are a size or tightness variation, not a second belt motif. The opened-cluster splits that remain line up with the intact / one-edge mix of section 7.
+
+Clusters with fewer than 15 segments (BMHpH 0 and 2) are summarized and not tested.
+
+### Test C. Stability across replicas
+
+Refitting Ward on all replicas reproduces the stored `by_k` labels exactly (ARI = 1) on every cube. Replicas are then split five ways, twenty times. Each held-out segment is assigned to the nearest training centroid, once from a Ward refit on the training replicas and once from the reported labels restricted to those replicas. The two variants agree. A cluster is `reproducible` when coverage of the training 95th-percentile radius is at least 0.8, the deformation-profile r between held-out and training members is at least 0.8, and the top-10 site pairs keep their Cohen's d sign in at least 90% of folds.
+
+| Cube | Reproducible | Not reproducible | Why the others fail |
+|---|---|---|---|
+| BHHpH | 0, 1 | 2 (sign 0.86), 3 (r 0.64, sign 0.78) | compact cage and cluster 3 mix more than one deformation |
+| BHHpM | 0, 3 | 1 (sign 0.83), 2 (sign 0.87) | coverage and r pass; the top-10 signs do not |
+| BMHpH | 1, 3, 5 | 0 (single replica), 2 (coverage 0.75, sign 0.78), 4 (r 0.78) | 0 is `157923`; 2 is 53% `563849_re` (section 8) |
+| BMHpM | 0, 1, 2, 3, 6, 8, 9 | 4 (sign 0.79), 5 (r 0.77), 7 (sign 0.78) | the half-broken edge (cluster 7) and two small intact sets |
+| BMMpH | — | 0, 1, 2 | compact cage: r 0.79; opened: r 0.64–0.65 |
+| BMMpM | 0 | 1 (r 0.79), 2 (coverage 0.73, r 0.64), 3 (r 0.77) | the opened pair and the mixed cluster |
+
+Coverage is 0.85–0.94 on every cluster that has more than one replica except BMHpH 2 and BMMpM 2. The stricter gate is the profile r. On a compact cage the deformation vector is near zero, so r between one replica and the rest is noise: BMMpH 0 has coverage 0.94 and sign agreement 0.92, and fails only because r is 0.788. The same holds for many single-replica comparisons inside compact cages. Sign agreement below 0.9 marks clusters whose top contacts are not the same contacts in every replica fold (BHHpH 2 and 3, BHHpM 1 and 2, BMHpM 4 and 7).
+
+### D2–D5. Effects of the symmetry merge
+
+**D2.** Each published family is moved into the orientation of its largest member. The families at r ≥ 0.95 are BHHpM 1+3, the two BMHpH pairs, BMHpM's six belt-break copies, and BMMpM 2+3. BHHpH has no family of two or more clusters. The family's 95th-percentile distance over that member's is 0.95–1.11 (threshold 1.2), so the merge does not inflate the diameter. After reorientation, replica-grouped classification of member identity sits at the label-permutation null for BHHpM 1+3 (0.48 against 0.50) and for the two BMHpH pairs (0.37–0.48 against 0.50). The six BMHpM copies sit at 0.26 against a six-class null of 0.17. BMMpM 2+3 is the exception: balanced accuracy 0.76 against 0.50, energy p = 0.035, so those two clusters still separate after reorientation even though their profiles meet r = 0.95. Energy-distance tests on BHHpM 1+3 and the two BMHpH pairs do not reject a single distribution (p 0.61–0.75). Relabelling shares are 0.57–0.96; the lower values are families whose members already sit near the identity.
+
+**D3.** Pairs that were left apart, or joined only through a chain, should still separate after the same reorientation. Correlations are the all-cluster values of section 4.
+
+| Pair | r in section 4 | Balanced accuracy (null) | Energy p | Separates |
+|---|---:|---|---:|---|
+| BHHpH 0 vs 1 | 0.93 | 0.46 (0.49) | 0.59 | no |
+| BHHpH 3 vs 0 | 0.80 | 0.80 (0.50) | 0.005 | yes |
+| BHHpH 3 vs 1 | 0.74 | 0.78 (0.51) | 0.005 | yes |
+| BMHpH 4 vs 2 | 0.72 | 0.67 (0.52) | 0.43 | yes |
+| BMHpH 4 vs 3 | 0.75 | 0.51 (0.51) | 0.19 | no |
+| BMHpH 5 vs 2 | 0.73 | 0.65 (0.50) | 0.57 | yes |
+| BMHpH 5 vs 3 | 0.77 | 0.51 (0.48) | 0.48 | no |
+| BMMpH 1 vs 2 | 0.66 | 0.76 (0.51) | 0.005 | yes |
+| BMMpM 1 vs 3 | 0.82 | 0.62 (0.49) | 0.06 | yes |
+| BMHpM 2 vs 7 | 0.90 | 0.90 (0.51) | 0.005 | yes |
+
+BHHpH 0 vs 1 is the pair the 0.95 line just misses (r = 0.93). After reorientation they occupy the same region (the numbers are the former family check). BHHpM cluster 0 matches 1 and 3 at r = 0.94 and 0.93 and is left apart by the same line. BMHpH 4 and 5 against 3 also do not separate: those four clusters are two published structures (4+5 and 2+3) whose profiles already match at r = 0.72–0.77; after reorientation, 4/5 and 3 occupy the same region. The next paragraph tests whether that is a missed merge (it most likely is). BMHpM 2 and 7 stay apart, which is why cluster 7 is in the six-orientation family only by single linkage (through 4–7 at 0.96) and not by complete linkage.
+
+**Is BMHpH {4, 5} a missed merge with {2, 3}?** Yes, most likely. Clusters 4 and 5 are each a mixture: a core that carries the same deformation as {2, 3}, in two further orientations, and a larger part that is a weaker, different state. The whole-cluster r of 0.72–0.77 is the mixture's average, not a second belt-break deformation.
+
+The test asks whether weakly deformed segments inside a cluster pull its deformation profile toward the grand mean and hide a match. If they do, removing them should raise the cross-structure correlation to the level of orientation copies. The split is label-free, so no structural threshold decides it.
+
+`scripts/check_merge_dilution.py` does this with the catalog's own profile and symmetry code:
+
+1. The segments of each cluster are cut in two by Ward on their site-pair segment means, standardized over every clustered segment of the cube (`core_split` in `src/ChangepointAnalysis/cluster_validation.py`). This is the clustering step of the pipeline, applied inside one cluster.
+2. The part whose mean lies farther from the grand mean is the core; the other is the weak part. Nothing else names them.
+3. Each part gets a deformation profile computed as the catalog computes it: the mean of the 960 site-pair segment means of that part minus the mean over every clustered segment of the cube.
+4. Profiles are compared by Pearson r after the best of the six contact automorphisms (section 4). The script also reports the best r over all four core/weak combinations, and matches each weak part to its nearest other cluster.
+
+| Pair | Whole clusters | Cores | Weak parts |
+|---|---:|---:|---:|
+| 2–3 (same structure) | 0.98 | 1.00 | 0.82 |
+| 4–5 (same structure) | 0.97 | 0.99 | 0.96 |
+| 2 or 3 vs 4 or 5 (across) | 0.72–0.77 | 0.98–0.99 | 0.63–0.70 |
+| 1 (compact cage) vs 2–5 | −0.05 to −0.03 | 0.29–0.39 | 0.02–0.09 |
+
+| Cluster | Core segments (frames) | Weak segments (frames) | Replicas in core (top share) |
+|---|---:|---:|---:|
+| 2 | 6 (89%) | 4 (11%) | 2 (0.50) |
+| 3 | 23 (81%) | 22 (19%) | 7 (0.22) |
+| 4 | 9 (39%) | 34 (61%) | 4 (0.33) |
+| 5 | 10 (46%) | 32 (54%) | 5 (0.40) |
+
+Each core pair uses the same best relabelling as the whole-cluster pair, so the cores are the same deformation in the orientations the catalog already assigned. Clusters 2 and 3 are mostly core. Clusters 4 and 5 are mostly weak part, and that is what lowers their whole-cluster r with 2 and 3. The weak parts of 4 and 5 match each other (0.96) but not the compact cage (0.02–0.09), so they are a second, consistent state: non-compact, with a milder pattern that resembles cluster 3 at r = 0.86–0.91 without matching it.
+
+**Is the core match an artifact of picking the most deformed segments?** Two checks say no.
+
+- *Calibration on every other pair.* The same split was run on every cluster pair of the other five cubes (`--clusters` with all labels). Selecting extreme segments does inflate r for unrelated pairs: pairs with whole r near 0 rise to 0.15–0.82 on cores, the most for small cores (BMHpM 0–9, 11 and 9 core segments, 0.28 → 0.82). Among cross-family near-misses (whole r ≥ 0.70, at least five core segments per side), the cores mostly stay below the line or fall: BHHpH 0–1 0.93 → 0.88, 1–3 0.74 → 0.81; BMHpM 4–9 0.84 → 0.85, 7–9 0.91 → 0.85, 3–9 0.95 → 0.34. One pair crosses: BHHpM 0–1, already at 0.94, moves to 0.95. Pairs that are already copies stay at 0.94–0.99. Only BMHpH {2, 3} vs {4, 5} moves from well below the line (0.72–0.77) to copy level.
+- *Replica bootstrap* (`scripts/bootstrap_core_match.py`). Over 200 draws of replicas with replacement, re-splitting each time, the cross-structure core r has a median of 0.98 (2.5–97.5%: 0.90–0.99) and is ≥ 0.95 in 93–99% of draws. The within-structure values are 0.99 (2–3) and 0.98 (4–5). The cores of 4 and 5 come from four and five replicas (top share 0.33 and 0.40). Cluster 2's core is the thinnest: 6 segments from two replicas, half of them from `563849_re` (§6). Pairs with cluster 2 have 164 usable draws, because its core falls below three segments in the rest. The 3 vs 4/5 pairs, which do not involve cluster 2, give the same answer (median 0.98, P ≥ 0.95 in 95–98% of draws).
+
+**Why the earlier belt-based split said the opposite.** An earlier version of this check split segments by majority belt (an elongated d1 at ≥ 7.0 Å, the threshold from the reference analysis). That gave broken-belt parts at 0.73–0.77 across, and the conclusion "not a missed merge". The post-hoc cross-table (`--belt-crosscheck`, `BMHpH_k06_core_vs_belt.csv`) shows why. Of the 13 and 15 broken-belt segments of clusters 4 and 5, 6 and 7 fall in the weak part. Crossing the 7.0 Å line on one edge does not mean a segment carries the deformation, so the threshold put weak segments in with the deformed ones and kept the dilution. The label-free split separates them, and every intact-belt segment of 4 and 5 (27 of 27, 21 of 21) lands in the weak part. The belt labels describe the parts well after the fact; they were the wrong tool for making the split.
+
+This now agrees with the segment-level classifier and energy tests in the table above, which could not tell 4 or 5 from 3.
+
+**Consequence for the catalog.** The merge rule compares whole clusters, so it still lists BMHpH as four structures. If merges were judged on cores, with at least five core segments per side, BMHpH {2, 3, 4, 5} would be one belt-break deformation in four orientations, and BMHpH would have three structures. The same rule would also join BHHpM 0 with {1, 3} (core r 0.952, a pair already at 0.94 on whole clusters), so BHHpM would have two, and the total would be 20 instead of 22. No other cube changes.
+
+**Decision (Oct 28): the catalog keeps the whole-cluster rule and 22 structures.** The merge rule stays the one stated in section 4, applied to whole clusters, with no second rule added after the fact. BMHpH keeps four structures. In the description, {4, 5} is reported as the {2, 3} belt-break deformation in two further orientations, mixed with a weaker, non-compact state that makes up 54–61% of the frames of each cluster. The core/weak split and the bootstrap are a validation reported here, not a step that changes the catalog.
+
+The per-part counts are `BMHpH_k06_merge_dilution_parts.csv`, the correlations `BMHpH_k06_merge_dilution_pairs.csv`, the pair verdicts `tangled_inspect.csv` and the post-hoc belt table `BMHpH_k06_core_vs_belt.csv`, all under `output/endpoint_cluster_validation_physical_k/merge_dilution/bmhph_listed/`. The all-pair calibration runs are under `merge_dilution/all_pairs/{CUBE}/`, and the bootstrap (`BMHpH_k06_core_bootstrap.csv`, per-draw values and the core replica table) under `merge_dilution/core_bootstrap/`.
+
+**D4.** Families are rebuilt under the admissible group, rotations only, and all six contact relabellings, at copy-r 0.80, 0.85, 0.90 and 0.95, with single and complete linkage. Admissible and contact are the same group (D1), and they give the same families. Under rotations only, BMHpM's six orientations fall into {1, 4, 7} and {2, 6, 8}, as a 3-fold cannot map every equatorial edge onto every other.
+
+At the published rule (single linkage, r = 0.95, admissible group, every cluster of the cube) the counts are those of section 7: 4, 3, 4, 5, 3 and 3. Lowering the line to 0.90 over-merges three cubes: BHHpH joins 0 with 1; BHHpM joins 0 with 1 and 3; BMHpM joins the intact clusters 3, 5 and 9 to the belt-break family, leaving two structures instead of five; BMMpM joins 1 with 2 and 3. Complete linkage at 0.90 splits BMHpM's belt family into {1, 2, 6, 8} and {4, 7} and joins 3 with 9. BHHpH at 0.80 single linkage also joins 3. BMMpH never merges. BMHpH's two opened structures stay separate at every threshold in the grid.
+
+**D5.** Side by side, a merged structure has a 95th-percentile diameter within 3% of its largest member (Test A), inherits that member's two-population flags (Test B), and is reproducible when every member is (Test C). The BMHpM belt-break structure (clusters 1, 2, 4, 6, 7, 8) is the mixed case: four members are reproducible and two are not. BHHpH has no merged structure at 0.95. BMMpM 2+3 is merge-supported on diameter (ratio 1.07) but the two members still separate after reorientation (D2).
+
+### Verdicts at the selected k
+
+One row per Ward cluster. Test A reports the 95th-percentile symmetry-adjusted diameter; `outlier_driven` means at least one member has eccentricity z > 3.5 (and at least 0.5 Å from the others). Test B is `two_populations` if any tested observable meets the four gates above. Test C uses the no-refit hold-out. Test D is `merge_supported` when the cluster belongs to a published family whose p95 ratio is at most 1.2; `not_merged` means the cluster is its own structure. BMHpH 0 has no hold-out (one replica). BHHpH and BMMpH have no published family of two or more clusters.
+
+| Cube | Cluster | Structure (section 7) | p95 (Å) | Test B | Test C | Test D |
+|---|---:|---|---:|---|---|---|
+| BHHpH | 0 | belt broken along M5–M0 | 3.56 | two populations | reproducible | not merged |
+| BHHpH | 1 | belt broken along M0–M4 | 3.26 | two populations | reproducible | not merged |
+| BHHpH | 2 | intact belt | 1.89 | two populations | not reproducible (sign 0.86) | not merged |
+| BHHpH | 3 | mixed belt, largest edge M4–M2 | 3.74 | two populations | not reproducible (r 0.64) | not merged |
+| BHHpM | 0 | belt broken along M5–M0 | 3.74 | two populations | reproducible | not merged |
+| BHHpM | 1 | one belt break, 2 orientations | 4.02 | two populations | not reproducible (sign 0.83) | merge supported |
+| BHHpM | 2 | intact belt | 2.16 | two populations | not reproducible (sign 0.87) | not merged |
+| BHHpM | 3 | one belt break, 2 orientations | 3.34 | two populations | reproducible | merge supported |
+| BMHpH | 0 | loosened single replica | 3.20 | untested (7 segments) | single replica | not merged |
+| BMHpH | 1 | compact cage | 1.24 | two populations | reproducible | not merged |
+| BMHpH | 2 | opened cage, 2 orientations | 2.35 | untested (10 segments) | not reproducible (coverage 0.75) | merge supported |
+| BMHpH | 3 | opened cage, 2 orientations | 2.48 | two populations | reproducible | merge supported |
+| BMHpH | 4 | opened cage, 2 orientations | 2.34 | two populations | not reproducible (r 0.78) | merge supported |
+| BMHpH | 5 | opened cage, 2 orientations | 2.27 | two populations | reproducible | merge supported |
+| BMHpM | 0 | compact cage | 1.43 | two populations | reproducible | not merged |
+| BMHpM | 1 | one belt break, 6 orientations | 2.37 | two populations | reproducible | merge supported |
+| BMHpM | 2 | one belt break, 6 orientations | 1.78 | homogeneous | reproducible | merge supported |
+| BMHpM | 3 | intact belt, M5–M3 often open | 1.91 | two populations | reproducible | not merged |
+| BMHpM | 4 | one belt break, 6 orientations | 2.50 | two populations | not reproducible (sign 0.79) | merge supported |
+| BMHpM | 5 | mostly compact | 1.73 | two populations | not reproducible (r 0.77) | not merged |
+| BMHpM | 6 | one belt break, 6 orientations | 1.98 | two populations | reproducible | merge supported |
+| BMHpM | 7 | one belt break, 6 orientations | 2.39 | two populations | not reproducible (sign 0.78) | merge supported |
+| BMHpM | 8 | one belt break, 6 orientations | 1.59 | two populations | reproducible | merge supported |
+| BMHpM | 9 | mostly compact | 1.34 | two populations | reproducible | not merged |
+| BMMpH | 0 | compact cage | 0.92 | two populations | not reproducible (r 0.79) | not merged |
+| BMMpH | 1 | mixed belt, largest edge M2–M3 | 2.31 | two populations | not reproducible (r 0.64) | not merged |
+| BMMpH | 2 | intact belt, M1–M2 often open | 1.85 | two populations | not reproducible (r 0.65) | not merged |
+| BMMpM | 0 | compact cage | 0.73 | two populations | reproducible | not merged |
+| BMMpM | 1 | mixed belt, largest edge M3–M1 | 3.08 | two populations | not reproducible (r 0.79) | not merged |
+| BMMpM | 2 | opened cage, 2 orientations | 3.13 | two populations | not reproducible (coverage 0.73) | merge supported |
+| BMMpM | 3 | opened cage, 2 orientations | 3.11 | two populations | not reproducible (r 0.77) | merge supported |
+
+The table is `validation_summary.csv`. Cluster-level numbers are in `cluster_diameter.csv`, `two_population.csv`, `replica_holdout_by_cluster.csv` and `merge_member_checks.csv`.
+
+### Apo-only: the same tests without iodide in the cavity
+
+Ward clustered the endpoint-distance summaries of every frame inside a clustered segment. That includes frames in which one or more iodide ions sit in the cavity. The Murata mapping in section 5 and the occupancies in section 7 do not: they keep only apo frames, those with `n_guest_inside_cavity < 1`, matching Murata's non-encapsulated comparison. Occupancy is not a rare excursion, and it falls as methylation increases. On the GSA series used for the filter (1 ps, after the same assembly QC that drops BMHpH `563849`):
+
+| Cube | Frames | Apo (`n_guest_inside_cavity < 1`) | Occupied |
+|---|---:|---:|---:|
+| BHHpH | 250,000 | 53.9% | 46.1% |
+| BHHpM | 250,000 | 74.2% | 25.8% |
+| BMHpH | 251,326 | 57.5% | 42.5% |
+| BMHpM | 250,000 | 78.7% | 21.3% |
+| BMMpH | 250,000 | 89.6% | 10.4% |
+| BMMpM | 249,657 | 92.1% | 7.9% |
+
+`--apo-only` is a second pass of Tests A–D on that apo subset, not a new segmentation and not a new k. The script does not drop segments, does not change `cluster_label`, and does not recompute the 960 site-pair segment means that Ward used. It only filters the 1 ps motif and GSA series before those series are reduced to segment medians for Test B, and it filters the small frame sample that sets the within-dwell thermal scale. The filter is `filter_non_encapsulated(..., traj_filter="frames")` in `src/ChangepointAnalysis/murata_rmsd.py`: a frame is dropped when `n_guest_inside_cavity ≥ 1`. A replica that encapsulates in some frames is kept; only the occupied frames are removed. That is Murata's RMSD-caption rule, not the stricter “never encapsulate” rule that would drop a whole trajectory after one visit.
+
+Because Tests A, C and D read the stored Ward labels and the site-pair segment means, they are identical in the two runs: the same p95, the same hold-out coverage and profile r, the same merge ratios and negative-control separations. Test B can change, because pole cation–π, equatorial d1, Rg, shape and contact counts are recomputed on the apo frames inside each segment. A segment that is mostly occupied can lose its motif or GSA median if too few apo frames remain.
+
+The apo-only files are under `output/endpoint_cluster_validation_physical_k/apo_only/`. Test B changes on two clusters; every other verdict is unchanged.
+
+| Cube | Cluster | Test B, all frames | Test B, apo-only | What changed |
+|---|---:|---|---|---|
+| BMHpM | 2 | homogeneous | two populations | `n_active_interfaces` minor share rises from 0.14 to 0.18, just over the 15% gate |
+| BMMpM | 2 | two populations | homogeneous | 14 of 16 segments still have motif/GSA medians, below the 15-segment floor; the site-pair observables that remain (n = 16) are homogeneous |
+
+BMHpM 2 is one orientation of the six-edge belt-break family. Removing occupied frames slightly reweights its GSA contact counts and crosses the two-population gate on that one column. BMMpM 2 is the smallest orientation of the opened cage (16 segments). After the apo filter it no longer has enough motif/GSA medians to be tested on those columns, so the cluster verdict falls back to the site-pair observables, which stay homogeneous. Neither change moves Test C or Test D, and neither is a new structure. The rest of the table in the previous subsection is the apo-only table as well.
+
 ## Reproducibility
 
 | Step in this note | Script | Main output |
 |---|---|---|
 | 2–3 | `scripts/cluster_changepoint_segments.py`, `scripts/compare_endpoint_cluster_k.py --chemical-scan --max-top-replica-share 0.5`, `scripts/select_physical_k.py` | `output/endpoint_cluster_chemical_k_own_elbow_replica_aware/`, `output/endpoint_cluster_physical_k_own_elbow/physical_k_selected.csv`, and `clusters/endpoint/by_k/` under each own-elbow directory |
-| 4 | `scripts/describe_endpoint_clusters.py`, `scripts/rank_endpoint_pairs_at_k.py`, `scripts/rank_metastable_structures.py` | `output/endpoint_cluster_profiles/`, `output/endpoint_pair_ranking_physical_k/`, `output/metastable_structures_physical_k/by_cube/{CUBE}.csv` |
+| 4 | `scripts/describe_endpoint_clusters.py`, `scripts/rank_endpoint_pairs_at_k.py`, `scripts/rank_metastable_structures.py` | `output/endpoint_cluster_profiles/`, `output/endpoint_pair_ranking_physical_k/`, `output/metastable_structures_physical_k/` (`all_cluster_symmetry.csv`, `families_ranked.csv`, `by_cube/{CUBE}.csv`) |
 | 5 | `scripts/compute_murata_motif_rmsd.py`, `scripts/compare_to_murata_metastructures.py`, `scripts/categorize_cluster_mixtures.py` | `output/{CUBE}_motif_rmsd/`, `output/murata_g5_own_elbow_physical_k/`, `output/metastable_structures_physical_k/segment_belt.csv` |
 | 7 | `scripts/categorize_cluster_mixtures.py --min-share 0`, `scripts/summarize_metastable_structures.py` | `output/metastable_structures_physical_k/min_share_0/`, `structures_summary.csv`, `structure_markers.csv` |
 | 8 | `scripts/detect_replica_outliers.py`, `scripts/audit_cluster_replicas.py --min-top-share 0.5` | `output/replica_outliers/`, `output/cluster_replica_audit_physical_k/` |
+| 9 (D3) | `scripts/check_merge_dilution.py --cube BMHpH --k 6 --clusters 1 2 3 4 5 --belt-crosscheck`; calibration with `--clusters` set to all labels of each cube; `scripts/bootstrap_core_match.py --cube BMHpH --k 6 --clusters 2 3 4 5` | `output/endpoint_cluster_validation_physical_k/merge_dilution/bmhph_listed/`, `.../all_pairs/{CUBE}/`, `.../core_bootstrap/` |
+| 9 | `scripts/check_cage_symmetry.py`, `scripts/validate_endpoint_clusters.py --own-elbow` | `output/endpoint_cluster_validation_physical_k/` (D1 under `symmetry/`; apo-only under `apo_only/`) |
 
 The k scan and selection come first:
 
@@ -285,7 +474,7 @@ python scripts/select_physical_k.py --own-elbow --chem-dir output/endpoint_clust
 
 `select_physical_k.py` copies Murata NMI into its table only as an evaluation column, from `chemical_k_murata_nmi_by_k.csv` in `--chem-dir` (NMI per k does not depend on the gate).
 
-`rank_metastable_structures.py` reads every profile folder whose name starts with `{CUBE}_k{XX}`. Three of them were written with an explicit cluster list, because the default contrast set (clusters whose frames are mostly elongated) leaves out the half-broken BMHpM cluster 7 and the non-compact clusters of BMMpH and BMMpM:
+`rank_metastable_structures.py` computes the merge correlations itself, over every cluster of each cube, from the 960 site-pair segment means (`all_cluster_symmetry.csv`). It does not read `symmetry_profile_correlation.csv` from the profile folders. Those folders still supply `cluster_motif_profile.csv`. Three extra folders were written with an explicit cluster list so the subset pair ranking includes the half-broken BMHpM cluster 7 and the non-compact clusters of BMMpH and BMMpM; they are not required for the merge:
 
 ```powershell
 python scripts/describe_endpoint_clusters.py --own-elbow --cube BHHpH --k 4
@@ -307,11 +496,18 @@ python scripts/categorize_cluster_mixtures.py --min-share 0 --out-dir output/met
 python scripts/summarize_metastable_structures.py
 python scripts/audit_cluster_replicas.py --own-elbow --k-selected output/endpoint_cluster_physical_k_own_elbow/physical_k_selected.csv --min-top-share 0.5 --out-dir output/cluster_replica_audit_physical_k
 python scripts/detect_replica_outliers.py
-python -m pytest tests/test_metastable_catalog.py tests/test_physical_k.py tests/test_cluster_attribution.py tests/test_cluster_replicas.py -q --disable-warnings
+python scripts/check_merge_dilution.py --cube BMHpH --k 6 --clusters 1 2 3 4 5 --belt-crosscheck --out-dir output/endpoint_cluster_validation_physical_k/merge_dilution/bmhph_listed
+python scripts/bootstrap_core_match.py --cube BMHpH --k 6 --clusters 2 3 4 5
+python scripts/check_cage_symmetry.py --cube BHHpM --topology traj/BHHpM_ca.prmtop --trajectory traj/BHHpM_109345_mdcrd_v.trj
+python scripts/check_cage_symmetry.py --cube BMHpM --topology traj/BMHpM_ca.prmtop --trajectory traj/BMHpM_109345_mdcrd_v.trj
+python scripts/check_cage_symmetry.py --cube BMMpM --topology traj/BMMpM_ca.prmtop --trajectory traj/BMMpM_891249_mdcrd_v.trj
+python scripts/validate_endpoint_clusters.py --own-elbow --k-selected output/endpoint_cluster_physical_k_own_elbow/physical_k_selected.csv
+python scripts/validate_endpoint_clusters.py --own-elbow --apo-only --out-dir output/endpoint_cluster_validation_physical_k/apo_only
+python -m pytest tests/test_metastable_catalog.py tests/test_physical_k.py tests/test_cluster_attribution.py tests/test_cluster_replicas.py tests/test_cluster_validation.py -q --disable-warnings
 ```
 
-`rank_metastable_structures.py` reads the profiles from step 4 and writes `clusters_ranked.csv`, `families_ranked.csv`, and `by_cube/{CUBE}.csv`. `--copy-r` (default 0.90) is the correlation in section 4. `categorize_cluster_mixtures.py` is the mapping in section 5. `--min-share` (default 5) is the reporting floor for `segment_belt.csv`. In that file, `pct_2_poles = 80` means 80% of the frames in that belt mode belong to segments whose majority pole count is two. It is not the fraction of individual frames with two open contacts. `belt_inside_cluster.csv` is the frame-level count, with `median_dwell_ps` and the fraction of frames that sit in runs of at least 20 ps. `cluster_mixture.csv` has one row per cluster. The column `n_categories_ge_5pct` counts belt categories at `--min-share`.
+`rank_metastable_structures.py` writes `clusters_ranked.csv`, `families_ranked.csv`, `all_cluster_symmetry.csv`, and `by_cube/{CUBE}.csv`. `--copy-r` (default 0.95) is the correlation in section 4. `categorize_cluster_mixtures.py` is the mapping in section 5. `--min-share` (default 5) is the reporting floor for `segment_belt.csv`. In that file, `pct_2_poles = 80` means 80% of the frames in that belt mode belong to segments whose majority pole count is two. It is not the fraction of individual frames with two open contacts. `belt_inside_cluster.csv` is the frame-level count, with `median_dwell_ps` and the fraction of frames that sit in runs of at least 20 ps. `cluster_mixture.csv` has one row per cluster. The column `n_categories_ge_5pct` counts belt categories at `--min-share`.
 
 `summarize_metastable_structures.py` writes the section 7 numbers: `structures_summary.csv` has one row per structure (share, orientations, segments, replicas as the union over the structure's clusters, the Murata label mix, the segment-majority shares and the pole count inside broken and intact segments), and `structure_markers.csv` maps each cube's top site pairs onto structures with the relation of the two monomers.
 
-Helpers live in `src/ChangepointAnalysis/metastable_catalog.py`. The tests cover the orientation merge, the post-hoc names, the belt and pole labels, the dwell split, and the monomer-pair relations used for markers. They do not read `output/`. `tests/test_physical_k.py` covers the replica share used by the gate, and `tests/test_cluster_replicas.py` the isolation sweep of section 8.
+Helpers live in `src/ChangepointAnalysis/metastable_catalog.py`. The tests cover the orientation merge, the post-hoc names, the belt and pole labels, the dwell split, and the monomer-pair relations used for markers. They do not read `output/`. `tests/test_physical_k.py` covers the replica share used by the gate, and `tests/test_cluster_replicas.py` the isolation sweep of section 8. Section 9's distance, two-population test, hold-out coverage and merge checks are in `src/ChangepointAnalysis/cluster_validation.py` and `tests/test_cluster_validation.py`.

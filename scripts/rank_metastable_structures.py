@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Rank each cube's endpoint clusters by apo-frame occupancy.
 
-Reads the motif profiles and symmetry correlations already written by
-``describe_endpoint_clusters.py`` at the label-free k, names each cluster,
-and merges clusters that are one deformation in different orientations
-(best-relabelled profile r >= 0.90).
+Reads the motif profiles written by ``describe_endpoint_clusters.py`` at the
+label-free k, names each cluster, and merges clusters that are one deformation
+in different orientations. The merge correlations are computed here over
+*every* cluster of the cube, from the 960 site-pair segment means, so they
+do not depend on which clusters ``describe_endpoint_clusters.py --clusters``
+contrasted. Two clusters join when the best-relabelled profile r is at least
+``COPY_R`` (0.95), single linkage.
 
 Each cube is ranked on its own. Nothing is pooled across cube types.
 
@@ -30,7 +33,23 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 
-from src.ChangepointAnalysis.metastable_catalog import COPY_R, family_ids, structure_name
+from src.ChangepointAnalysis.assembly_qc import (
+    assembly_qc_failures,
+    drop_trajectories,
+    scan_assembly_qc_dir,
+)
+from src.ChangepointAnalysis.cluster_k_diagnostics import (
+    load_segments_at_k,
+    resolve_endpoint_features_dir,
+)
+from src.ChangepointAnalysis.cluster_validation import mappings_from_perms, profile_correlation_table
+from src.ChangepointAnalysis.metastable_catalog import (
+    COPY_R,
+    contact_automorphisms,
+    family_ids,
+    structure_name,
+)
+from src.ChangepointAnalysis.reporting import collect_endpoint_segment_means, endpoint_changepoints_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +71,18 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "output" / "cluster_replica_audit_physical_k" / "single_replica_clusters.csv",
     )
     p.add_argument("--copy-r", type=float, default=COPY_R)
+    p.add_argument(
+        "--own-elbow",
+        action="store_true",
+        default=True,
+        help="Read site-pair means from the own-elbow detections (default)",
+    )
+    p.add_argument(
+        "--qc-gsa-root",
+        type=Path,
+        default=ROOT / "output" / "gsa_features_by_cube",
+    )
+    p.add_argument("--no-assembly-qc", action="store_true")
     p.add_argument(
         "--out-dir",
         type=Path,
@@ -83,19 +114,38 @@ def _read_motif(dirs: list[Path]) -> pd.DataFrame:
     return frames[0]
 
 
-def _read_symmetry(dirs: list[Path]) -> pd.DataFrame:
-    frames = []
-    for path in dirs:
-        csv = path / "symmetry_profile_correlation.csv"
-        if csv.is_file():
-            frames.append(pd.read_csv(csv))
-    if not frames:
-        return pd.DataFrame(columns=["cluster_a", "cluster_b", "r_best_relabelling"])
-    stacked = pd.concat(frames, ignore_index=True)
-    return (
-        stacked.groupby(["cluster_a", "cluster_b"], as_index=False)["r_best_relabelling"]
-        .max()
+def all_cluster_symmetry(
+    output_root: Path,
+    cube: str,
+    k: int,
+    *,
+    own_elbow: bool,
+    qc_gsa_root: Path,
+    no_assembly_qc: bool,
+) -> pd.DataFrame:
+    """Best-relabelled profile r for every pair of clusters of this cube."""
+    cp_dir = endpoint_changepoints_dir(output_root, cube, own_elbow=own_elbow)
+    segs = load_segments_at_k(cp_dir, k, group="endpoint")
+    if segs.empty:
+        raise FileNotFoundError(f"{cube}: no endpoint clustering at k={k} in {cp_dir}")
+    if not no_assembly_qc:
+        gsa_dir = qc_gsa_root / cube
+        if gsa_dir.is_dir():
+            failed = assembly_qc_failures(scan_assembly_qc_dir(gsa_dir))
+            if failed:
+                segs = drop_trajectories(segs, failed)
+    X, y, _keys, specs, kind, _ = collect_endpoint_segment_means(
+        cp_dir,
+        resolve_endpoint_features_dir(cp_dir),
+        group="endpoint",
+        clustered_df=segs,
+        include_frame_corr=False,
     )
+    if kind != "site_pair" or X.size == 0:
+        raise FileNotFoundError(f"{cube}: no site-pair segment means")
+    perms = contact_automorphisms()
+    mappings = mappings_from_perms(specs, perms)
+    return profile_correlation_table(X, y, mappings, perms)
 
 
 def _replica_keys(path: Path) -> set[tuple[str, int, int]]:
@@ -216,6 +266,7 @@ def main() -> int:
     replicas = _replica_keys(args.replica_audit)
     cluster_parts = []
     family_parts = []
+    symmetry_parts = []
     for row in selected.itertuples(index=False):
         cube = str(row.cohort)
         k = int(row.selected_k)
@@ -223,7 +274,16 @@ def main() -> int:
         if not dirs:
             print(f"{cube}: no profile folder at k={k}", flush=True)
             return 1
-        clusters, families = rank_cube(cube, k, _read_motif(dirs), _read_symmetry(dirs), replicas, args.copy_r)
+        symmetry = all_cluster_symmetry(
+            args.output_root,
+            cube,
+            k,
+            own_elbow=args.own_elbow,
+            qc_gsa_root=args.qc_gsa_root,
+            no_assembly_qc=args.no_assembly_qc,
+        )
+        symmetry_parts.append(symmetry.assign(cohort=cube, k=k))
+        clusters, families = rank_cube(cube, k, _read_motif(dirs), symmetry, replicas, args.copy_r)
         cluster_parts.append(clusters)
         family_parts.append(families)
         print(
@@ -240,6 +300,10 @@ def main() -> int:
     by_cube.mkdir(parents=True, exist_ok=True)
     clusters.to_csv(args.out_dir / "clusters_ranked.csv", index=False)
     families.to_csv(args.out_dir / "families_ranked.csv", index=False)
+    if symmetry_parts:
+        pd.concat(symmetry_parts, ignore_index=True).to_csv(
+            args.out_dir / "all_cluster_symmetry.csv", index=False
+        )
     pooled = args.out_dir / "top10_structures.csv"
     if pooled.is_file():
         pooled.unlink()

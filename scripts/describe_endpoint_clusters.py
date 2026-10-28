@@ -13,16 +13,18 @@ For one cube at one Ward cut, writes to ``--out-dir``:
                              equatorial, opposite)
   subset_pair_means.csv      per-cluster mean distance (Å) of the top subset pairs
   pair_deformation.csv       per contrasted cluster and monomer pair: mean change (Å)
-                             of its site pairs from the reference clusters
+                             of its site pairs from the clusters not in --clusters
   symmetry_profile_correlation.csv
-                             for each two contrasted clusters, Pearson r of their
-                             deformation profiles as labelled and after the best
-                             monomer relabelling that preserves the pole and d1
-                             contact graphs
+                             for every pair of clusters of this cube (not only
+                             --clusters), Pearson r of their deformation profiles
+                             as labelled and after the best monomer relabelling
+                             that preserves the pole and d1 contact graphs.
+                             The baseline is the mean of all clustered segments.
 
 ``--clusters`` defaults to the belt-broken clusters, whose apo frames mostly
-have at least one elongated d1. The reference for deformations is every other
-cluster.
+have at least one elongated d1. It sets which clusters are ranked against each
+other in the subset pair tables. The orientation merge reads the all-cluster
+symmetry table, not this contrast set.
 
 Example
 -------
@@ -34,7 +36,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from itertools import combinations, permutations
+from itertools import combinations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +64,11 @@ from src.ChangepointAnalysis.murata_rmsd import (
     label_motif_metastructures,
     load_motif_rmsd_csvs,
     unit_series_columns,
+)
+from src.ChangepointAnalysis.metastable_catalog import (
+    contact_automorphisms,
+    perm_cycles,
+    site_pair_column_permutation,
 )
 from src.ChangepointAnalysis.reporting import (
     collect_endpoint_segment_means,
@@ -121,35 +128,6 @@ def _edge_label(prefix: str, edge: tuple[int, int, int]) -> str:
     return f"{prefix}_e{e}_M{a}-M{b}"
 
 
-def contact_automorphisms(*edge_maps: dict[str, tuple[int, int, int]]) -> list[tuple[int, ...]]:
-    """Monomer permutations that map each directed contact set onto itself."""
-    edge_sets = [{(a, b) for _, a, b in edges.values()} for edges in edge_maps]
-    monomers = sorted({m for edges in edge_sets for pair in edges for m in pair})
-    found = []
-    for image in permutations(monomers):
-        perm = dict(zip(monomers, image))
-        if all({(perm[a], perm[b]) for a, b in edges} == edges for edges in edge_sets):
-            found.append(tuple(perm[m] for m in monomers))
-    return found
-
-
-def _cycles(perm: tuple[int, ...]) -> str:
-    seen: set[int] = set()
-    parts = []
-    for start in range(len(perm)):
-        if start in seen or perm[start] == start:
-            continue
-        cycle = [start]
-        seen.add(start)
-        nxt = perm[start]
-        while nxt != start:
-            cycle.append(nxt)
-            seen.add(nxt)
-            nxt = perm[nxt]
-        parts.append("(" + " ".join(str(m) for m in cycle) + ")")
-    return "".join(parts) or "identity"
-
-
 def deformation_tables(
     X: np.ndarray,
     y: np.ndarray,
@@ -162,10 +140,6 @@ def deformation_tables(
     ref = ~np.isin(y, clusters)
     base = X[ref].mean(axis=0) if ref.any() else X[np.isin(y, clusters)].mean(axis=0)
     delta = {c: X[y == c].mean(axis=0) - base for c in clusters}
-    col_of = {}
-    for col, (_name, i, a, j, b) in enumerate(specs):
-        col_of[(i, a, j, b)] = col
-        col_of[(j, b, i, a)] = col
 
     pair_cols: dict[tuple[int, int], list[int]] = {}
     for col, (_name, i, _a, j, _b) in enumerate(specs):
@@ -188,7 +162,7 @@ def deformation_tables(
     for a, b in combinations(clusters, 2):
         scores = []
         for perm in automorphisms:
-            mapped = np.array([col_of.get((perm[i], s, perm[j], t), -1) for _n, i, s, j, t in specs])
+            mapped = site_pair_column_permutation(specs, perm)
             if (mapped < 0).any():
                 continue
             scores.append((float(np.corrcoef(delta[a], delta[b][mapped])[0, 1]), perm))
@@ -201,7 +175,7 @@ def deformation_tables(
                 "cluster_b": b,
                 "n_automorphisms": len(automorphisms),
                 "r_as_labelled": r_identity,
-                "best_relabelling": _cycles(best),
+                "best_relabelling": perm_cycles(best),
                 "r_best_relabelling": r_best,
             }
         )
@@ -349,9 +323,16 @@ def main() -> int:
     tables = [profile.round(1), single.round(1), pair_means.round(3)]
     if kind == "site_pair":
         automorphisms = contact_automorphisms(pi_edges, d1_edges)
-        pairs, sym = deformation_tables(X, y, specs, clusters, relation, automorphisms)
+        all_labels = sorted({int(c) for c in y})
+        pairs, _subset_sym = deformation_tables(X, y, specs, clusters, relation, automorphisms)
+        _all_pairs, sym = deformation_tables(X, y, specs, all_labels, relation, automorphisms)
         pairs.to_csv(out_dir / "pair_deformation.csv", index=False)
         sym.to_csv(out_dir / "symmetry_profile_correlation.csv", index=False)
+        print(
+            f"symmetry correlations: all {len(all_labels)} clusters "
+            f"({len(sym)} pairs); pair deformations: contrasted {clusters}",
+            flush=True,
+        )
         wide = pairs.pivot_table(
             index=["monomer_pair", "pair_relation"], columns="cluster_label", values="mean_delta_A"
         )
