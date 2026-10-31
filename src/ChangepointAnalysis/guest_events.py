@@ -21,6 +21,20 @@ import pandas as pd
 from .detection import _match_breakpoints
 
 
+def aligned_slice(values: Sequence[float], origin: int, lags: Sequence[int]) -> np.ndarray:
+    """``values`` at ``origin + lag`` for each lag. Out-of-range lags are NaN.
+
+    ``values`` is indexed by frame. Frame ``i`` is ``values[i]``.
+    """
+    y = np.asarray(values, dtype=float)
+    lag = np.asarray(lags, dtype=int)
+    out = np.full(lag.shape, np.nan, dtype=float)
+    idx = int(origin) + lag
+    ok = (idx >= 0) & (idx < y.size)
+    out[ok] = y[idx[ok]]
+    return out
+
+
 def occupancy_runs(occupied: Sequence[bool]) -> list[tuple[bool, int, int]]:
     """Runs of constant occupancy as ``(state, start, length)``."""
     occ = np.asarray(occupied, dtype=bool)

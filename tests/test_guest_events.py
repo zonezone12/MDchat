@@ -3,11 +3,19 @@
 import numpy as np
 
 from src.ChangepointAnalysis.guest_events import (
+    aligned_slice,
     event_recall,
     guest_events,
     occupancy_runs,
     shifted_recall_null,
 )
+
+
+def test_aligned_slice_pads_the_ends():
+    y = np.arange(10, dtype=float)
+    got = aligned_slice(y, 2, [-3, -1, 0, 2])
+    assert np.isnan(got[0])
+    np.testing.assert_array_equal(got[1:], [1, 2, 4])
 
 
 def test_occupancy_runs():

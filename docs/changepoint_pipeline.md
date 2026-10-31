@@ -63,7 +63,7 @@ flowchart TD
 | Group | Meaning | Column list |
 |-------|---------|-------------|
 | `gsa` | Cage / monomer geometry | `GSA_COLS` |
-| `iodine` | IOD guest location and contacts | `IODINE_COLS` |
+| `iodine` | Iodide location and contacts, disjoint from cage geometry | `IODINE_COLS` |
 | `na_water` | Cavity water / Na⁺ environment | `NA_WATER_COLS` |
 | `combined` | All numeric non-metadata columns | derived from the CSV |
 | `endpoint` | Site-centroid distances (`endpoint_dist_*`) | **aggregates only by default** (~49 cols); raw site pairs optional |
@@ -79,6 +79,20 @@ Constants and helpers: `src/ChangepointAnalysis/feature_groups.py` (`DEFAULT_GRO
 | **Timeline / attribution** | Raw site-pair columns (when present) ranked by **segment-level η²** (or transition standardized Δ) | Frame-level point-biserial against segment labels is attenuated; η² matches the unit clusters were defined on |
 
 Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dist_*`” detection matrix. Timeline plots fall back to `endpoint_dist_mean/min/max` when GSA panel columns are absent, or when `--timeline-top-pairs 0`.
+
+### Iodine and cage geometry
+
+`IODINE_COLS` and `GSA_COLS` are disjoint. The iodine group records where the iodide is (cavity, inner surface, outer surface, bulk) and how it contacts the monomers. It does not contain assembly Rg, contacts, endpoint distances or pore openings. Running `--groups iodine` therefore segments the guest, not the cage.
+
+On these cubes that segmentation is almost the same length in every cohort: 27–30 segments per trajectory (`output/iodine_cluster_k_diagnostics/segment_dynamics.csv`), while the fraction of frames with iodide in the cavity falls from 46% to 8% as methylation increases. The guest count inside one iodine segment spans about one ion, so the cuts are occupancy flicker at the cavity boundary. The median raw occupied run is 2 ps. A cross-trajectory null puts the gsa–iodine breakpoint Jaccard at chance.
+
+The comparison that does clear a null debounces the cavity count (a new state must hold for at least 20 ps) and asks whether those entries and exits fall within ±50 ps of a cage-geometry breakpoint. They do, more often than a circular shift, and they line up weakly with endpoint breakpoints. At the entry itself the cage swells by a few hundredths of an ångström in BHHpH, BHHpM and BMHpH. Aligning the traces on the entry shows that this swell is already under way in the preceding 100 ps, while the iodide’s move inward (6–8 Å toward the cage centre, from a contact it has already made) is the sharp change. The open-pole count, the elongated-d1 fraction and the endpoint cluster do not move with it. The numbers, the time control, and the within-replica cluster shares are in [metastable structures, section 10](metastable_structures.md#10-iodide-in-the-cavity).
+
+```powershell
+python scripts/guest_event_cotiming.py --min-dwell 20 50
+python scripts/compare_guest_cage_geometry.py
+python scripts/guest_entry_geometry_response.py
+```
 
 ---
 
@@ -121,6 +135,9 @@ Pass `--include-site-pairs-in-detection` to restore the old “all `endpoint_dis
 | `scripts/describe_endpoint_clusters.py` | Per-cluster motif profile and the site pairs that separate chosen clusters (one cube, one k) |
 | `scripts/audit_cluster_replicas.py` | Flag clusters carried by one replica; its Rg window, QC verdict and feature margins |
 | `scripts/compute_murata_motif_rmsd.py` | Trajectory → per-frame Murata motif RMSD, π(pole)/π(eq), d1, d2 (`*_motif_rmsd.csv`) |
+| `scripts/guest_event_cotiming.py` | Debounced iodide entry/exit versus cage and endpoint breakpoints |
+| `scripts/compare_guest_cage_geometry.py` | Within-replica cage geometry with iodide in the cavity, and the 100 ps window at entry |
+| `scripts/guest_entry_geometry_response.py` | Cage coordinates aligned to a sustained iodide entry, and the kink against random times |
 | `scripts/compare_to_murata_metastructures.py` | G5: occupancy vs Murata Table 1; Murata label × endpoint cluster tables |
 | `scripts/murata_label_diagnostics.py` | G5: label robustness (cutoff grid and its fit to Table 1, near-cutoff C2, bootstrap intervals, open-count switching) |
 | `scripts/murata_labels_across_k.py` | G5: C2-vs-other spread and the intact-belt cluster at every stored k |
