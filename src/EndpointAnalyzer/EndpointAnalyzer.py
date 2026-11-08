@@ -89,7 +89,12 @@ class EndpointAnalyzer:
         from .gsa_site_map import try_classify_gsa_monomer
 
         gsa_map = try_classify_gsa_monomer(mol)
-        if gsa_map is not None:
+        # Layered topology sites are an explicit opt-in; the GSA canonical map
+        # stays the default for hull-mode callers of this method.
+        if (
+            gsa_map is not None
+            and getattr(endpoints_finder, "site_source", "hull") != "layered"
+        ):
             sites_rdkit = gsa_map.rdkit_site_groups()
         else:
             sites_rdkit = endpoints_finder.find_endpoint_sites(mol)
@@ -104,6 +109,94 @@ class EndpointAnalyzer:
         except Exception:
             center = np.array([np.nan, np.nan, np.nan])
         return center, sites_mda
+
+    @staticmethod
+    def find_residue_layered_sites(
+        u: mda.Universe,
+        sel_str: str,
+        endpoints_finder: Optional[EndpointsFinder] = None,  # type: ignore[name-defined]
+        peripheral_only: bool = False,
+    ) -> Tuple[np.ndarray, List[List[int]], List[dict]]:
+        """Topology-first sites (Layer 1) as MDA atom-index groups plus metadata.
+
+        Unlike :meth:`find_residue_endpoint_sites`, this does not apply the GSA
+        canonical eight-site map.  The site count is whatever the molecular
+        graph contains.
+        """
+        if endpoints_finder is None:
+            endpoints_finder = EndpointsFinder(site_source="layered")  # type: ignore[call-arg]
+
+        sel = u.select_atoms(sel_str)
+        if len(sel) == 0:
+            return np.array([np.nan, np.nan, np.nan]), [], []
+
+        from .layered_sites import mol_from_atomgroup
+
+        mol = mol_from_atomgroup(sel)
+
+        catalog = endpoints_finder.find_layered_catalog(mol)
+        sites = catalog.sites
+        if peripheral_only:
+            sites = [s for s in sites if s.peripheral]
+        sites_mda: List[List[int]] = []
+        info: List[dict] = []
+        for site in sites:
+            mda_idx = [int(sel[rdkit_idx].index) for rdkit_idx in site.atom_indices]
+            if not mda_idx:
+                continue
+            sites_mda.append(mda_idx)
+            rec = site.to_dict()
+            rec["mda_indices"] = mda_idx
+            info.append(rec)
+
+        try:
+            center = sel.center_of_mass()
+        except Exception:
+            center = np.array([np.nan, np.nan, np.nan])
+        return center, sites_mda, info
+
+    @staticmethod
+    def compute_residue_layered_geometry(
+        u: mda.Universe,
+        sel_str: str,
+        endpoints_finder: Optional[EndpointsFinder] = None,  # type: ignore[name-defined]
+    ) -> dict:
+        """Layer 1 + Layer 2 for one residue on the current frame."""
+        from .layered_sites import compute_catalog_geometries, mol_from_atomgroup, mol_xyz
+
+        if endpoints_finder is None:
+            endpoints_finder = EndpointsFinder(site_source="layered")  # type: ignore[call-arg]
+
+        sel = u.select_atoms(sel_str)
+        if len(sel) == 0:
+            return {"error": "empty selection", "sites": []}
+
+        mol = mol_from_atomgroup(sel)
+
+        catalog = endpoints_finder.find_layered_catalog(mol)
+        # Prefer live MDA coordinates (current frame) over the RDKit copy.
+        coords = np.asarray(sel.positions, dtype=float)
+        if coords.shape[0] != mol.GetNumAtoms():
+            coords = mol_xyz(mol)
+        mol_geom, site_geoms = compute_catalog_geometries(catalog, coords)
+        return {
+            "n_sites": len(catalog.sites),
+            "n_rotatable_bonds": catalog.n_rotatable_bonds,
+            "n_fused_systems": catalog.n_fused_systems,
+            "n_functional_groups": catalog.n_functional_groups,
+            "molecule": {
+                "centroid": mol_geom.centroid.tolist(),
+                "rg": mol_geom.rg,
+                "asphericity": mol_geom.asphericity,
+                "acylindricity": mol_geom.acylindricity,
+                "relative_shape_anisotropy": mol_geom.relative_shape_anisotropy,
+                "principal_axes": mol_geom.principal_axes.tolist(),
+            },
+            "sites": [
+                {**site.to_dict(), **geom.to_dict()}
+                for site, geom in zip(catalog.sites, site_geoms)
+            ],
+        }
 
     def compute_endpoint_distances(
         self,

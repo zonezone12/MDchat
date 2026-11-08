@@ -32,6 +32,7 @@ Logic lives in `src/ChangepointAnalysis/`. Scripts under `scripts/` are thin arg
 # From repo root
 python scripts/compute_gsa_features.py --help
 python scripts/run_endpoint_changepoint.py --help
+python scripts/run_metastable_pipeline.py --help
 ```
 
 Repo root must be on `PYTHONPATH` (editable install or run from the repo root).
@@ -114,6 +115,7 @@ python scripts/guest_entry_geometry_response.py
 | `src/ChangepointAnalysis/murata_d1.py` | Remap stored `endpoint_dist_*` columns onto six equatorial Murata d1 contacts |
 | `src/ChangepointAnalysis/transition_attribution.py` | Attribute cluster transitions → ranked site-pair drivers |
 | `src/ChangepointAnalysis/pipeline.py` | `ChangepointPipeline`, `run_endpoint_changepoint` |
+| `src/ChangepointAnalysis/metastable_pipeline.py` | `run_cube_from_trajectories`, `run_metastable_pipeline` |
 | `src/EndpointAnalyzer/gsa_site_map.py` | Canonical Murata roles (R1/R2/R3, Ph, Py⁺); same index on every B* cube |
 | `src/EndpointAnalyzer/endpoints_finder.py` | Hull fallback `find_endpoint_sites` / ring-system grouping |
 | `scripts/changepoint_feature_groups.py` | Detect CLI |
@@ -129,6 +131,7 @@ python scripts/guest_entry_geometry_response.py
 | `scripts/run_gsa_step1_cluster_k.py` | Per-cube GSA changepoint from `gsa_features_step1` + k-diagnostics |
 | `scripts/run_changepoint_pipeline.py` | End-to-end CLI (GSA features, one cube per `--features-dir`) |
 | `scripts/run_endpoint_changepoint.py` | Trajectory → endpoint features → changepoint |
+| `scripts/run_metastable_pipeline.py` | Trajectory folder (or existing own-elbow dirs) → catalog |
 | `scripts/remap_murata_d1.py` | Map stored site-pair columns onto six equatorial Murata d1 contacts |
 | `scripts/select_chemical_k.py` | G3: pick k per cube (chemical gate, then the one-SE Murata-NMI rule); writes the G3 summary and rule sensitivity |
 | `scripts/rank_endpoint_pairs_at_k.py` | G4: site-pair η² ranking with permutation p / BH q at each cube's selected k |
@@ -198,6 +201,44 @@ python scripts/run_gsa_step1_cluster_k.py `
 ```
 
 Writes `output/gsa_changepoints_{CUBE}/` (`--groups gsa` only, skip summarize/PCA) plus the same silhouette / switching tables as the endpoint comparison. BMHpM CSVs in a subdirectory are picked up. Re-run diagnostics only with `--skip-detect`. Existing `output/changepoints` is an older BMMpM-only 500-frame run; do not reuse it for step-1.
+
+---
+
+## Quick start — trajectories to catalog
+
+One script from a folder of trajectories to the metastable-structure tables in [metastable_structures.md](metastable_structures.md). Per cube it writes GSA features, GSA and endpoint changepoints (own-elbow folder names, Ward cuts k = 2…15), and motif RMSD, then runs the catalog on every cube that already has clustered segments under `--output-root`. The catalog does not re-detect changepoints or refit Ward.
+
+```powershell
+# One cube from a trajectory glob (repeat for each cube)
+python scripts/run_metastable_pipeline.py `
+    --cube BHHpH `
+    --topology traj/BHHpH_ca.prmtop `
+    --trajectories "traj/BHHpH_*_mdcrd_v.trj"
+
+# Nested HPC layout ($TRAJ_DIR/<run_id>/mdcrd_v)
+python scripts/run_metastable_pipeline.py `
+    --cube BMMpM `
+    --topology "$TOPOLOGY" `
+    --trajectories "$TRAJ_DIR/*/mdcrd_v"
+
+# Catalog only (own-elbow segments already on disk)
+python scripts/run_metastable_pipeline.py --output-root output
+```
+
+Trajectory stages that already have their CSVs are skipped unless `--force`. `--skip-catalog` stops after this cube's GSA / endpoint / motif writes. Cage-symmetry, merge-dilution, and core-bootstrap stay as separate scripts (they need a reference trajectory or an explicit cluster list).
+
+Python:
+
+```python
+from src.ChangepointAnalysis import run_cube_from_trajectories, run_metastable_pipeline
+
+run_cube_from_trajectories(
+    cube="BHHpH",
+    topology="traj/BHHpH_ca.prmtop",
+    trajectories=["traj/BHHpH_*_mdcrd_v.trj"],
+)
+run_metastable_pipeline(output_root="output")
+```
 
 ---
 
@@ -891,6 +932,7 @@ Register automatically when MDChat loads skills (`/skills` or `/analysis`). Cate
 | `summarize_changepoint_results` | Cohort tables + plots | No |
 | `run_changepoint_pipeline` | Full GSA-feature chain | No |
 | `run_endpoint_changepoint` | Trajectory → endpoint sites → changepoint | No (loads trajectories itself) |
+| `run_metastable_pipeline` | Own-elbow segments → catalog (optional guest / annotation) | No |
 
 Example asks:
 
@@ -1064,6 +1106,7 @@ Coverage includes:
 - Cohort interpretation notes: `output/changepoints/ANALYSIS_SUMMARY.md`
 - Presentation-style writeup: `output/changepoints/CHANGPOINT_PIPELINE_PRESENTATION.md`
 - Feature extraction entry point: `scripts/compute_gsa_features.py`
+- Trajectories to catalog: `scripts/run_metastable_pipeline.py`
 - Remapped equatorial Murata d1 (six R2–R3 edges, no traj replay): `output/murata_d1/`
 - Canonical GSA roles (R1/R2/R3, Ph, Py⁺): `src/EndpointAnalyzer/gsa_site_map.py`
 - Endpoint finder / observer (hull fallback): `src/EndpointAnalyzer/`

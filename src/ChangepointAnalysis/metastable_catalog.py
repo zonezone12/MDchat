@@ -388,3 +388,45 @@ def dwell_stats(
     lengths = lengths[lengths > 0]
     persistent = float(lengths[lengths >= min_persist].sum()) / float(lengths.sum()) * 100.0
     return float(np.median(lengths)), persistent
+
+
+def describe_endpoint_clusters(**kwargs):
+    """Per-cluster motif profile. See ``catalog_runs.describe_endpoint_clusters``."""
+    from .catalog_runs import describe_endpoint_clusters as _run
+
+    return _run(**kwargs)
+
+
+def rank_metastable_structures(**kwargs):
+    """Orientation merge and occupancy ranking. See ``catalog_runs.rank_metastable_structures``."""
+    from .catalog_runs import rank_metastable_structures as _run
+
+    return _run(**kwargs)
+
+
+def categorize_cluster_mixtures(**kwargs):
+    """Belt-majority split inside clusters. See ``catalog_runs.categorize_cluster_mixtures``."""
+    from .catalog_runs import categorize_cluster_mixtures as _run
+
+    return _run(**kwargs)
+
+
+def summarize_metastable_structures(**kwargs):
+    """Section 7 structure table. See ``catalog_runs.summarize_metastable_structures``."""
+    from .catalog_runs import summarize_metastable_structures as _run
+
+    return _run(**kwargs)
+
+
+def compare_to_murata_metastructures(**kwargs):
+    """Murata occupancy join. See ``catalog_runs.compare_to_murata_metastructures``."""
+    from .catalog_runs import compare_to_murata_metastructures as _run
+
+    return _run(**kwargs)
+
+
+def list_annotation_replicas(**kwargs):
+    """Annotation replica list. See ``catalog_runs.list_annotation_replicas``."""
+    from .catalog_runs import list_annotation_replicas as _run
+
+    return _run(**kwargs)

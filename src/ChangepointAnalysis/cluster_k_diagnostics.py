@@ -1717,6 +1717,20 @@ def held_out_geometry_columns(columns: Sequence[str]) -> list[str]:
     return [c for c in GSA_COLS if c in present and c not in HELD_OUT_GEOMETRY_EXCLUDE]
 
 
+def columns_varying_on_scored_frames(values: np.ndarray, scored: np.ndarray) -> np.ndarray:
+    """Columns that vary on the full table and on the rows that enter the score.
+
+    A column that varies only on rows with no cluster label is dropped. On the
+    scored rows it is constant, so it adds nothing to :math:`R^2`.
+    """
+    values = np.asarray(values, dtype=float)
+    keep = values.std(axis=0) > 0
+    scored = np.asarray(scored, dtype=bool)
+    if scored.any():
+        keep = keep & (values[scored].std(axis=0) > 0)
+    return keep
+
+
 def load_held_out_geometry_frames(
     gsa_features_dir: Path | str,
     *,
@@ -1816,10 +1830,18 @@ def score_held_out_geometry_by_k(
     The same trajectory draws are used at every k.
     """
     cols = held_out_geometry_columns(geometry_frames.columns)
-    frames = geometry_frames.dropna(subset=cols)
+    frames = geometry_frames.dropna(subset=cols).reset_index(drop=True)
     z_all = frames[cols].to_numpy(dtype=float)
+    segs0 = load_segments_at_k(changepoints_dir, int(k_min), group=group)
+    if segs0.empty:
+        scored = np.ones(len(frames), dtype=bool)
+    else:
+        lab0 = map_frames_to_segment_clusters(
+            frames[["traj_id", "frame"]], segs0, cube=cube
+        )["cluster_label"].to_numpy()
+        scored = np.isfinite(lab0)
     sd = z_all.std(axis=0)
-    keep = sd > 0
+    keep = columns_varying_on_scored_frames(z_all, scored)
     cols = [c for c, ok in zip(cols, keep) if ok]
     z_all = (z_all[:, keep] - z_all[:, keep].mean(axis=0)) / sd[keep]
 
@@ -2314,3 +2336,224 @@ def compare_endpoint_cluster_k_diagnostics(
         max_top_replica_share=max_top_replica_share,
         features_suffix=features_suffix,
     )
+
+
+def load_selected_k(path: Path | str | None) -> dict[str, int]:
+    """Read ``selected_k`` per cohort from a chemical/physical k CSV."""
+    if path is None:
+        return {}
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    sel = pd.read_csv(path)
+    return dict(zip(sel["cohort"].astype(str), sel["selected_k"].astype(int)))
+
+
+def plot_geometry_r2_vs_k(long_df: pd.DataFrame, picked: pd.DataFrame, output_path: Path) -> Path:
+    """Out-of-bag R² vs k, open circles on gated k, stars on the one-SE pick."""
+    import matplotlib.pyplot as plt
+
+    from .murata_rmsd import CUBE_COLORS
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    selected = dict(zip(picked["cohort"].astype(str), picked["selected_k"]))
+    fig, ax = plt.subplots(figsize=(8.5, 4.4), constrained_layout=True)
+    for cube, sub in long_df.groupby("cohort"):
+        sub = sub.sort_values("k")
+        color = CUBE_COLORS.get(str(cube), "0.35")
+        ax.errorbar(
+            sub["k"], sub["geometry_r2_oob"], yerr=sub["geometry_r2_oob_se"], fmt="o-",
+            color=color, lw=1.5, ms=5, capsize=2, label=cube,
+        )
+        passing = sub[_chemical_flag(sub["chemical_separation"])]
+        ax.scatter(
+            passing["k"], passing["geometry_r2_oob"], s=64, facecolors="none",
+            edgecolors=color, lw=1.4, zorder=3,
+        )
+        pick = sub[sub["k"] == selected.get(str(cube))]
+        ax.scatter(pick["k"], pick["geometry_r2_oob"], marker="*", s=180, color=color, zorder=4)
+    ax.set_xlabel("k")
+    ax.set_ylabel("Out-of-bag R² of held-out cage geometry")
+    ax.set_xticks(sorted({int(k) for k in long_df["k"]}))
+    ax.set_title("Open circles: chemical_separation=True; stars: selected k (one-SE). Bars: replica SE.")
+    ax.legend(fontsize=8, ncol=2)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def write_physical_k_selection(
+    *,
+    output_root: Path | str = "output",
+    chem_dir: Path | str,
+    gsa_features_root: Path | str = "output/gsa_features_by_cube",
+    out_dir: Path | str,
+    cubes: Optional[Sequence[str]] = None,
+    k_min: Optional[int] = None,
+    k_max: Optional[int] = None,
+    stride: int = 5,
+    n_bootstrap: int = 500,
+    seed: int = 0,
+    own_elbow: bool = True,
+) -> dict[str, Path]:
+    """Chemical gate, then held-out cage-geometry one-SE rule. Writes physical_k CSVs."""
+    from .gsa_cohort_run import KNOWN_CUBES
+
+    output_root = Path(output_root)
+    chem_dir = Path(chem_dir)
+    gsa_features_root = Path(gsa_features_root)
+    out_dir = Path(out_dir)
+    chem_path = chem_dir / "chemical_separation_by_k.csv"
+    if not chem_path.is_file():
+        raise FileNotFoundError(chem_path)
+    chem = pd.read_csv(chem_path)
+    k_lo = int(k_min) if k_min is not None else int(chem["k"].min())
+    k_hi = int(k_max) if k_max is not None else int(chem["k"].max())
+    parts: list[pd.DataFrame] = []
+    for cube in list(cubes) if cubes is not None else list(KNOWN_CUBES):
+        cp_dir = endpoint_changepoints_dir(output_root, cube, own_elbow=own_elbow)
+        gsa_dir = gsa_features_root / cube
+        if not cp_dir.is_dir() or not gsa_dir.is_dir():
+            continue
+        frames = load_held_out_geometry_frames(gsa_dir, stride=stride)
+        parts.append(
+            score_held_out_geometry_by_k(
+                cp_dir, frames, cube=cube, k_min=k_lo, k_max=k_hi,
+                n_bootstrap=n_bootstrap, random_state=seed,
+            )
+        )
+    if not parts:
+        raise FileNotFoundError("No cohorts scored for physical k")
+    keep = ["cohort", "k", "chemical_separation", "fail_reason", "silhouette", "cluster_sizes"]
+    merged = chem[[c for c in keep if c in chem.columns]].merge(
+        pd.concat(parts, ignore_index=True), on=["cohort", "k"], how="inner"
+    )
+    picked = select_k_one_se(merged, score_col="geometry_r2_oob", se_col="geometry_r2_oob_se")
+    gated = merged[_chemical_flag(merged["chemical_separation"])]
+    picked["gate_only_k"] = picked["cohort"].map(gated.groupby("cohort")["k"].min())
+    nmi_path = chem_dir / "chemical_k_murata_nmi_by_k.csv"
+    sel_path = chem_dir / "chemical_k_selected.csv"
+    if nmi_path.is_file():
+        nmi = pd.read_csv(nmi_path).set_index(["cohort", "k"])["murata_nmi"]
+        picked["murata_nmi_at_selected_k"] = [
+            nmi.get((c, k)) for c, k in zip(picked["cohort"], picked["selected_k"])
+        ]
+    if sel_path.is_file():
+        picked["murata_nmi_selected_k"] = picked["cohort"].map(
+            pd.read_csv(sel_path).set_index("cohort")["selected_k"]
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = {
+        "physical_k_by_k": out_dir / "physical_k_by_k.csv",
+        "physical_k_selected": out_dir / "physical_k_selected.csv",
+        "geometry_r2_vs_k": plot_geometry_r2_vs_k(
+            merged, picked, out_dir / "plots" / "geometry_r2_vs_k.png"
+        ),
+    }
+    merged.to_csv(written["physical_k_by_k"], index=False)
+    picked.to_csv(written["physical_k_selected"], index=False)
+    return written
+
+
+def plot_nmi_vs_k(long_df: pd.DataFrame, picked: pd.DataFrame, output_path: Path) -> Path:
+    """Murata NMI vs k (evaluation plot; not used to choose k in the metastable note)."""
+    import matplotlib.pyplot as plt
+
+    from .murata_rmsd import CUBE_COLORS
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    selected = dict(zip(picked["cohort"].astype(str), picked["selected_k"]))
+    fig, ax = plt.subplots(figsize=(8.5, 4.4), constrained_layout=True)
+    for cube, sub in long_df.groupby("cohort"):
+        sub = sub.sort_values("k")
+        color = CUBE_COLORS.get(str(cube), "0.35")
+        yerr = sub["murata_nmi_se"] if "murata_nmi_se" in sub.columns else None
+        ax.errorbar(
+            sub["k"], sub["murata_nmi"], yerr=yerr, fmt="o-", color=color, lw=1.5, ms=5,
+            capsize=2, label=cube,
+        )
+        pick = sub[sub["k"] == selected.get(str(cube))]
+        if not pick.empty:
+            ax.scatter(pick["k"], pick["murata_nmi"], marker="*", s=180, color=color, zorder=4)
+        passing = sub[_chemical_flag(sub["chemical_separation"])]
+        if not passing.empty:
+            ax.scatter(
+                passing["k"], passing["murata_nmi"], s=64, facecolors="none",
+                edgecolors=color, lw=1.4, zorder=3,
+            )
+    ax.set_xlabel("k")
+    ax.set_ylabel("NMI (cluster vs Murata A/B/C1/C2/other)")
+    ax.set_xticks(sorted({int(k) for k in long_df["k"]}))
+    ax.set_title("Open circles: chemical_separation=True; stars: selected k (one-SE rule). Bars: replica SE.")
+    ax.legend(fontsize=8, ncol=2)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+    return output_path
+
+
+def write_chemical_k_selection(
+    *,
+    output_root: Path | str = "output",
+    chem_dir: Path | str,
+    out_dir: Path | str | None = None,
+    cubes: Optional[Sequence[str]] = None,
+    k_min: Optional[int] = None,
+    k_max: Optional[int] = None,
+    n_bootstrap: int = 500,
+    seed: int = 0,
+    sensitivity_k_max: Sequence[int] = (10,),
+    own_elbow: bool = False,
+) -> dict[str, Path]:
+    """Murata-NMI k among chemically valid cuts (evaluation; not the metastable pick)."""
+    from .gsa_cohort_run import KNOWN_CUBES
+    from .murata_rmsd import (
+        discover_motif_rmsd_csvs_by_cube,
+        label_motif_metastructures,
+        load_motif_rmsd_csvs,
+    )
+
+    output_root = Path(output_root)
+    chem_dir = Path(chem_dir)
+    out_dir = Path(out_dir) if out_dir is not None else chem_dir
+    chem_path = chem_dir / "chemical_separation_by_k.csv"
+    if not chem_path.is_file():
+        raise FileNotFoundError(chem_path)
+    chem = pd.read_csv(chem_path)
+    k_lo = int(k_min) if k_min is not None else int(chem["k"].min())
+    k_hi = int(k_max) if k_max is not None else int(chem["k"].max())
+    wanted = list(cubes) if cubes is not None else list(KNOWN_CUBES)
+    by_cube = discover_motif_rmsd_csvs_by_cube(output_root, cubes=wanted)
+    nmi_parts: list[pd.DataFrame] = []
+    for cube, paths in by_cube.items():
+        cp_dir = endpoint_changepoints_dir(output_root, cube, own_elbow=own_elbow)
+        if not cp_dir.is_dir():
+            continue
+        frames = label_motif_metastructures(load_motif_rmsd_csvs(paths))
+        nmi_parts.append(
+            score_murata_nmi_by_k(
+                cp_dir, frames, cube=cube, k_min=k_lo, k_max=k_hi,
+                n_bootstrap=n_bootstrap, random_state=seed,
+            )
+        )
+    if not nmi_parts:
+        raise FileNotFoundError("No motif CSVs scored for chemical k")
+    nmi = pd.concat(nmi_parts, ignore_index=True)
+    merged = chem.merge(nmi, on=["cohort", "k"], how="left")
+    picked = select_k_by_chemical_information(merged)
+    summary = summarize_chemical_k_selection(merged, picked)
+    sensitivity = chemical_k_rule_sensitivity(merged, [*list(sensitivity_k_max), k_hi])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = {
+        "chemical_k_murata_nmi_by_k": out_dir / "chemical_k_murata_nmi_by_k.csv",
+        "chemical_k_selected": out_dir / "chemical_k_selected.csv",
+        "chemical_k_summary": out_dir / "chemical_k_summary.csv",
+        "chemical_k_rule_sensitivity": out_dir / "chemical_k_rule_sensitivity.csv",
+        "murata_nmi_vs_k": plot_nmi_vs_k(merged, picked, out_dir / "plots" / "murata_nmi_vs_k.png"),
+    }
+    merged.to_csv(written["chemical_k_murata_nmi_by_k"], index=False)
+    picked.to_csv(written["chemical_k_selected"], index=False)
+    summary.to_csv(written["chemical_k_summary"], index=False)
+    sensitivity.to_csv(written["chemical_k_rule_sensitivity"], index=False)
+    return written

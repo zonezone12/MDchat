@@ -508,3 +508,44 @@ def plot_murata_d1_overview(
     fig.savefig(output_path, dpi=140)
     plt.close(fig)
     return output_path
+
+
+def remap_murata_d1_cohorts(
+    *,
+    output_root: Path | str = "output",
+    out_dir: Path | str = "output/murata_d1",
+    traj_dir: Path | str = "traj",
+    cubes: Optional[Sequence[str]] = None,
+) -> dict[str, Path]:
+    """Remap stored site-pair columns onto equatorial Murata d1 for each cube."""
+    output_root = Path(output_root)
+    out_dir = Path(out_dir)
+    traj_dir = Path(traj_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summaries: list[pd.DataFrame] = []
+    frames_by_cohort: dict[str, pd.DataFrame] = {}
+    for cube in list(cubes) if cubes is not None else list(CUBES):
+        cp_dir = output_root / f"endpoint_changepoints_{cube}"
+        topo = traj_dir / f"{cube}_ca.prmtop"
+        if not cp_dir.is_dir() or not topo.is_file():
+            continue
+        written = remap_endpoint_cohort_d1(cp_dir, topo, out_dir / cube)
+        summaries.append(pd.read_csv(written["murata_d1_summary"]))
+        frames_by_cohort[cube] = pd.read_csv(written["murata_d1_frames"])
+    if not summaries:
+        raise FileNotFoundError("No cohorts remapped")
+    summary = pd.concat(summaries, ignore_index=True)
+    written_all: dict[str, Path] = {"murata_d1_summary": out_dir / "murata_d1_summary.csv"}
+    summary.to_csv(written_all["murata_d1_summary"], index=False)
+    maps, edges = [], []
+    for cube in frames_by_cohort:
+        maps.append(pd.read_csv(out_dir / cube / "role_site_map.csv"))
+        edges.append(pd.read_csv(out_dir / cube / "equatorial_edges.csv"))
+    written_all["role_site_map"] = out_dir / "role_site_map.csv"
+    written_all["equatorial_edges"] = out_dir / "equatorial_edges.csv"
+    pd.concat(maps, ignore_index=True).to_csv(written_all["role_site_map"], index=False)
+    pd.concat(edges, ignore_index=True).to_csv(written_all["equatorial_edges"], index=False)
+    plot_path = out_dir / "plots" / "murata_d1_overview.png"
+    plot_murata_d1_overview(summary, frames_by_cohort, plot_path)
+    written_all["murata_d1_overview"] = plot_path
+    return written_all

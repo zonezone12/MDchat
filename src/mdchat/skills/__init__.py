@@ -11,6 +11,7 @@ from . import (  # noqa: F401
     plateau,
     changepoint,
     changepoint_pipeline,
+    metastable_pipeline,
     endpoints,
     plotting,
     scoring,

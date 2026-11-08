@@ -2110,3 +2110,79 @@ def _write_cross_cohort_proxy_plots(
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
         written["plots/proxy_consistency_scatter.png"] = p
+
+
+def rank_endpoint_pairs_at_k(
+    *,
+    output_root: Path | str = "output",
+    out_dir: Path | str,
+    cubes: Optional[Sequence[str]] = None,
+    own_elbow: bool = True,
+    k: Optional[int] = None,
+    k_selected: Optional[Path | str] = None,
+    n_permutations: int = 999,
+    fdr_alpha: float = 0.05,
+    top_n: int = 10,
+) -> dict[str, Path]:
+    """Rank site pairs by η² at each cube's selected (or stored) Ward cut."""
+    from .cluster_k_diagnostics import (
+        chosen_k_from_cohort,
+        load_segments_at_k,
+        load_selected_k,
+        resolve_endpoint_features_dir,
+    )
+    from .gsa_cohort_run import KNOWN_CUBES
+
+    output_root = Path(output_root)
+    out_dir = Path(out_dir)
+    selected_k = load_selected_k(k_selected)
+    top_rows: list[pd.DataFrame] = []
+    fdr_rows: list[dict] = []
+    for cube in list(cubes) if cubes is not None else list(KNOWN_CUBES):
+        cp_dir = endpoint_changepoints_dir(output_root, cube, own_elbow=own_elbow)
+        if not (cp_dir / "clusters" / "endpoint").is_dir():
+            continue
+        cut = k or selected_k.get(cube) or chosen_k_from_cohort(cp_dir, group="endpoint")
+        segs = load_segments_at_k(cp_dir, cut, group="endpoint")
+        if segs.empty:
+            continue
+        ranking = rank_cluster_discriminating_endpoint_features(
+            cp_dir,
+            resolve_endpoint_features_dir(cp_dir),
+            group="endpoint",
+            clustered_df=segs,
+            n_permutations=n_permutations,
+            fdr_alpha=fdr_alpha,
+        )
+        k_dir = cp_dir / "clusters" / "endpoint" / "by_k" / f"k_{int(cut):02d}"
+        k_dir.mkdir(parents=True, exist_ok=True)
+        ranking.to_csv(k_dir / "endpoint_pair_cluster_correlation.csv", index=False)
+        sizes = segs.groupby("cluster_label").size()
+        site = ranking[ranking["feature_kind"] == "site_pair"]
+        top = site.head(top_n).copy()
+        top.insert(0, "k", int(cut))
+        top.insert(0, "cohort", cube)
+        top["best_cluster_size"] = top["best_cluster"].map(sizes).astype("Int64")
+        top_rows.append(top)
+        fdr_rows.append(
+            {
+                "cohort": cube,
+                "k": int(cut),
+                "cluster_sizes": ",".join(str(int(sizes[c])) for c in sorted(sizes.index)),
+                "n_pairs_tested": len(site),
+                "n_fdr_pass": int(site["significant_fdr"].astype(bool).sum()) if "significant_fdr" in site.columns else 0,
+                "n_eta_squared_ge_0_5": int((site["eta_squared"] >= 0.5).sum()),
+                "top_pair": site["endpoint_label"].iloc[0] if len(site) else "",
+                "top_eta_squared": float(site["eta_squared"].iloc[0]) if len(site) else float("nan"),
+            }
+        )
+    if not fdr_rows:
+        raise FileNotFoundError("No cubes ranked")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = {
+        "top_pairs": out_dir / "top_pairs.csv",
+        "fdr_summary": out_dir / "fdr_summary.csv",
+    }
+    pd.concat(top_rows, ignore_index=True).to_csv(written["top_pairs"], index=False)
+    pd.DataFrame(fdr_rows).to_csv(written["fdr_summary"], index=False)
+    return written

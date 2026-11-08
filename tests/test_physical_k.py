@@ -6,6 +6,7 @@ import pandas as pd
 from src.ChangepointAnalysis.cluster_k_diagnostics import (
     _r2_from_stats,
     cluster_sufficient_stats,
+    columns_varying_on_scored_frames,
     held_out_geometry_columns,
     select_k_one_se,
     top_replica_frame_shares,
@@ -57,6 +58,18 @@ def test_out_of_bag_ignores_a_one_trajectory_cluster():
     in_sample = _r2_from_stats(N, S, Q, np.ones(4), np.ones(4))
     assert oob <= 0.0 + 1e-9
     assert in_sample > 0.5
+
+
+def test_column_varying_only_on_unlabeled_frames_is_dropped():
+    values = np.array(
+        [
+            [0.0, 1.0, 6.0],
+            [1.0, 2.0, 6.0],
+            [2.0, 3.0, 4.0],
+        ]
+    )
+    scored = np.array([True, True, False])
+    assert columns_varying_on_scored_frames(values, scored).tolist() == [True, True, False]
 
 
 def test_held_out_columns_exclude_clustering_duplicates():

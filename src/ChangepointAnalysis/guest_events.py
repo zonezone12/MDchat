@@ -105,3 +105,24 @@ def shifted_recall_null(
     return np.array(
         [event_recall(sorted(((ev + s) % n_frames).tolist()), breakpoints, tolerance) for s in shifts]
     )
+
+
+def guest_event_cotiming(**kwargs):
+    """Cohort iodide co-timing. See ``guest_cotiming.guest_event_cotiming``."""
+    from .guest_cotiming import guest_event_cotiming as _run
+
+    return _run(**kwargs)
+
+
+def compare_guest_cage_geometry(**kwargs):
+    """Occupied vs empty cage geometry. See ``guest_geometry.compare_guest_cage_geometry``."""
+    from .guest_geometry import compare_guest_cage_geometry as _run
+
+    return _run(**kwargs)
+
+
+def guest_entry_geometry_response(**kwargs):
+    """Entry-aligned traces. See ``guest_entry_response.guest_entry_geometry_response``."""
+    from .guest_entry_response import guest_entry_geometry_response as _run
+
+    return _run(**kwargs)

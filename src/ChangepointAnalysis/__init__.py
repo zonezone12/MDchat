@@ -84,6 +84,7 @@ from .reporting import (
     plot_jaccard_heatmap,
     plot_timeline,
     rank_cluster_discriminating_endpoint_features,
+    rank_endpoint_pairs_at_k,
     score_cluster_discriminating_features,
     summarize_changepoint_results,
     summarize_endpoint_cluster_proxies,
@@ -97,13 +98,37 @@ from .cluster_k_diagnostics import (
     discover_endpoint_k_cohort_dirs,
     scan_chemical_separation_by_k,
     scan_cohort_chemical_k,
+    score_held_out_geometry_by_k,
     select_k_by_chemical_information,
+    select_k_one_se,
+    write_chemical_k_selection,
+    write_physical_k_selection,
 )
 from .gsa_cohort_run import (
     discover_gsa_feature_csvs_by_cube,
+    run_gsa_step1_cluster_k,
     run_gsa_step1_cohorts,
     stage_cube_feature_dir,
 )
+from .cluster_replicas import audit_cluster_replicas, write_replica_outliers
+from .murata_d1 import remap_murata_d1_cohorts
+from .metastable_catalog import family_ids
+from .catalog_runs import (
+    categorize_cluster_mixtures,
+    compare_to_murata_metastructures,
+    describe_endpoint_clusters,
+    list_annotation_replicas,
+    rank_metastable_structures,
+    summarize_metastable_structures,
+)
+from .guest_cotiming import guest_event_cotiming
+from .guest_geometry import compare_guest_cage_geometry
+from .guest_entry_response import guest_entry_geometry_response
+from .endpoint_cluster_checks import validate_endpoint_clusters
+from .merge_dilution import check_merge_dilution
+from .core_bootstrap import bootstrap_core_match
+from .cage_symmetry import check_cage_symmetry
+from .metastable_pipeline import run_cube_from_trajectories, run_metastable_pipeline
 from .assembly_qc import (
     ASSEMBLY_QC_MIN_COMPONENT_SIZE,
     ASSEMBLY_QC_RG_MAX,
@@ -244,4 +269,29 @@ __all__ = [
     "write_murata_units_ngl_html",
     "write_sweep_artifacts",
     "write_transition_sites_ngl_html",
+    "select_k_one_se",
+    "score_held_out_geometry_by_k",
+    "write_physical_k_selection",
+    "write_chemical_k_selection",
+    "run_gsa_step1_cluster_k",
+    "rank_endpoint_pairs_at_k",
+    "audit_cluster_replicas",
+    "write_replica_outliers",
+    "remap_murata_d1_cohorts",
+    "family_ids",
+    "describe_endpoint_clusters",
+    "rank_metastable_structures",
+    "categorize_cluster_mixtures",
+    "summarize_metastable_structures",
+    "compare_to_murata_metastructures",
+    "list_annotation_replicas",
+    "guest_event_cotiming",
+    "compare_guest_cage_geometry",
+    "guest_entry_geometry_response",
+    "validate_endpoint_clusters",
+    "check_merge_dilution",
+    "bootstrap_core_match",
+    "check_cage_symmetry",
+    "run_metastable_pipeline",
+    "run_cube_from_trajectories",
 ]

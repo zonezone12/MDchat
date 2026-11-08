@@ -282,3 +282,68 @@ def run_gsa_step1_cohorts(
                 component="gsa_cohort_run",
             )
     return result_dirs
+
+
+def run_gsa_step1_cluster_k(
+    *,
+    features_dir: Path | str = "output/gsa_features_step1",
+    output_root: Path | str = "output",
+    out_dir: Path | str | None = None,
+    groups: Sequence[str] = ("gsa",),
+    cubes: Optional[Sequence[str]] = None,
+    n_clusters: int = 5,
+    workers: int = 6,
+    skip_detect: bool = False,
+    force: bool = False,
+    k_from: int = 5,
+    k_to: int = 6,
+) -> dict[str, Path]:
+    """Per-cube GSA changepoint from mixed step-1 CSVs, then k-diagnostics."""
+    from .cluster_k_diagnostics import (
+        compare_cluster_k_diagnostics,
+        discover_cluster_k_cohort_dirs,
+    )
+
+    output_root = Path(output_root)
+    groups = list(groups)
+    written: dict[str, Path] = {}
+    if not skip_detect:
+        result_dirs = run_gsa_step1_cohorts(
+            Path(features_dir),
+            output_root,
+            cubes=cubes,
+            groups=tuple(groups),
+            n_clusters=n_clusters,
+            skip_if_clustered=not force,
+            force=force,
+            workers=workers,
+        )
+        for d in result_dirs:
+            written[f"changepoints_{d.name}"] = d
+    for group in groups:
+        if cubes:
+            cohort_dirs = [
+                d
+                for c in cubes
+                for d in [output_root / f"gsa_changepoints_{c}"]
+                if (d / "clusters" / group / "segments_clustered.csv").exists()
+            ]
+        else:
+            cohort_dirs = discover_cluster_k_cohort_dirs(
+                output_root, "gsa_changepoints_B*", group=group, exclude_test=True
+            )
+        if not cohort_dirs:
+            continue
+        if len(groups) == 1:
+            kdiag = Path(out_dir) if out_dir is not None else Path(f"output/{group}_cluster_k_diagnostics")
+        elif out_dir is None:
+            kdiag = Path(f"output/{group}_cluster_k_diagnostics")
+        else:
+            kdiag = Path(out_dir) / group
+        artifacts = compare_cluster_k_diagnostics(
+            cohort_dirs, kdiag, group=group, k_from=k_from, k_to=k_to
+        )
+        written.update({f"{group}_{name}": path for name, path in artifacts.items()})
+    if not written:
+        raise FileNotFoundError("No clustered cohort directories found")
+    return written

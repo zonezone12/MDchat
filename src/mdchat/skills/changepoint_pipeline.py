@@ -1176,6 +1176,25 @@ class ScanEndpointClusterChemicalKSkill(Skill):
             default=5,
             min_value=1,
         ),
+        Parameter(
+            "max_top_replica_share",
+            ParamType.FLOAT,
+            (
+                "Ignore clusters whose largest replica holds at least this share "
+                "of their frames (0.5 in the metastable note). Omit to skip the cap."
+            ),
+            required=False,
+            default=None,
+            min_value=0.0,
+            max_value=1.0,
+        ),
+        Parameter(
+            "own_elbow",
+            ParamType.BOOLEAN,
+            "Scan the own-elbow detections (OWN_ELBOW_ENDPOINT_DIRS).",
+            required=False,
+            default=False,
+        ),
     ]
     requires: List[str] = []
     produces = ["endpoint_chemical_k_scan"]
@@ -1184,14 +1203,25 @@ class ScanEndpointClusterChemicalKSkill(Skill):
         from pathlib import Path
 
         from src.ChangepointAnalysis import (
+            OWN_ELBOW_ENDPOINT_DIRS,
             discover_endpoint_k_cohort_dirs,
+            endpoint_changepoints_dir,
             scan_chemical_separation_by_k,
         )
 
         root = Path(params.get("output_root") or "output")
         pattern = str(params.get("pattern") or "endpoint_changepoints_B*")
         out_dir = Path(params.get("out_dir") or "output/endpoint_cluster_chemical_k")
-        dirs = discover_endpoint_k_cohort_dirs(root, pattern, exclude_test=True)
+        share = params.get("max_top_replica_share")
+        if params.get("own_elbow"):
+            dirs = [
+                d
+                for cube in OWN_ELBOW_ENDPOINT_DIRS
+                for d in [endpoint_changepoints_dir(root, cube, own_elbow=True)]
+                if (d / "clusters" / "endpoint" / "segments_clustered.csv").exists()
+            ]
+        else:
+            dirs = discover_endpoint_k_cohort_dirs(root, pattern, exclude_test=True)
         if not dirs:
             return SkillResult(
                 success=False,
@@ -1206,6 +1236,9 @@ class ScanEndpointClusterChemicalKSkill(Skill):
                 k_max=int(params.get("k_max", 10)),
                 n_permutations=int(params.get("n_permutations", 999)),
                 min_cluster_size=int(params.get("min_cluster_size", 5)),
+                max_top_replica_share=(
+                    float(share) if share is not None else None
+                ),
             )
         except Exception as exc:
             return SkillResult(

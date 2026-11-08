@@ -9,7 +9,13 @@ from rdkit.Chem.rdmolops import GetDistanceMatrix
 
 
 class EndpointsFinder:
-    """Class for finding molecular endpoints using 2D coordinates and convex hull analysis."""
+    """Find molecular endpoints from a 2D convex hull or a topology-first catalog.
+
+    ``site_source="hull"`` (default) keeps the original depiction-hull pipeline,
+    including ``ring_max_per_ring``.  ``site_source="layered"`` uses Layer 1 of
+    :mod:`src.EndpointAnalyzer.layered_sites`: fused rings, rigid fragments and
+    functional groups, with no landmark quota.
+    """
     
     def __init__(
         self,
@@ -19,7 +25,8 @@ class EndpointsFinder:
         ring_min_gap_deg: Optional[float] = 35.0,
         ring_max_per_ring: int = 3,
         step_back_from_terminals: bool = True,
-        extend_to_ring_atoms: bool = True
+        extend_to_ring_atoms: bool = True,
+        site_source: str = "hull",
     ):
         """
         Initialize the EndpointsFinder with configuration parameters.
@@ -29,10 +36,13 @@ class EndpointsFinder:
             use_graph_farness: Whether to use topological graph farness weighting
             alpha: Weight for graph farness (0.0 = visual only, 1.0 = topology only)
             ring_min_gap_deg: Minimum angular gap between endpoints in rings (None to disable)
-            ring_max_per_ring: Maximum number of endpoints per ring
+            ring_max_per_ring: Maximum number of endpoints per ring (hull path only)
             step_back_from_terminals: If True, step back from H atoms or atoms with only one neighbor
             extend_to_ring_atoms: If True, extend endpoints on rings to include all ring atoms
+            site_source: ``"hull"`` (default) or ``"layered"`` (topology-first sites)
         """
+        if site_source not in ("hull", "layered"):
+            raise ValueError(f"site_source must be 'hull' or 'layered', got {site_source!r}")
         self.angle_tol_deg = angle_tol_deg
         self.use_graph_farness = use_graph_farness
         self.alpha = alpha
@@ -40,6 +50,7 @@ class EndpointsFinder:
         self.ring_max_per_ring = ring_max_per_ring
         self.step_back_from_terminals = step_back_from_terminals
         self.extend_to_ring_atoms = extend_to_ring_atoms
+        self.site_source = site_source
     
     def to_2d_coords(self, mol: Chem.Mol) -> Tuple[Chem.Mol, np.ndarray]:
         """Convert molecule to 2D coordinates."""
@@ -239,6 +250,24 @@ class EndpointsFinder:
 
         return [sorted(atoms) for atoms in systems.values()]
 
+    def find_layered_catalog(self, mol: Chem.Mol):
+        """Layer-1 topology catalog (fused rings, rigid fragments, functional groups)."""
+        from .layered_sites import discover_topology_sites
+
+        return discover_topology_sites(mol)
+
+    def find_layered_sites(self, mol: Chem.Mol, peripheral_only: bool = False) -> List[List[int]]:
+        """Atom-index groups from the topology catalog (no landmark quota)."""
+        catalog = self.find_layered_catalog(mol)
+        sites = catalog.sites
+        if peripheral_only:
+            sites = [s for s in sites if s.peripheral]
+        return [list(s.atom_indices) for s in sites]
+
+    def find_layered_site_info(self, mol: Chem.Mol) -> List[Dict[str, Any]]:
+        """Per-site Layer-1 metadata, including labels, charge, and peripheral flag."""
+        return self.find_layered_catalog(mol).to_records()
+
     def find_endpoint_sites(self, mol: Chem.Mol) -> List[List[int]]:
         """Group endpoints into chemically meaningful sites.
 
@@ -248,7 +277,13 @@ class EndpointsFinder:
 
         Unlike ``find_endpoints`` (which flattens ring atoms into a single list),
         this preserves the site grouping so callers can take ring **centroids**.
+
+        When ``site_source='layered'``, returns the topology catalog instead of
+        the hull-derived sites (still sorted by minimum atom index).
         """
+        if self.site_source == "layered":
+            return self.find_layered_sites(mol)
+
         m2d, endpoints = self._candidate_endpoints(mol)
         if not endpoints:
             return []
@@ -274,6 +309,8 @@ class EndpointsFinder:
 
     def find_endpoint_site_info(self, mol: Chem.Mol) -> List[Dict[str, Any]]:
         """Per-site metadata for ``find_endpoint_sites`` (kind, n_atoms, rep atom)."""
+        if self.site_source == "layered":
+            return self.find_layered_site_info(mol)
         m2d, _ = self._candidate_endpoints(mol)
         sites = self.find_endpoint_sites(mol)
         ring_atoms: set[int] = set()
