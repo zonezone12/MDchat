@@ -87,6 +87,30 @@ def plot_silhouette_by_k(
     return output_path
 
 
+def project_cluster_pca(
+    feature_matrix: np.ndarray,
+    n_components: int,
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Standardize segment features and return PCA scores plus variance ratios.
+
+    Same scaling as the 2D cluster scatter: each feature is z-scored across
+    segments, non-finite values become 0, then PCA is fit on that matrix.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    n = int(feature_matrix.shape[0])
+    n_feat = int(feature_matrix.shape[1]) if feature_matrix.ndim == 2 else 0
+    n_comp = min(int(n_components), n_feat, max(n - 1, 0))
+    if n_comp < 1:
+        return None, None
+
+    scaler = StandardScaler()
+    X = np.nan_to_num(scaler.fit_transform(feature_matrix), nan=0.0)
+    pca = PCA(n_components=n_comp)
+    return pca.fit_transform(X), np.asarray(pca.explained_variance_ratio_, dtype=float)
+
+
 def plot_pca_clusters(
     feature_matrix: np.ndarray,
     labels: np.ndarray,
@@ -97,24 +121,19 @@ def plot_pca_clusters(
 ) -> Optional[Path]:
     """2D PCA scatter colored by cluster label."""
     import matplotlib.pyplot as plt
-    from sklearn.decomposition import PCA
-    from sklearn.preprocessing import StandardScaler
 
     n = feature_matrix.shape[0]
     if n < 3:
         return None
 
+    coords, var = project_cluster_pca(feature_matrix, 2)
+    if coords is None or var is None:
+        return None
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    scaler = StandardScaler()
-    X = scaler.fit_transform(feature_matrix)
-    X = np.nan_to_num(X, nan=0.0)
-
-    n_comp = min(2, X.shape[1], n - 1)
-    pca = PCA(n_components=n_comp)
-    coords = pca.fit_transform(X)
-
+    n_comp = coords.shape[1]
     fig, ax = plt.subplots(figsize=(8, 6))
     unique_labels = sorted(set(int(lab) for lab in labels))
     cmap = plt.cm.tab10
@@ -129,7 +148,6 @@ def plot_pca_clusters(
             c=[cmap(lab % 10)],
         )
 
-    var = pca.explained_variance_ratio_
     xlabel = f"PC1 ({var[0]:.1%} var)" if len(var) > 0 else "PC1"
     ylabel = f"PC2 ({var[1]:.1%} var)" if len(var) > 1 else "PC2"
     ax.set_xlabel(xlabel)
@@ -139,6 +157,137 @@ def plot_pca_clusters(
     ax.grid(alpha=0.2)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return output_path
+
+
+def draw_pca_clusters_3d(
+    ax,
+    coords: np.ndarray,
+    labels: np.ndarray,
+    variance_ratio: np.ndarray,
+    *,
+    title: str,
+    marker_size: float = 18,
+    show_legend: bool = True,
+    elev: float = 18,
+    azim: float = -58,
+) -> None:
+    """Scatter PC1–PC3 on an existing 3D axes, colored by cluster label."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    labels = np.asarray(labels)
+    unique_labels = sorted(set(int(lab) for lab in labels))
+    z_span = float(coords[:, 2].max() - coords[:, 2].min()) or 1.0
+    cmap = plt.cm.tab10
+    # Larger clusters first so smaller ones stay visible on top.
+    order = sorted(unique_labels, key=lambda lab: -int(np.sum(labels == lab)))
+    for lab in order:
+        mask = labels == lab
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            coords[mask, 2],
+            label=f"{lab} (n={int(mask.sum())})",
+            alpha=0.75,
+            s=marker_size,
+            c=[cmap(lab % 10)],
+            depthshade=False,
+            linewidths=0,
+        )
+        ax.scatter(
+            [coords[mask, 0].mean()],
+            [coords[mask, 1].mean()],
+            [coords[mask, 2].mean()],
+            s=marker_size * 3.2,
+            c=[cmap(lab % 10)],
+            edgecolors="k",
+            linewidths=0.6,
+            depthshade=False,
+            zorder=5,
+        )
+        ax.text(
+            float(coords[mask, 0].mean()),
+            float(coords[mask, 1].mean()),
+            float(coords[mask, 2].mean()) + 0.04 * z_span,
+            str(lab),
+            fontsize=8,
+            fontweight="bold",
+            ha="center",
+            va="bottom",
+        )
+
+    def _axis(i: int, name: str) -> str:
+        if i < len(variance_ratio):
+            return f"{name} ({variance_ratio[i]:.1%})"
+        return name
+
+    ax.set_xlabel(_axis(0, "PC1"), labelpad=6, fontsize=8)
+    ax.set_ylabel(_axis(1, "PC2"), labelpad=6, fontsize=8)
+    ax.set_zlabel(_axis(2, "PC3"), labelpad=6, fontsize=8)
+    ax.set_title(title)
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_box_aspect((1, 1, 1))
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.set_facecolor((1, 1, 1, 0))
+        axis.pane.set_edgecolor((0.8, 0.8, 0.8, 1))
+        axis.set_major_locator(MaxNLocator(nbins=4))
+    ax.tick_params(labelsize=7, pad=1)
+    if show_legend:
+        handles, legend_labels = ax.get_legend_handles_labels()
+        order = sorted(range(len(legend_labels)), key=lambda i: int(legend_labels[i].split()[0]))
+        ax.legend(
+            [handles[i] for i in order],
+            [legend_labels[i] for i in order],
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=7,
+            frameon=False,
+            title="cluster",
+            markerscale=1.4,
+        )
+
+
+def plot_pca_clusters_3d(
+    feature_matrix: np.ndarray,
+    labels: np.ndarray,
+    output_path: Union[str, Path],
+    *,
+    title: str,
+    elev: float = 18,
+    azim: float = -58,
+) -> Optional[Path]:
+    """3D PCA scatter (PC1–PC3) colored by cluster label."""
+    import matplotlib.pyplot as plt
+
+    n = feature_matrix.shape[0]
+    if n < 4:
+        return None
+
+    coords, var = project_cluster_pca(feature_matrix, 3)
+    if coords is None or var is None or coords.shape[1] < 3:
+        return None
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(8.2, 6.2))
+    ax = fig.add_subplot(111, projection="3d")
+    draw_pca_clusters_3d(
+        ax,
+        coords,
+        labels,
+        var,
+        title=title,
+        marker_size=22,
+        elev=elev,
+        azim=azim,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    if output_path.suffix.lower() == ".png":
+        fig.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     return output_path
 

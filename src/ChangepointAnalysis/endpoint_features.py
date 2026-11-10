@@ -1028,6 +1028,7 @@ def _draw_endpoint_site_panel(
     sites: Sequence[Sequence[int]],
     *,
     panel_title: str,
+    labels: Optional[Sequence[str]] = None,
 ) -> None:
     """Render one monomer 2D structure with ring (blue) and atom (orange) sites."""
     from rdkit.Chem import Draw
@@ -1062,8 +1063,12 @@ def _draw_endpoint_site_panel(
             ring_mda.extend(ids)
         else:
             atom_mda.extend(ids)
-        role = role_names[site_idx] if site_idx < len(role_names) else ""
-        label = plot_label_for_role(role, kind) if role else f"s{site_idx}:{kind}"
+        if labels is not None and site_idx < len(labels):
+            label = str(labels[site_idx])
+        else:
+            role = role_names[site_idx] if site_idx < len(role_names) else ""
+            role_label = plot_label_for_role(role, kind) if role else kind
+            label = f"s{site_idx} {role_label}"
         # Label at the site representative (min id → centroid proxy atom)
         rep = min(ids) if ids else None
         if rep is not None and rep in mda_to_rdkit:
@@ -1171,14 +1176,14 @@ def plot_endpoint_sites(
     *,
     dpi: int = 150,
     title: Optional[str] = None,
+    site_labels: Optional[Sequence[Sequence[str]]] = None,
 ) -> Path:
     """Save a multi-panel PNG of endpoint sites per monomer for visual QC.
 
     Blue highlights = fused ring-system sites (centroid distances).
     Orange highlights = singleton atom sites (e.g. gear-tooth / ipso carbons).
-    Labels ``R1`` / ``R2`` / ``R3`` / ``Ph`` / ``Py-eq`` / ``Py-pole`` mark
-    Murata chemical roles (canonical GSA map). Hull fallback still uses
-    ``s{k}:R`` / ``s{k}:A``.
+    Each label is the site index plus its role, e.g. ``s0 Ph``, ``s3 R2``,
+    ``s6 R1``. Hull fallback uses ``s{k} R`` / ``s{k} A``.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
@@ -1216,6 +1221,7 @@ def plot_endpoint_sites(
             mon_sel,
             stored_sites[idx],
             panel_title=f"Monomer {idx}",
+            labels=None if site_labels is None else site_labels[idx],
         )
 
     for j in range(n, len(axes_flat)):
