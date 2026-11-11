@@ -69,11 +69,12 @@ class EndpointAnalyzer:
         sel_str: str,
         endpoints_finder: Optional[EndpointsFinder] = None,  # type: ignore[name-defined]
     ) -> Tuple[np.ndarray, List[List[int]]]:
-        """Find endpoint *sites* (ring systems / atoms) as MDA atom-id groups.
+        """Find endpoint sites as MDA atom-id groups.
 
-        Each site is a list of MDA atom ids. Ring-system sites contain all atoms
-        of a fused ring system; atom sites are singletons. Callers that want
-        cation–π style distances should take the mean position of each site.
+        Hull mode (the default) stores the depiction-hull sites, the ring
+        behind each exocyclic methyl, and the para carbon of each bare phenyl.
+        On a GSA monomer that is twelve sites. Layered mode is unchanged.
+        Ring sites are the fused-ring atoms; atom sites are singletons.
         """
         if endpoints_finder is None:
             endpoints_finder = EndpointsFinder()  # type: ignore[call-arg]
@@ -86,18 +87,13 @@ class EndpointAnalyzer:
         if mol is None:
             raise ValueError("RDKit conversion failed")
 
-        from .gsa_site_map import try_classify_gsa_monomer
-
-        gsa_map = try_classify_gsa_monomer(mol)
-        # Layered topology sites are an explicit opt-in; the GSA canonical map
-        # stays the default for hull-mode callers of this method.
-        if (
-            gsa_map is not None
-            and getattr(endpoints_finder, "site_source", "hull") != "layered"
-        ):
-            sites_rdkit = gsa_map.rdkit_site_groups()
-        else:
+        # Layered topology sites are an explicit opt-in. Hull mode stores the
+        # hull plus the ring behind each methyl and the para carbon of each
+        # bare phenyl (the twelve-site set on a GSA monomer).
+        if getattr(endpoints_finder, "site_source", "hull") == "layered":
             sites_rdkit = endpoints_finder.find_endpoint_sites(mol)
+        else:
+            sites_rdkit = endpoints_finder.find_hull_plus_sites(mol)
         sites_mda: List[List[int]] = []
         for site in sites_rdkit:
             mda_ids = [int(sel[rdkit_idx].id) for rdkit_idx in site]

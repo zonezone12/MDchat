@@ -8,11 +8,72 @@ from rdkit.Chem import AllChem
 from rdkit.Chem.rdmolops import GetDistanceMatrix
 
 
+def _site_has_nitrogen(mol: Chem.Mol, atoms: List[int]) -> bool:
+    return any(mol.GetAtomWithIdx(int(i)).GetSymbol() == "N" for i in atoms)
+
+
+def _is_exocyclic_methyl(mol: Chem.Mol, atom_idx: int) -> bool:
+    atom = mol.GetAtomWithIdx(int(atom_idx))
+    if atom.GetSymbol() != "C" or atom.IsInRing():
+        return False
+    return sum(1 for n in atom.GetNeighbors() if n.GetSymbol() == "H") >= 2
+
+
+def _exact_six_ring(mol: Chem.Mol, atoms: List[int]) -> Optional[Tuple[int, ...]]:
+    target = set(int(a) for a in atoms)
+    for ring in mol.GetRingInfo().AtomRings():
+        if len(ring) == 6 and set(ring) == target:
+            return tuple(int(a) for a in ring)
+    return None
+
+
+def _ring_attachment(mol: Chem.Mol, ring_tuple: Tuple[int, ...]) -> Optional[int]:
+    """Ring atom bonded out into a different ring."""
+    ring = set(ring_tuple)
+    for aidx in ring_tuple:
+        atom = mol.GetAtomWithIdx(int(aidx))
+        for nbr in atom.GetNeighbors():
+            if int(nbr.GetIdx()) in ring:
+                continue
+            if nbr.IsInRing():
+                return int(aidx)
+    return None
+
+
+def _methyl_on_ring(mol: Chem.Mol, ring_tuple: Tuple[int, ...]) -> Optional[int]:
+    ring = set(ring_tuple)
+    for aidx in ring:
+        atom = mol.GetAtomWithIdx(int(aidx))
+        for nbr in atom.GetNeighbors():
+            if _is_exocyclic_methyl(mol, int(nbr.GetIdx())):
+                return int(nbr.GetIdx())
+    return None
+
+
+def _attached_ring(
+    mol: Chem.Mol, atom_idx: int, systems: List[List[int]]
+) -> Optional[List[int]]:
+    """Fused ring system bonded to an exocyclic atom, if that atom is not itself in a ring."""
+    atom = mol.GetAtomWithIdx(int(atom_idx))
+    if atom.IsInRing():
+        return None
+    for nbr in atom.GetNeighbors():
+        if not nbr.IsInRing():
+            continue
+        ni = int(nbr.GetIdx())
+        for system in systems:
+            if ni in set(system):
+                return list(system)
+    return None
+
+
 class EndpointsFinder:
     """Find molecular endpoints from a 2D convex hull or a topology-first catalog.
 
-    ``site_source="hull"`` (default) keeps the original depiction-hull pipeline,
-    including ``ring_max_per_ring``.  ``site_source="layered"`` uses Layer 1 of
+    ``site_source="hull"`` (default) keeps the depiction-hull pipeline.
+    Endpoint features call :meth:`find_hull_plus_sites`, which adds the ring
+    behind each methyl and the para carbon of each bare phenyl.
+    ``site_source="layered"`` uses Layer 1 of
     :mod:`src.EndpointAnalyzer.layered_sites`: fused rings, rigid fragments and
     functional groups, with no landmark quota.
     """
@@ -305,6 +366,46 @@ class EndpointsFinder:
                 sites.append(list(ring_systems[sid]))
 
         sites.sort(key=lambda s: (min(s), len(s), s))
+        return sites
+
+    def find_hull_plus_sites(self, mol: Chem.Mol) -> List[List[int]]:
+        """Hull sites, plus the ring behind each methyl and the para carbon of each bare phenyl.
+
+        Order is the hull order, then each added ring, then each added para carbon.
+        The result is not the canonical role index: a GSA monomer keeps twelve
+        groups (the eight Murata groups, both N-methyls, and the two R-benzene
+        rings that are not already one of those eight).
+        """
+        if self.site_source == "layered":
+            return self.find_endpoint_sites(mol)
+
+        from .gsa_site_map import _para_atom
+
+        sites = [list(s) for s in self.find_endpoint_sites(mol)]
+        systems = self._ring_systems(mol)
+        seen = [set(int(a) for a in s) for s in sites]
+
+        def add(site: List[int]) -> None:
+            key = set(int(a) for a in site)
+            if key not in seen:
+                seen.append(key)
+                sites.append([int(a) for a in site])
+
+        for site in list(sites):
+            if len(site) == 1:
+                ring = _attached_ring(mol, site[0], systems)
+                if ring is not None:
+                    add(ring)
+        for site in list(sites):
+            if len(site) != 6 or _site_has_nitrogen(mol, site):
+                continue
+            ring = _exact_six_ring(mol, site)
+            if ring is None or _methyl_on_ring(mol, ring) is not None:
+                continue
+            attach = _ring_attachment(mol, ring)
+            if attach is None:
+                continue
+            add([_para_atom(ring, attach)])
         return sites
 
     def find_endpoint_site_info(self, mol: Chem.Mol) -> List[Dict[str, Any]]:

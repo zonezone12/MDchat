@@ -10,7 +10,9 @@ edges; Murata's d1 is the ipso-carbon pair C2–C3 of those two aryls.
 
 Hull-order site indices (``s3``/``s7``) are not chemically stable: adding a
 methyl converts a ring site into an atom site and shifts every later index.
-This module assigns the same role → site-index on every B* cohort.
+This module assigns the same role → site-index on every B* cohort. Endpoint
+distances do not use that index; they use the hull-plus site list. Paper d1
+and the Murata motifs still look roles up here.
 
 R1 vs R2 (both sit between Ph and a Py+ in the hexagon) are disambiguated by
 core-carbon atom index: on the Amber templates in this repo the higher-index

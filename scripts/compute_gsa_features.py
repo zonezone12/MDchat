@@ -10,6 +10,15 @@ python scripts/compute_gsa_features.py \\
     --guest-selection "resname IOD" \\
     --output-dir output/gsa_features \\
     --stride 10
+
+Endpoint sites only (hull plus methyl rings and phenyl para carbons)::
+
+    python scripts/compute_gsa_features.py \\
+        --topology traj/BMHpM_ca.prmtop \\
+        --trajectories traj/BMHpM_109345_mdcrd_v.trj \\
+        --endpoints-only \\
+        --output-dir output/endpoint_features \\
+        --stride 10
 """
 
 from __future__ import annotations
@@ -188,7 +197,49 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Parallel jobs (1=sequential; >1 uses TrajectoryIterator parallel batches)",
     )
+    parser.add_argument(
+        "--endpoints-only",
+        action="store_true",
+        help=(
+            "Skip GSA nanocube features and write only endpoint-site distances "
+            "(<traj_id>_endpoint_features.csv). Uses the default hull-plus sites. "
+            "Guest, tier, and tooth flags are ignored."
+        ),
+    )
     return parser.parse_args()
+
+
+def _compute_endpoint_features(args, universe, traj_id: str, out_dir: Path, *, first: bool):
+    """Write one trajectory of endpoint-site distances and return the CSV path."""
+    from src.ChangepointAnalysis.endpoint_features import (
+        EndpointFeatureConfig,
+        generate_endpoint_features,
+        write_endpoint_features_csv,
+    )
+
+    feat_cfg = EndpointFeatureConfig(
+        gsa_resname=args.gsa_resname,
+        n_monomers=args.n_monomers,
+        start=args.start,
+        stop=args.stop,
+        step=args.stride,
+        n_jobs=args.n_jobs,
+    )
+    features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
+        generate_endpoint_features(universe, feat_cfg, traj_id=traj_id)
+    )
+    written = write_endpoint_features_csv(
+        features_df,
+        out_dir,
+        traj_id,
+        sites_df=sites_df,
+        d1_atoms_df=d1_atoms_df,
+        universe=universe,
+        monomer_selections=monomer_sels,
+        stored_sites=stored_sites,
+        write_site_plot=first,
+    )
+    return features_df, written["features"]
 
 
 def main() -> None:
@@ -224,6 +275,7 @@ def main() -> None:
                 "gsa_resname": args.gsa_resname,
                 "n_monomers": args.n_monomers,
                 "guest_selection": args.guest_selection,
+                "endpoints_only": bool(args.endpoints_only),
             },
         )
 
@@ -235,29 +287,37 @@ def main() -> None:
                 component="compute_gsa_features",
                 context={"traj_path": str(traj_path), "traj_id": traj_id},
             ):
-                u = mda.Universe(top, str(traj_path),format=args.format)
-                out_prefix = str(out_dir / traj_id)
-                df = compute_gsa_features(
-                    u,
-                    selections=selections,
-                    gsa_resname=args.gsa_resname,
-                    n_monomers=args.n_monomers,
-                    include_tier1=True,
-                    include_tier2=not args.no_tier2,
-                    include_guest=not args.no_guest,
-                    auto_tooth=not args.no_auto_tooth,
-                    ref_frame=args.ref_frame,
-                    contact_cutoff=args.contact_cutoff,
-                    cavity_radius=args.cavity_radius,
-                    traj_id=traj_id,
-                    out_prefix=out_prefix,
-                    start=args.start,
-                    stop=args.stop,
-                    step=args.stride,
-                    n_jobs=args.n_jobs,
-                )
-
-                csv_path = out_dir / f"{traj_id}_gsa_features.csv"
+                u = mda.Universe(top, str(traj_path), format=args.format)
+                if args.endpoints_only:
+                    df, csv_path = _compute_endpoint_features(
+                        args,
+                        u,
+                        traj_id,
+                        out_dir,
+                        first=(traj_path == traj_paths[0]),
+                    )
+                else:
+                    out_prefix = str(out_dir / traj_id)
+                    df = compute_gsa_features(
+                        u,
+                        selections=selections,
+                        gsa_resname=args.gsa_resname,
+                        n_monomers=args.n_monomers,
+                        include_tier1=True,
+                        include_tier2=not args.no_tier2,
+                        include_guest=not args.no_guest,
+                        auto_tooth=not args.no_auto_tooth,
+                        ref_frame=args.ref_frame,
+                        contact_cutoff=args.contact_cutoff,
+                        cavity_radius=args.cavity_radius,
+                        traj_id=traj_id,
+                        out_prefix=out_prefix,
+                        start=args.start,
+                        stop=args.stop,
+                        step=args.stride,
+                        n_jobs=args.n_jobs,
+                    )
+                    csv_path = out_dir / f"{traj_id}_gsa_features.csv"
                 log_event(
                     "artifact_written",
                     str(csv_path),

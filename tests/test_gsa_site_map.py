@@ -112,25 +112,37 @@ def test_cpy_is_para_to_benzene_linker_not_para_to_n() -> None:
     assert _ring_steps(ring_tuple, n_idx, cpy) == 1
 
 
-def test_find_residue_sites_uses_canonical_gsa() -> None:
+def test_default_sites_keep_hull_plus_methyl_rings_and_phenyl_para() -> None:
+    """Default endpoint sites are the twelve groups in the hull-plus figure."""
     pytest.importorskip("rdkit")
     import MDAnalysis as mda
 
     from src.EndpointAnalyzer.EndpointAnalyzer import EndpointAnalyzer
-    from src.EndpointAnalyzer.gsa_site_map import CANONICAL_ROLES
+    from src.EndpointAnalyzer.gsa_site_map import classify_gsa_monomer
     from src.utils.gsa_selections import resolve_selections
 
-    topo = ROOT / "traj" / "BMHpM_ca.prmtop"
-    if not topo.exists():
-        pytest.skip("BMHpM topology not present")
-    u = mda.Universe(str(topo))
-    sels = resolve_selections(u, gsa_resname="MOL", n_monomers=6, auto_tooth=False)
-    _, sites = EndpointAnalyzer.find_residue_endpoint_sites(u, sels.monomer_selections[0])
-    assert len(sites) == len(CANONICAL_ROLES)
-    # r2 / r3 / r1 are singleton atom sites (indices 3, 4, 6)
-    assert [len(s) for s in sites][3] == 1
-    assert [len(s) for s in sites][4] == 1
-    assert [len(s) for s in sites][6] == 1
+    present = [c for c in _EXPECTED_METHYL if (ROOT / "traj" / f"{c}_ca.prmtop").exists()]
+    if not present:
+        pytest.skip("No B* topologies")
+
+    for cube in present:
+        u = mda.Universe(str(ROOT / "traj" / f"{cube}_ca.prmtop"))
+        sels = resolve_selections(u, gsa_resname="MOL", n_monomers=6, auto_tooth=False)
+        for mon_sel in sels.monomer_selections:
+            sel = u.select_atoms(mon_sel)
+            _, sites = EndpointAnalyzer.find_residue_endpoint_sites(u, mon_sel)
+            gsa = classify_gsa_monomer(sel.convert_to("RDKIT"))
+            assert len(sites) == 12, cube
+            stored = [set(int(a) for a in site) for site in sites]
+            for canon in gsa.sites:
+                target = {int(sel[int(i)].id) for i in canon.rdkit_atoms}
+                assert target in stored, f"{cube} missing {canon.role}"
+            extras = [
+                site
+                for site in stored
+                if site not in [{int(sel[int(i)].id) for i in c.rdkit_atoms} for c in gsa.sites]
+            ]
+            assert len(extras) == 4, cube
 
 
 def test_paper_d1_uses_r2_r3_not_hull_s3_s7() -> None:

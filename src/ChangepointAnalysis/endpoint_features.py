@@ -569,6 +569,58 @@ def generate_endpoint_features(
     )
 
 
+def _labels_for_stored_sites(
+    mol: Any,
+    sel: Any,
+    sites: Sequence[Sequence[int]],
+) -> list[tuple[str, str]]:
+    """Name each stored site without renumbering it.
+
+    Returns ``(role, label)``. ``role`` is set only when the atoms are exactly
+    one canonical GSA group. An N-methyl or an R benzene that is not itself a
+    canonical group gets a label and an empty role.
+    """
+    from src.EndpointAnalyzer.gsa_site_map import (
+        plot_label_for_role,
+        try_classify_gsa_monomer,
+    )
+
+    id_to_local = {int(atom.id): i for i, atom in enumerate(sel.atoms)}
+    local_sets: list[set[int]] = []
+    for site in sites:
+        local_sets.append({id_to_local[int(a)] for a in site if int(a) in id_to_local})
+
+    described: list[tuple[str, str]] = [("", "")] * len(sites)
+    gsa = try_classify_gsa_monomer(mol)
+    if gsa is not None:
+        for canon in gsa.sites:
+            target = set(int(a) for a in canon.rdkit_atoms)
+            for j, got in enumerate(local_sets):
+                if got == target and not described[j][0]:
+                    described[j] = (
+                        canon.role,
+                        plot_label_for_role(canon.role, canon.kind),
+                    )
+                    break
+        ring_name = {"r1": "R1 ring", "r2": "R2 ring", "r3": "R3 ring"}
+        for j, got in enumerate(local_sets):
+            if described[j][0] or described[j][1] or len(got) != 6:
+                continue
+            for role, text in ring_name.items():
+                ipso = gsa.by_role(role).ipso_rdkit
+                if ipso is not None and int(ipso) in got:
+                    described[j] = ("", text)
+                    break
+    for j, got in enumerate(local_sets):
+        if described[j][0] or described[j][1] or len(got) != 1:
+            continue
+        atom = mol.GetAtomWithIdx(next(iter(got)))
+        if atom.GetSymbol() == "C" and not atom.IsInRing():
+            if any(n.GetSymbol() == "N" for n in atom.GetNeighbors()):
+                described[j] = ("", "N-Me")
+    return described
+
+
 def _build_sites_dataframe(
     universe: Any,
     monomer_sels: list[str],
@@ -580,26 +632,21 @@ def _build_sites_dataframe(
 ) -> pd.DataFrame:
     """Build a site-map table from stored MDA atom-id groups."""
     rows: list[dict[str, Any]] = []
-    from src.EndpointAnalyzer.gsa_site_map import (
-        plot_label_for_role,
-        try_classify_gsa_monomer,
-    )
 
     for mon_idx, sites in enumerate(stored_sites):
-        roles: list[str] = [""] * len(sites)
+        described: list[tuple[str, str]] = [("", "")] * len(sites)
         sel_str = monomer_sels[mon_idx] if mon_idx < len(monomer_sels) else ""
         if sel_str:
             try:
                 sel = universe.select_atoms(sel_str)
                 mol = sel.convert_to("RDKIT") if len(sel) else None
-                gsa = try_classify_gsa_monomer(mol) if mol is not None else None
-                if gsa is not None and len(gsa.sites) == len(sites):
-                    roles = gsa.roles()
+                if mol is not None:
+                    described = _labels_for_stored_sites(mol, sel, sites)
             except Exception:
-                roles = [""] * len(sites)
+                described = [("", "")] * len(sites)
         for site_idx, atom_ids in enumerate(sites):
             kind = "ring" if (use_ring_centroids and len(atom_ids) > 1) else "atom"
-            role = roles[site_idx] if site_idx < len(roles) else ""
+            role, pretty = described[site_idx] if site_idx < len(described) else ("", "")
             rows.append(
                 {
                     "traj_id": traj_id,
@@ -607,7 +654,7 @@ def _build_sites_dataframe(
                     "monomer_selection": sel_str,
                     "site_index": site_idx,
                     "role": role,
-                    "label": plot_label_for_role(role, kind) if role else "",
+                    "label": pretty,
                     "kind": kind,
                     "n_atoms": len(atom_ids),
                     "atom_ids": " ".join(str(a) for a in atom_ids),
@@ -1035,8 +1082,6 @@ def _draw_endpoint_site_panel(
 
     from src.EndpointAnalyzer import EndpointsFinder
 
-    from src.EndpointAnalyzer.gsa_site_map import plot_label_for_role, try_classify_gsa_monomer
-
     sel = universe.select_atoms(mon_sel)
     mol = sel.convert_to("RDKIT")
     if mol is None:
@@ -1047,8 +1092,7 @@ def _draw_endpoint_site_panel(
     ef = EndpointsFinder()
     m2d, xy = ef.to_2d_coords(mol)
     mda_to_rdkit = {int(sel.atoms[i].id): i for i in range(len(sel))}
-    gsa = try_classify_gsa_monomer(mol)
-    role_names = gsa.roles() if gsa is not None and len(gsa.sites) == len(sites) else []
+    described = _labels_for_stored_sites(mol, sel, sites)
 
     # Ring sites = multi-atom; atom sites = singletons
     ring_mda: list[int] = []
@@ -1066,9 +1110,8 @@ def _draw_endpoint_site_panel(
         if labels is not None and site_idx < len(labels):
             label = str(labels[site_idx])
         else:
-            role = role_names[site_idx] if site_idx < len(role_names) else ""
-            role_label = plot_label_for_role(role, kind) if role else kind
-            label = f"s{site_idx} {role_label}"
+            _role, pretty = described[site_idx] if site_idx < len(described) else ("", "")
+            label = f"s{site_idx} {pretty}" if pretty else f"s{site_idx} {kind}"
         # Label at the site representative (min id → centroid proxy atom)
         rep = min(ids) if ids else None
         if rep is not None and rep in mda_to_rdkit:
