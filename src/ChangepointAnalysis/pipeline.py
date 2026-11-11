@@ -382,6 +382,58 @@ class ChangepointPipeline:
         return artifacts
 
 
+def endpoint_feature_csv(folder: Path, traj_id: str) -> Path:
+    """Path of one ``<traj_id>_endpoint_features.csv`` inside *folder*."""
+    return Path(folder) / f"{traj_id}_endpoint_features.csv"
+
+
+def endpoint_feature_candidates(
+    features_dir: Path,
+    rmsd_from: Optional[str | Path] = None,
+) -> list[Path]:
+    """Directories that may already hold endpoint-feature CSVs.
+
+    ``--rmsd-from`` is checked first (``<rmsd-from>/endpoint_features``, then
+    the directory itself), then the destination features folder.
+    """
+    ordered: list[Path] = []
+    if rmsd_from:
+        root = Path(rmsd_from)
+        ordered.append(root / "endpoint_features")
+        ordered.append(root)
+    ordered.append(Path(features_dir))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for folder in ordered:
+        key = folder.resolve() if folder.exists() else folder
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(folder)
+    return unique
+
+
+def directory_with_endpoint_features(
+    folders: Sequence[Path],
+    traj_ids: Sequence[str],
+) -> Optional[Path]:
+    """Return the first folder that already has a non-empty CSV for every id."""
+    if not traj_ids:
+        return None
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        ready = True
+        for traj_id in traj_ids:
+            path = endpoint_feature_csv(folder, traj_id)
+            if not path.is_file() or path.stat().st_size == 0:
+                ready = False
+                break
+        if ready:
+            return folder
+    return None
+
+
 def run_endpoint_changepoint(
     topology: str | Path,
     trajectories: Sequence[str | Path],
@@ -420,6 +472,7 @@ def run_endpoint_changepoint(
     transition_attribution: Optional[EndpointTransitionAttributionConfig] = None,
     rmsd_from: Optional[str | Path] = None,
     universe_factory: Optional[Any] = None,
+    force: bool = False,
 ) -> dict[str, Path]:
     """Generate endpoint-site features then run the changepoint pipeline.
 
@@ -429,7 +482,11 @@ def run_endpoint_changepoint(
         Shared topology and one or more trajectory paths.
     rmsd_from
         Optional directory of ``*_gsa_features.csv`` used to overlay
-        ``assembly_rmsd_to_ref`` on the deformation comparison.
+        ``assembly_rmsd_to_ref`` on the deformation comparison. If this
+        directory, or ``<rmsd_from>/endpoint_features``, already holds an
+        ``*_endpoint_features.csv`` for every trajectory, those files are
+        reused and the trajectory is not read again. Pass ``force=True`` to
+        regenerate them.
     skip_transition_attribution
         If False (default), after clustering attribute directed cluster
         transitions to raw site-pair columns. Requires ``include_site_pairs``.
@@ -460,9 +517,8 @@ def run_endpoint_changepoint(
     )
 
     output_dir = Path(output_dir)
-    features_dir = Path(features_dir) if features_dir else output_dir / "endpoint_features"
-    features_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    dest_features = Path(features_dir) if features_dir else output_dir / "endpoint_features"
 
     traj_paths = [Path(p) for p in trajectories]
     if traj_ids is None:
@@ -471,6 +527,20 @@ def run_endpoint_changepoint(
         ids = list(traj_ids)
         if len(ids) != len(traj_paths):
             raise ValueError("traj_ids length must match trajectories")
+
+    reuse_dir = None if force else directory_with_endpoint_features(
+        endpoint_feature_candidates(dest_features, rmsd_from),
+        ids,
+    )
+    if reuse_dir is not None:
+        features_dir = reuse_dir
+        print(
+            f"Reusing {len(ids)} endpoint feature CSV(s) in {features_dir}",
+            flush=True,
+        )
+    else:
+        features_dir = dest_features
+        features_dir.mkdir(parents=True, exist_ok=True)
 
     n_workers = _resolve_traj_workers(traj_jobs, len(traj_paths))
     # Avoid nested parallel: multi-traj workers → sequential frames unless set.
@@ -506,12 +576,15 @@ def run_endpoint_changepoint(
     last_stored_sites = None
 
     use_parallel_trajs = (
-        n_workers > 1
+        reuse_dir is None
+        and n_workers > 1
         and len(traj_paths) > 1
         and universe_factory is None
     )
 
-    if use_parallel_trajs:
+    if reuse_dir is not None:
+        pass
+    elif use_parallel_trajs:
         print(
             f"Extracting endpoint features for {len(traj_paths)} trajectories "
             f"with traj_jobs={n_workers} (frame n_jobs={frame_n_jobs!r})",

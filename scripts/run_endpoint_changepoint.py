@@ -168,7 +168,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--rmsd-from",
         default=None,
-        help="Optional directory of *_gsa_features.csv for assembly_rmsd_to_ref overlay",
+        help=(
+            "Directory of *_gsa_features.csv for the assembly-RMSD overlay. "
+            "If <path>/endpoint_features (or <path> itself) already contains "
+            "every *_endpoint_features.csv, those files are reused."
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate endpoint feature CSVs even when they already exist",
     )
     p.add_argument("--method", default="Pelt")
     p.add_argument("--cost-model", default="rbf")
@@ -299,6 +308,7 @@ def main() -> None:
             skip_transition_attribution=args.skip_transition_attribution,
             transition_attribution=transition_cfg,
             rmsd_from=args.rmsd_from,
+            force=args.force,
         )
 
     print("Artifacts:")
