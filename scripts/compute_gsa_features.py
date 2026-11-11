@@ -16,7 +16,7 @@ Endpoint sites only (hull plus methyl rings and phenyl para carbons)::
     python scripts/compute_gsa_features.py \\
         --topology traj/BMHpM_ca.prmtop \\
         --trajectories traj/BMHpM_109345_mdcrd_v.trj \\
-        --endpoints-only \\
+        --endpoints-only --include-site-pairs \\
         --output-dir output/endpoint_features \\
         --stride 10
 """
@@ -203,7 +203,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Skip GSA nanocube features and write only endpoint-site distances "
             "(<traj_id>_endpoint_features.csv). Uses the default hull-plus sites. "
-            "Guest, tier, and tooth flags are ignored."
+            "Guest, tier, and tooth flags are ignored. Does not run changepoints."
+        ),
+    )
+    parser.add_argument(
+        "--include-site-pairs",
+        action="store_true",
+        help=(
+            "With --endpoints-only, also write endpoint_dist_{i}s{a}_{j}s{b} "
+            "columns. Ignored for the GSA feature pass."
         ),
     )
     return parser.parse_args()
@@ -224,6 +232,7 @@ def _compute_endpoint_features(args, universe, traj_id: str, out_dir: Path, *, f
         stop=args.stop,
         step=args.stride,
         n_jobs=args.n_jobs,
+        include_site_pairs=bool(args.include_site_pairs),
     )
     features_df, sites_df, monomer_sels, stored_sites, d1_atoms_df = (
         generate_endpoint_features(universe, feat_cfg, traj_id=traj_id)
