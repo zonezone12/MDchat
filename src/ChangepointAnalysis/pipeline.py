@@ -387,30 +387,9 @@ def endpoint_feature_csv(folder: Path, traj_id: str) -> Path:
     return Path(folder) / f"{traj_id}_endpoint_features.csv"
 
 
-def endpoint_feature_candidates(
-    features_dir: Path,
-    rmsd_from: Optional[str | Path] = None,
-) -> list[Path]:
-    """Directories that may already hold endpoint-feature CSVs.
-
-    ``--rmsd-from`` is checked first (``<rmsd-from>/endpoint_features``, then
-    the directory itself), then the destination features folder.
-    """
-    ordered: list[Path] = []
-    if rmsd_from:
-        root = Path(rmsd_from)
-        ordered.append(root / "endpoint_features")
-        ordered.append(root)
-    ordered.append(Path(features_dir))
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for folder in ordered:
-        key = folder.resolve() if folder.exists() else folder
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(folder)
-    return unique
+def endpoint_feature_candidates(features_dir: Path) -> list[Path]:
+    """The endpoint-features folder. ``--rmsd-from`` is not searched."""
+    return [Path(features_dir)]
 
 
 def directory_with_endpoint_features(
@@ -480,13 +459,14 @@ def run_endpoint_changepoint(
     ----------
     topology, trajectories
         Shared topology and one or more trajectory paths.
+    features_dir
+        Endpoint-features folder. When it already holds a non-empty
+        ``*_endpoint_features.csv`` for every trajectory, those files are
+        reused. ``force=True`` regenerates them. This is separate from
+        ``rmsd_from``.
     rmsd_from
         Optional directory of ``*_gsa_features.csv`` used to overlay
-        ``assembly_rmsd_to_ref`` on the deformation comparison. If this
-        directory, or ``<rmsd_from>/endpoint_features``, already holds an
-        ``*_endpoint_features.csv`` for every trajectory, those files are
-        reused and the trajectory is not read again. Pass ``force=True`` to
-        regenerate them.
+        ``assembly_rmsd_to_ref`` on the deformation comparison.
     skip_transition_attribution
         If False (default), after clustering attribute directed cluster
         transitions to raw site-pair columns. Requires ``include_site_pairs``.
@@ -529,7 +509,7 @@ def run_endpoint_changepoint(
             raise ValueError("traj_ids length must match trajectories")
 
     reuse_dir = None if force else directory_with_endpoint_features(
-        endpoint_feature_candidates(dest_features, rmsd_from),
+        endpoint_feature_candidates(dest_features),
         ids,
     )
     if reuse_dir is not None:

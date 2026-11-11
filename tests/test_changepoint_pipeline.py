@@ -1332,27 +1332,26 @@ def test_merge_tables_by_group_keeps_existing(tmp_path: Path) -> None:
     ]
 
 
-def test_reuses_endpoint_features_under_rmsd_from(tmp_path: Path) -> None:
+def test_reuses_endpoint_features_from_features_dir(tmp_path: Path) -> None:
     from src.ChangepointAnalysis.pipeline import (
         directory_with_endpoint_features,
         endpoint_feature_candidates,
     )
 
-    rmsd = tmp_path / "gsa_features"
-    ready = rmsd / "endpoint_features"
-    ready.mkdir(parents=True)
+    ready = tmp_path / "endpoint_features"
+    ready.mkdir()
     (ready / "109345_mdcrd_v_endpoint_features.csv").write_text("frame\n0\n", encoding="utf-8")
     (ready / "891249_mdcrd_v_endpoint_features.csv").write_text("frame\n0\n", encoding="utf-8")
-    dest = tmp_path / "out" / "endpoint_features"
     found = directory_with_endpoint_features(
-        endpoint_feature_candidates(dest, rmsd),
+        endpoint_feature_candidates(ready),
         ["109345_mdcrd_v", "891249_mdcrd_v"],
     )
     assert found == ready
+    assert endpoint_feature_candidates(ready) == [ready]
     (ready / "891249_mdcrd_v_endpoint_features.csv").write_text("", encoding="utf-8")
     assert (
         directory_with_endpoint_features(
-            endpoint_feature_candidates(dest, rmsd),
+            endpoint_feature_candidates(ready),
             ["109345_mdcrd_v", "891249_mdcrd_v"],
         )
         is None

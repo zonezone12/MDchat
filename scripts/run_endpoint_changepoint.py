@@ -163,16 +163,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--features-dir",
         default=None,
-        help="Where to write *_endpoint_features.csv (default: <output-dir>/endpoint_features)",
+        help=(
+            "Path to the endpoint_features folder. Existing "
+            "*_endpoint_features.csv files there are reused. "
+            "Default: <output-dir>/endpoint_features."
+        ),
     )
     p.add_argument(
         "--rmsd-from",
         default=None,
-        help=(
-            "Directory of *_gsa_features.csv for the assembly-RMSD overlay. "
-            "If <path>/endpoint_features (or <path> itself) already contains "
-            "every *_endpoint_features.csv, those files are reused."
-        ),
+        help="Directory of *_gsa_features.csv for the assembly-RMSD overlay",
     )
     p.add_argument(
         "--force",
